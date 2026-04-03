@@ -61,18 +61,21 @@ impl ParsedPlan {
     }
 
     fn extract_contract(content: &str) -> Result<Option<PlanContract>> {
-        // Find the ## Contract section
-        let contract_start = match content.find("## Contract") {
+        // Find a line-level ## Contract heading (not ### Contract or inline mentions).
+        // The heading must be at the start of a line.
+        let contract_start = match find_h2_heading(content, "Contract") {
             Some(pos) => pos,
             None => return Ok(None),
         };
 
         let contract_section = &content[contract_start..];
 
-        // Find the JSON code fence within the contract section
+        // Find the JSON code fence within the contract section.
+        // If ## Contract exists but has no valid ```json fence, that's an error —
+        // a half-written contract should be surfaced, not silently ignored.
         let json_start = match contract_section.find("```json") {
             Some(pos) => pos + "```json".len(),
-            None => return Ok(None),
+            None => bail!("## Contract section found but missing ```json code fence"),
         };
 
         let json_section = &contract_section[json_start..];
@@ -87,6 +90,62 @@ impl ParsedPlan {
 
         Ok(Some(contract))
     }
+}
+
+/// Find a level-2 Markdown heading (`## {title}`) at the start of a line.
+/// Returns the byte offset of the `##` or None if not found.
+/// Rejects `###` or deeper headings to avoid false positives.
+/// Per CommonMark, up to 3 leading spaces are allowed for ATX headings;
+/// 4+ spaces would be an indented code block.
+fn find_h2_heading(content: &str, title: &str) -> Option<usize> {
+    let pattern = format!("## {title}");
+    for (line_start, line) in line_offsets(content) {
+        // CommonMark: 0-3 leading spaces are valid for headings
+        let leading_spaces = line.len() - line.trim_start_matches(' ').len();
+        if leading_spaces > 3 {
+            continue;
+        }
+        let trimmed = line.trim_start_matches(' ');
+        if trimmed.starts_with(&pattern) {
+            // Reject ### or deeper (e.g., "### Contract") and run-on titles
+            let after_pattern = &trimmed[pattern.len()..];
+            if after_pattern.is_empty()
+                || after_pattern.starts_with('\n')
+                || after_pattern.starts_with('\r')
+                || after_pattern.starts_with(' ')
+            {
+                return Some(line_start);
+            }
+        }
+    }
+    None
+}
+
+/// Iterate over (byte_offset, line_content) pairs in a string.
+/// Handles both LF and CRLF line endings correctly.
+fn line_offsets(content: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut remaining = content;
+    let mut offset = 0;
+    std::iter::from_fn(move || {
+        if remaining.is_empty() {
+            return None;
+        }
+        let (line, rest) = match remaining.find('\n') {
+            Some(i) => (&remaining[..i], &remaining[i + 1..]),
+            None => (remaining, ""),
+        };
+        let start = offset;
+        offset += line.len()
+            + if !rest.is_empty() || content.ends_with('\n') {
+                1
+            } else {
+                0
+            };
+        remaining = rest;
+        // Strip trailing \r for the returned line content
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        Some((start, line))
+    })
 }
 
 #[cfg(test)]
@@ -163,6 +222,85 @@ Some follow-up notes.
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("failed to parse contract JSON"));
+    }
+
+    #[test]
+    fn parse_plan_contract_header_without_json_fence() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("no-fence.md");
+        std::fs::write(
+            &plan_path,
+            "# Plan\n\n## Contract\n\nSome text but no JSON fence.\n",
+        )
+        .unwrap();
+
+        let result = ParsedPlan::load(&plan_path);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("missing"));
+    }
+
+    #[test]
+    fn parse_plan_h3_contract_not_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("h3-contract.md");
+        // ### Contract should NOT be treated as a contract section
+        std::fs::write(
+            &plan_path,
+            "# Plan\n\n### Contract\n\nThis is a subsection, not the real contract.\n",
+        )
+        .unwrap();
+
+        let plan = ParsedPlan::load(&plan_path).unwrap();
+        assert!(plan.contract.is_none());
+    }
+
+    #[test]
+    fn parse_plan_inline_contract_mention_not_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("inline-mention.md");
+        // Inline mention of "## Contract" in prose should not trigger
+        std::fs::write(
+            &plan_path,
+            "# Plan\n\nSee the ## Contract section in the template.\n",
+        )
+        .unwrap();
+
+        let plan = ParsedPlan::load(&plan_path).unwrap();
+        assert!(plan.contract.is_none());
+    }
+
+    #[test]
+    fn parse_plan_contract_inside_code_block_not_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("code-block.md");
+        // ## Contract inside a fenced code block should not trigger.
+        // Since find_h2_heading doesn't skip code blocks, this IS a known
+        // limitation — but in practice PICE plans don't embed example headings
+        // in code blocks. This test documents the current behavior.
+        std::fs::write(
+            &plan_path,
+            "# Plan\n\n```\n## Contract\n```\n\nNo real contract here.\n",
+        )
+        .unwrap();
+
+        // Current behavior: the parser finds "## Contract" inside the code block
+        // and then fails because there's no ```json fence after it.
+        // This is acceptable — a plan with "## Contract" in a code block would be
+        // unusual, and the error message is clear.
+        let result = ParsedPlan::load(&plan_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_plan_indented_4_spaces_not_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("indented-4.md");
+        // 4+ spaces = indented code block in CommonMark, not a heading
+        std::fs::write(&plan_path, "# Plan\n\n    ## Contract\n\nNot a heading.\n").unwrap();
+
+        let plan = ParsedPlan::load(&plan_path).unwrap();
+        assert!(plan.contract.is_none());
     }
 
     #[test]

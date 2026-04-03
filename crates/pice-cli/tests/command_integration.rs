@@ -1,4 +1,4 @@
-//! Integration tests for Phase 2 commands (plan, execute, evaluate).
+//! Integration tests for Phase 2 and Phase 3 commands.
 //!
 //! These tests use `assert_cmd` to invoke the pice binary with the stub provider.
 //! They verify the full CLI pipeline without requiring real API keys.
@@ -355,4 +355,267 @@ db_path = ".pice/metrics.db"
         .assert()
         .success()
         .stdout(predicate::str::contains("\"passed\": true"));
+}
+
+// ═══ Phase 3 Tests ═══════════════════════════════════════════════════════════
+
+// ─── Phase 3: Help / Flag Tests ──────────────────────────────────────────────
+
+#[test]
+fn prime_command_shows_json_flag_in_help() {
+    pice_cmd()
+        .arg("prime")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"));
+}
+
+#[test]
+fn review_command_shows_json_flag_in_help() {
+    pice_cmd()
+        .arg("review")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"));
+}
+
+#[test]
+fn commit_command_shows_flags_in_help() {
+    pice_cmd()
+        .arg("commit")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--message"))
+        .stdout(predicate::str::contains("--dry-run"));
+}
+
+#[test]
+fn handoff_command_shows_flags_in_help() {
+    pice_cmd()
+        .arg("handoff")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--output"));
+}
+
+#[test]
+fn status_command_shows_json_flag_in_help() {
+    pice_cmd()
+        .arg("status")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"));
+}
+
+// ─── Phase 3: Status (no provider needed) ────────────────────────────────────
+
+#[test]
+fn status_command_no_plans_directory() {
+    let dir = tempfile::tempdir().unwrap();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"plans\": []"));
+}
+
+#[test]
+fn status_command_shows_plans() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Init git repo so git info is populated
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    // Create a plan file
+    create_plan_with_contract(dir.path());
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"title\": \"Feature: Test Plan\"",
+        ))
+        .stdout(predicate::str::contains("\"has_contract\": true"));
+}
+
+#[test]
+fn status_command_shows_malformed_plans() {
+    let dir = tempfile::tempdir().unwrap();
+    let plans_dir = dir.path().join(".claude/plans");
+    fs::create_dir_all(&plans_dir).unwrap();
+    fs::write(
+        plans_dir.join("bad-plan.md"),
+        "# Bad Plan\n\n## Contract\n\n```json\n{invalid}\n```\n",
+    )
+    .unwrap();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"parse_error\""));
+}
+
+// ─── Phase 3: Stub Provider Pipeline Tests ───────────────────────────────────
+
+/// Helper: set up a stub project with an initialized git repo.
+fn setup_stub_project_with_git() -> tempfile::TempDir {
+    let dir = setup_stub_project();
+
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    dir
+}
+
+#[test]
+fn phase3_prime_command_with_stub_provider() {
+    let dir = setup_stub_project_with_git();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("prime")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+}
+
+#[test]
+fn phase3_review_command_with_stub_provider() {
+    let dir = setup_stub_project_with_git();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("review")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+}
+
+#[test]
+fn phase3_commit_command_dry_run_with_stub_provider() {
+    let dir = setup_stub_project_with_git();
+
+    // Modify a tracked file so git add -u will stage it
+    let config_path = dir.path().join(".pice/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("\n# modified\n");
+    fs::write(&config_path, config).unwrap();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("commit")
+        .arg("--dry-run")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"dry_run\""))
+        .stdout(predicate::str::contains("\"message\""));
+}
+
+#[test]
+fn phase3_handoff_command_with_stub_provider() {
+    let dir = setup_stub_project_with_git();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("handoff")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""))
+        .stdout(predicate::str::contains("\"path\""));
+
+    // Verify HANDOFF.md was written
+    assert!(dir.path().join("HANDOFF.md").exists());
+}
+
+// ─── Phase 3: Error Path Tests ───────────────────────────────────────────────
+
+#[test]
+fn phase3_commit_nothing_to_commit() {
+    let dir = setup_stub_project_with_git();
+
+    // Clean repo — nothing to commit
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("commit")
+        .arg("--json")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("nothing to commit"));
+}
+
+#[test]
+fn phase3_commit_untracked_only_fails() {
+    let dir = setup_stub_project_with_git();
+
+    // Create only untracked files — git add -u won't stage them
+    fs::write(dir.path().join("untracked-only.txt"), "hello").unwrap();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("commit")
+        .arg("--message")
+        .arg("test commit")
+        .arg("--json")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("nothing staged to commit"));
 }

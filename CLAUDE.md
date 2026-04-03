@@ -48,7 +48,7 @@ pnpm typecheck                 # Type check (tsc --noEmit)
 cargo fmt --check && cargo clippy -- -D warnings && cargo test && pnpm lint && pnpm typecheck && pnpm test && pnpm build && cargo build --release
 ```
 
-**Expected baseline:** 76 Rust tests, 49 TypeScript tests, 0 lint errors, 0 warnings, clean release build.
+**Expected baseline:** 121 Rust tests, 49 TypeScript tests, 0 lint errors, 0 warnings, clean release build.
 
 ---
 
@@ -137,6 +137,17 @@ pice (Rust binary)
 ### CLI Output
 - Every command supports `--json` for machine-readable output. When `--json` is passed, suppress human-friendly messages (`println!`) and emit a single JSON object to stdout.
 - Exit codes: 0 = success, 1 = failure, 2 = evaluation failed (contract criteria not met).
+
+### Session Lifecycle
+- All provider-backed commands use `session::run_session()` or `session::run_session_and_capture()` from `engine/session.rs`. Never duplicate the create → send → destroy lifecycle in command files.
+- For streaming output in text mode, use `session::streaming_handler()` — not inline notification handler closures.
+- Commands that need the AI's response text (commit, handoff) use `run_session_and_capture()`. Commands that only stream (prime, review, plan, execute) use `run_session()`.
+- The caller registers the notification handler before calling `run_session()`. The session module owns the handler for `run_session_and_capture()`.
+
+### Git Index Safety
+- Commands that auto-stage (`git add -u`) must track whether they did so and restore the index (`git reset`) on all non-commit exit paths (dry-run, errors, empty messages).
+- Never generate commit messages from a diff that includes files outside the staged set. Stage first, then build the prompt from `get_staged_diff()`.
+- Check `git status` exit code before inspecting stdout — non-git directories return empty stdout but non-zero exit.
 
 ### Phase Scaffolding
 - Code intended for future phases uses `#[allow(dead_code)]` with a comment explaining which phase will use it (e.g., `/// Used by interactive sessions in Phase 3+.`). This keeps the codebase warning-free while allowing architectural scaffolding.

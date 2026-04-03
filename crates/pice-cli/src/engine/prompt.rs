@@ -169,6 +169,236 @@ pub fn get_git_diff(project_root: &Path) -> Result<String> {
     Ok(parts.join("\n"))
 }
 
+/// Get the last N git commit messages as one-line summaries.
+/// Returns empty string if not in a git repo or HEAD is unborn.
+pub fn get_git_log(project_root: &Path, count: usize) -> Result<String> {
+    let output = Command::new("git")
+        .args(["log", "--oneline", &format!("-{count}")])
+        .current_dir(project_root)
+        .output()
+        .context("failed to run git log")?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// Get a short git status summary (staged, modified, untracked files).
+/// Returns empty string if not in a git repo.
+pub fn get_git_status_summary(project_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(project_root)
+        .output()
+        .context("failed to run git status")?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// Get the staged diff (git diff --cached).
+/// Returns empty string if nothing is staged.
+pub fn get_staged_diff(project_root: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["diff", "--cached"])
+        .current_dir(project_root)
+        .output()
+        .context("failed to run git diff --cached")?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// Get a tree-like directory listing (depth 3), excluding common noise directories.
+/// Uses POSIX `find` — macOS/Linux only. Not available on Windows.
+pub fn get_project_tree(project_root: &Path) -> Result<String> {
+    let output = Command::new("find")
+        .args([
+            ".",
+            "-maxdepth",
+            "3",
+            "-not",
+            "-path",
+            "*/node_modules/*",
+            "-not",
+            "-path",
+            "*/.git/*",
+            "-not",
+            "-path",
+            "*/dist/*",
+            "-not",
+            "-path",
+            "*/target/*",
+            "-not",
+            "-path",
+            "*/.next/*",
+            "-not",
+            "-path",
+            "*/__pycache__/*",
+        ])
+        .current_dir(project_root)
+        .output()
+        .context("failed to run find for project tree")?;
+    if output.status.success() {
+        let raw = String::from_utf8_lossy(&output.stdout).to_string();
+        // Sort lines for deterministic output
+        let mut lines: Vec<&str> = raw.lines().collect();
+        lines.sort();
+        Ok(lines.join("\n"))
+    } else {
+        Ok(String::new())
+    }
+}
+
+/// Build the prime (codebase orientation) prompt.
+pub fn build_prime_prompt(project_root: &Path) -> Result<String> {
+    let claude_md = read_claude_md(project_root)?;
+    let tree = get_project_tree(project_root)?;
+    let git_log = get_git_log(project_root, 15)?;
+    let git_status = get_git_status_summary(project_root)?;
+    let existing_handoff = read_existing_handoff(project_root);
+
+    let handoff_section = if existing_handoff.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Prior Session Handoff (HANDOFF.md)\n\n\
+             Reconcile these items against git history — resolve completed items, \
+             carry forward open ones:\n\n{existing_handoff}\n\n"
+        )
+    };
+
+    let handoff_bullet = if existing_handoff.is_empty() {
+        ""
+    } else {
+        "\n         - Handoff status: which items from prior session are resolved vs. still open"
+    };
+
+    Ok(format!(
+        "You are orienting on a codebase.\n\n\
+         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Project Structure\n\n```\n{tree}\n```\n\n\
+         ## Recent Git History\n\n```\n{git_log}\n```\n\n\
+         ## Git Status\n\n```\n{git_status}\n```\n\n\
+         {handoff_section}\
+         ## Instructions\n\n\
+         Orient on this codebase. Summarize:\n\
+         - Project overview and purpose\n\
+         - Tech stack and key libraries\n\
+         - Architecture and code organization\n\
+         - Current state and recent work{handoff_bullet}\n\
+         - Recommended next actions"
+    ))
+}
+
+/// Build the review (code review) prompt.
+pub fn build_review_prompt(project_root: &Path) -> Result<String> {
+    let claude_md = read_claude_md(project_root)?;
+    let diff = get_git_diff(project_root)?;
+    let git_status = get_git_status_summary(project_root)?;
+
+    Ok(format!(
+        "You are reviewing code changes.\n\n\
+         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Code Changes\n\n```diff\n{diff}\n```\n\n\
+         ## Git Status\n\n```\n{git_status}\n```\n\n\
+         ## Instructions\n\n\
+         Review these code changes. Check for:\n\
+         - Logic errors and edge cases\n\
+         - Security issues\n\
+         - Convention violations\n\
+         - Regressions and breaking changes\n\
+         Report findings by severity: critical, warning, info."
+    ))
+}
+
+/// Build the commit message generation prompt.
+/// Uses only the staged diff so the message describes exactly what will be committed.
+pub fn build_commit_prompt(project_root: &Path) -> Result<String> {
+    let claude_md = read_claude_md(project_root)?;
+    let diff = get_staged_diff(project_root)?;
+    let git_log = get_git_log(project_root, 5)?;
+
+    Ok(format!(
+        "You are generating a commit message.\n\n\
+         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Changes to Commit\n\n```diff\n{diff}\n```\n\n\
+         ## Recent Commits (for style reference)\n\n```\n{git_log}\n```\n\n\
+         ## Instructions\n\n\
+         Generate a commit message following the project conventions.\n\
+         Use the tag(scope): description format.\n\
+         Output ONLY the commit message text, no markdown fences or extra commentary."
+    ))
+}
+
+/// Build the session handoff prompt.
+pub fn build_handoff_prompt(project_root: &Path) -> Result<String> {
+    let claude_md = read_claude_md(project_root)?;
+    let git_log = get_git_log(project_root, 10)?;
+    let git_status = get_git_status_summary(project_root)?;
+
+    // Include existing HANDOFF.md so the new handoff can preserve unresolved items
+    let existing_handoff = read_existing_handoff(project_root);
+
+    // List active plan files
+    let plans_dir = project_root.join(".claude/plans");
+    let plans_list = if plans_dir.is_dir() {
+        let mut plans = Vec::new();
+        for entry in
+            std::fs::read_dir(&plans_dir).context("failed to read .claude/plans directory")?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    plans.push(format!("- .claude/plans/{name}"));
+                }
+            }
+        }
+        plans.sort();
+        plans.join("\n")
+    } else {
+        "No plan files found.".to_string()
+    };
+
+    let prior_handoff_section = if existing_handoff.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "## Prior Handoff (HANDOFF.md)\n\n\
+             Review this prior handoff and carry forward any unresolved items:\n\n\
+             {existing_handoff}\n\n"
+        )
+    };
+
+    Ok(format!(
+        "You are creating a session handoff summary.\n\n\
+         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Recent Git History\n\n```\n{git_log}\n```\n\n\
+         ## Git Status (uncommitted changes)\n\n```\n{git_status}\n```\n\n\
+         ## Active Plans\n\n{plans_list}\n\n\
+         {prior_handoff_section}\
+         ## Instructions\n\n\
+         Create a HANDOFF.md summarizing:\n\
+         - What was accomplished this session\n\
+         - Open items and incomplete work (include unresolved items from prior handoff)\n\
+         - Recommended next steps\n\
+         - Gotchas or context the next session needs\n\
+         Output the full HANDOFF.md content."
+    ))
+}
+
+/// Read existing HANDOFF.md, returning empty string if not found.
+fn read_existing_handoff(project_root: &Path) -> String {
+    let handoff_path = project_root.join("HANDOFF.md");
+    std::fs::read_to_string(handoff_path).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +521,354 @@ mod tests {
         // Should capture staged file via git diff --cached
         let result = get_git_diff(dir.path()).unwrap();
         assert!(result.contains("staged.rs"));
+    }
+
+    // ─── Phase 3: Git Helper Tests ───────────────────────────────────────────
+
+    #[test]
+    fn get_git_log_no_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = get_git_log(dir.path(), 5).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn get_git_log_with_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "first commit",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "second commit",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let result = get_git_log(dir.path(), 5).unwrap();
+        assert!(result.contains("first commit"));
+        assert!(result.contains("second commit"));
+    }
+
+    #[test]
+    fn get_git_status_summary_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let result = get_git_status_summary(dir.path()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn get_git_status_summary_with_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("new.txt"), "hello").unwrap();
+
+        let result = get_git_status_summary(dir.path()).unwrap();
+        assert!(result.contains("new.txt"));
+    }
+
+    #[test]
+    fn get_staged_diff_nothing_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let result = get_staged_diff(dir.path()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn get_staged_diff_with_staged_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("file.rs"), "fn first() {}").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "file.rs"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        // Modify and stage
+        std::fs::write(dir.path().join("file.rs"), "fn second() {}").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "file.rs"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let result = get_staged_diff(dir.path()).unwrap();
+        assert!(result.contains("file.rs"));
+    }
+
+    #[test]
+    fn get_project_tree_includes_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        let result = get_project_tree(dir.path()).unwrap();
+        assert!(result.contains("src/main.rs"));
+    }
+
+    // ─── Phase 3: Prompt Builder Tests ───────────────────────────────────────
+
+    #[test]
+    fn build_prime_prompt_includes_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+
+        let prompt = build_prime_prompt(dir.path()).unwrap();
+        assert!(prompt.contains("src/lib.rs"));
+        assert!(prompt.contains("Orient on this codebase"));
+    }
+
+    #[test]
+    fn build_prime_prompt_includes_git_history() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "test commit for history",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let prompt = build_prime_prompt(dir.path()).unwrap();
+        assert!(prompt.contains("test commit for history"));
+    }
+
+    #[test]
+    fn build_prime_prompt_includes_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("HANDOFF.md"),
+            "# Handoff\n\n- Open: fix auth bug\n",
+        )
+        .unwrap();
+
+        let prompt = build_prime_prompt(dir.path()).unwrap();
+        assert!(prompt.contains("Prior Session Handoff"));
+        assert!(prompt.contains("fix auth bug"));
+    }
+
+    #[test]
+    fn build_review_prompt_includes_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("changed.rs"), "fn changed() {}").unwrap();
+
+        let prompt = build_review_prompt(dir.path()).unwrap();
+        assert!(prompt.contains("changed.rs"));
+        assert!(prompt.contains("Review these code changes"));
+    }
+
+    #[test]
+    fn build_commit_prompt_includes_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("staged.rs"), "fn staged() {}").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "staged.rs"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let prompt = build_commit_prompt(dir.path()).unwrap();
+        assert!(prompt.contains("staged.rs"));
+        assert!(prompt.contains("Generate a commit message"));
+    }
+
+    #[test]
+    fn build_commit_prompt_excludes_unstaged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        // Untracked file — not staged, should NOT appear in commit prompt
+        std::fs::write(dir.path().join("unstaged.rs"), "fn unstaged() {}").unwrap();
+
+        let prompt = build_commit_prompt(dir.path()).unwrap();
+        assert!(!prompt.contains("unstaged.rs"));
+        assert!(prompt.contains("Generate a commit message"));
+    }
+
+    #[test]
+    fn build_handoff_prompt_includes_log() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "handoff test commit",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let prompt = build_handoff_prompt(dir.path()).unwrap();
+        assert!(prompt.contains("handoff test commit"));
+        assert!(prompt.contains("HANDOFF.md"));
+    }
+
+    #[test]
+    fn build_handoff_prompt_lists_plans() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans_dir = dir.path().join(".claude/plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        std::fs::write(plans_dir.join("my-plan.md"), "# Plan").unwrap();
+
+        let prompt = build_handoff_prompt(dir.path()).unwrap();
+        assert!(prompt.contains("my-plan.md"));
+    }
+
+    #[test]
+    fn build_handoff_prompt_includes_prior_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("HANDOFF.md"),
+            "# Prior Session\n\n- Unresolved: fix the auth bug\n",
+        )
+        .unwrap();
+
+        let prompt = build_handoff_prompt(dir.path()).unwrap();
+        assert!(prompt.contains("Prior Handoff"));
+        assert!(prompt.contains("fix the auth bug"));
+        assert!(prompt.contains("carry forward any unresolved items"));
+    }
+
+    #[test]
+    fn build_handoff_prompt_no_prior_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        // No HANDOFF.md exists
+        let prompt = build_handoff_prompt(dir.path()).unwrap();
+        assert!(!prompt.contains("Prior Handoff"));
     }
 }
