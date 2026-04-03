@@ -478,6 +478,106 @@ fn phase4_status_shows_evaluation_column() {
         .stdout(predicate::str::contains("Last Eval"));
 }
 
+// ─── Phase 4: Corrupt DB resilience ──────────────────────────────────────────
+
+#[test]
+fn phase4_metrics_with_corrupt_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let pice_dir = dir.path().join(".pice");
+    fs::create_dir_all(&pice_dir).unwrap();
+
+    // Write garbage to metrics.db
+    fs::write(pice_dir.join("metrics.db"), "THIS IS NOT SQLITE").unwrap();
+    // Write a valid config so open_metrics_db resolves the path
+    fs::write(
+        pice_dir.join("config.toml"),
+        r#"
+[provider]
+name = "stub"
+[evaluation]
+[evaluation.primary]
+provider = "stub"
+model = "stub-echo"
+[evaluation.adversarial]
+provider = "stub"
+model = "stub-echo"
+effort = "high"
+enabled = false
+[evaluation.tiers]
+tier1_models = ["stub-echo"]
+tier2_models = ["stub-echo"]
+tier3_models = ["stub-echo"]
+tier3_agent_team = false
+[telemetry]
+enabled = false
+endpoint = "https://telemetry.pice.dev/v1/events"
+[metrics]
+db_path = ".pice/metrics.db"
+"#,
+    )
+    .unwrap();
+
+    // pice metrics reports the error (exit 1) for corrupt DB — this is correct
+    // for a reporting command. The non-fatal guarantee is for *workflow* commands.
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("metrics")
+        .arg("--json")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a database"));
+
+    // But pice status (which uses the non-fatal pattern) should succeed
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success();
+}
+
+// ─── Phase 4: init --force preserves metrics data ───────────────────────────
+
+#[test]
+fn phase4_init_force_preserves_metrics_history() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // First init creates DB
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let db_path = dir.path().join(".pice/metrics.db");
+    assert!(db_path.exists());
+
+    // Insert a row directly into the DB
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO evaluations (plan_path, feature_name, tier, passed, primary_provider, primary_model, summary, timestamp)
+         VALUES ('test.md', 'Test', 1, 1, 'c', 'm', NULL, '2026-04-01T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    // Re-init with --force
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("init")
+        .arg("--force")
+        .assert()
+        .success();
+
+    // Verify the data is still there
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM evaluations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "init --force should preserve metrics history");
+}
+
 // ═══ Phase 3 Tests ═══════════════════════════════════════════════════════════
 
 // ─── Phase 3: Help / Flag Tests ──────────────────────────────────────────────

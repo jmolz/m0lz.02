@@ -55,10 +55,13 @@ pub fn run_in(base: &Path, force: bool, json: bool) -> Result<()> {
     }
 
     // Initialize metrics database with schema (or run migrations on existing DB).
-    // Never delete an existing metrics.db — it contains evaluation history.
-    let metrics_db = pice_dir.join("metrics.db");
+    // Resolve path from config (supports non-default db_path).
+    // Never delete an existing DB — it contains evaluation history.
+    let metrics_db = crate::metrics::resolve_metrics_db_path(base);
     if !metrics_db.exists() {
-        std::fs::create_dir_all(&pice_dir)?;
+        if let Some(parent) = metrics_db.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         crate::metrics::db::MetricsDb::open(&metrics_db)?;
         info!(path = %metrics_db.display(), "initialized metrics database");
     } else if force {

@@ -18,6 +18,7 @@ pub struct MetricsReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct TrendData {
     pub evaluations: u64,
+    pub distinct_plans: u64,
     pub pass_rate: f64,
     pub avg_score: f64,
 }
@@ -122,6 +123,14 @@ fn aggregate_trend(conn: &rusqlite::Connection, days: i64) -> Result<TrendData> 
         0.0
     };
 
+    let distinct_plans: u64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT plan_path) FROM evaluations WHERE timestamp >= ?1",
+            rusqlite::params![cutoff_str],
+            |row| row.get(0),
+        )
+        .context("failed to count recent distinct plans")?;
+
     let avg_score: f64 = conn
         .query_row(
             "SELECT COALESCE(AVG(CAST(cs.score AS REAL)), 0.0)
@@ -135,6 +144,7 @@ fn aggregate_trend(conn: &rusqlite::Connection, days: i64) -> Result<TrendData> 
 
     Ok(TrendData {
         evaluations,
+        distinct_plans,
         pass_rate,
         avg_score,
     })
@@ -236,6 +246,16 @@ pub fn format_table(report: &MetricsReport) -> String {
     out
 }
 
+/// Escape a string for RFC 4180 CSV: wrap in quotes if it contains
+/// commas, quotes, or newlines; double any internal quotes.
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        format!("\"{s}\"")
+    }
+}
+
 /// Export per-evaluation rows as CSV.
 pub fn format_csv(db: &MetricsDb) -> Result<String> {
     let conn = db.conn();
@@ -262,7 +282,9 @@ pub fn format_csv(db: &MetricsDb) -> Result<String> {
             let avg_score: f64 = row.get(5)?;
             let timestamp: String = row.get(6)?;
             Ok(format!(
-                "{id},\"{plan_path}\",\"{feature_name}\",{tier},{},{avg_score:.1},{timestamp}",
+                "{id},{},{},{tier},{},{avg_score:.1},{timestamp}",
+                csv_escape(&plan_path),
+                csv_escape(&feature_name),
                 if passed != 0 { "true" } else { "false" }
             ))
         })
@@ -552,6 +574,60 @@ mod tests {
 
         let report = aggregate(&db).unwrap();
         assert_eq!(report.last_30_days.evaluations, 1);
+        assert_eq!(report.last_30_days.distinct_plans, 1);
         assert_eq!(report.last_30_days.pass_rate, 100.0);
+    }
+
+    #[test]
+    fn old_records_excluded_from_30_day_trend() {
+        let db = test_db();
+        // Insert a record with a timestamp 60 days ago
+        let old_timestamp = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+        db.conn()
+            .execute(
+                "INSERT INTO evaluations (plan_path, feature_name, tier, passed, primary_provider, primary_model, summary, timestamp)
+                 VALUES ('old.md', 'Old', 1, 1, 'c', 'm', NULL, ?1)",
+                rusqlite::params![old_timestamp],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO criteria_scores (evaluation_id, name, score, threshold, passed)
+                 VALUES (1, 'Test', 8, 7, 1)",
+                [],
+            )
+            .unwrap();
+
+        let report = aggregate(&db).unwrap();
+        // The old record should appear in totals but NOT in the 30-day trend
+        assert_eq!(report.total_evaluations, 1);
+        assert_eq!(report.last_30_days.evaluations, 0);
+        assert_eq!(report.last_30_days.distinct_plans, 0);
+    }
+
+    #[test]
+    fn csv_escapes_quotes_and_commas() {
+        let db = test_db();
+        // Feature name with embedded quotes and commas
+        store::record_evaluation(
+            &db,
+            "plan.md",
+            "Fix \"auth\" flow, part 1",
+            1,
+            true,
+            "c",
+            "m",
+            None,
+            None,
+            None,
+            &make_scores(true),
+        )
+        .unwrap();
+
+        let csv = format_csv(&db).unwrap();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // RFC 4180: embedded quotes are doubled, field is wrapped in quotes
+        assert!(lines[1].contains("\"Fix \"\"auth\"\" flow, part 1\""));
     }
 }

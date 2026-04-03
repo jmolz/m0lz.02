@@ -218,6 +218,9 @@ fn record_metrics(
     adversarial_model: Option<&str>,
 ) {
     if let Ok(Some(db)) = metrics::open_metrics_db(project_root) {
+        // Normalize plan path to canonical form for consistent DB keys
+        let normalized_path = metrics::normalize_plan_path(plan_path, project_root);
+
         // Compute average score for telemetry
         let avg_score = if result.scores.is_empty() {
             0.0
@@ -227,7 +230,7 @@ fn record_metrics(
 
         if let Err(e) = metrics::store::record_evaluation(
             &db,
-            plan_path,
+            &normalized_path,
             feature_name,
             tier,
             result.passed,

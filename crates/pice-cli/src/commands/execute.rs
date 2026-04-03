@@ -33,9 +33,10 @@ pub async fn run(args: &ExecuteArgs) -> Result<()> {
     let exec_prompt = prompt::build_execute_prompt(&plan.content, &project_root)?;
 
     // Record execute_started event (non-fatal)
+    let normalized_path = metrics::normalize_plan_path(&plan.path, &project_root);
     if let Ok(Some(db)) = metrics::open_metrics_db(&project_root) {
         if let Err(e) =
-            metrics::store::record_loop_event(&db, "execute_started", Some(&plan.path), None)
+            metrics::store::record_loop_event(&db, "execute_started", Some(&normalized_path), None)
         {
             tracing::warn!("failed to record execute_started event: {e}");
         }
@@ -56,9 +57,12 @@ pub async fn run(args: &ExecuteArgs) -> Result<()> {
 
     // Record execute_completed event (non-fatal)
     if let Ok(Some(db)) = metrics::open_metrics_db(&project_root) {
-        if let Err(e) =
-            metrics::store::record_loop_event(&db, "execute_completed", Some(&plan.path), None)
-        {
+        if let Err(e) = metrics::store::record_loop_event(
+            &db,
+            "execute_completed",
+            Some(&normalized_path),
+            None,
+        ) {
             tracing::warn!("failed to record execute_completed event: {e}");
         }
     }

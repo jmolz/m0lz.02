@@ -30,7 +30,8 @@ struct GitStats {
 
 #[derive(Debug, Serialize)]
 struct PiceStats {
-    loops_completed: u64,
+    evaluations_30d: u64,
+    plans_evaluated_30d: u64,
     evaluation_pass_rate: f64,
     avg_score: f64,
     plans_with_evaluations: u64,
@@ -42,8 +43,12 @@ pub async fn run(args: &BenchmarkArgs) -> Result<()> {
 
     let git = collect_git_stats(&project_root);
     let pice = collect_pice_stats(&project_root);
+    // Coverage: distinct plans evaluated in the last 30 days / commits.
+    // Use plans_evaluated (not raw evaluation count) to avoid inflation from retries.
+    // Cap at 100% — multiple plans per commit is valid but coverage can't exceed full.
     let coverage_pct = if git.commits_30d > 0 {
-        (pice.loops_completed as f64 / git.commits_30d as f64) * 100.0
+        let raw = (pice.plans_evaluated_30d as f64 / git.commits_30d as f64) * 100.0;
+        raw.min(100.0)
     } else {
         0.0
     };
@@ -158,7 +163,8 @@ fn collect_pice_stats(project_root: &Path) -> PiceStats {
         Some(db) => db,
         None => {
             return PiceStats {
-                loops_completed: 0,
+                evaluations_30d: 0,
+                plans_evaluated_30d: 0,
                 evaluation_pass_rate: 0.0,
                 avg_score: 0.0,
                 plans_with_evaluations: 0,
@@ -175,6 +181,7 @@ fn collect_pice_stats(project_root: &Path) -> PiceStats {
             avg_score: 0.0,
             last_30_days: metrics::aggregator::TrendData {
                 evaluations: 0,
+                distinct_plans: 0,
                 pass_rate: 0.0,
                 avg_score: 0.0,
             },
@@ -203,7 +210,8 @@ fn collect_pice_stats(project_root: &Path) -> PiceStats {
     };
 
     PiceStats {
-        loops_completed: report.last_30_days.evaluations,
+        evaluations_30d: report.last_30_days.evaluations,
+        plans_evaluated_30d: report.last_30_days.distinct_plans,
         evaluation_pass_rate: report.last_30_days.pass_rate,
         avg_score: report.last_30_days.avg_score,
         plans_with_evaluations: report.total_loops,
@@ -224,7 +232,11 @@ fn print_benchmark(report: &BenchmarkReport) {
     println!("  Avg deletions/commit:  {:>3.0}", report.git.avg_deletions);
     println!();
     println!("PICE Metrics (last 30 days):");
-    println!("  PICE loops completed: {:>5}", report.pice.loops_completed);
+    println!("  Evaluations:         {:>5}", report.pice.evaluations_30d);
+    println!(
+        "  Plans evaluated:     {:>5}",
+        report.pice.plans_evaluated_30d
+    );
     println!(
         "  Evaluation pass rate: {:>4.1}%",
         report.pice.evaluation_pass_rate
@@ -237,7 +249,7 @@ fn print_benchmark(report: &BenchmarkReport) {
     println!();
     println!("Coverage:");
     println!(
-        "  Commits with PICE:    {}/{} ({:.1}%)",
-        report.pice.loops_completed, report.git.commits_30d, report.coverage_pct
+        "  Plans evaluated/commits: {}/{} ({:.1}%)",
+        report.pice.plans_evaluated_30d, report.git.commits_30d, report.coverage_pct
     );
 }

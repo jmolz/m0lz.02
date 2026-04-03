@@ -48,7 +48,7 @@ pnpm typecheck                 # Type check (tsc --noEmit)
 cargo fmt --check && cargo clippy -- -D warnings && cargo test && pnpm lint && pnpm typecheck && pnpm test && pnpm build && cargo build --release
 ```
 
-**Expected baseline:** 158 Rust tests, 49 TypeScript tests, 0 lint errors, 0 warnings, clean release build.
+**Expected baseline:** 167 Rust tests, 49 TypeScript tests, 0 lint errors, 0 warnings, clean release build.
 
 ---
 
