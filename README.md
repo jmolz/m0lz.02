@@ -1,6 +1,6 @@
 # PICE CLI
 
-Structured AI coding workflow orchestrator -- Plan, Implement, Contract, Evaluate.
+Structured AI coding workflow orchestrator -- Plan, Implement, Contract-Evaluate.
 
 [![CI](https://github.com/jacobmolz/pice/actions/workflows/ci.yml/badge.svg)](https://github.com/jacobmolz/pice/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/pice-cli)](https://crates.io/crates/pice-cli)
@@ -9,7 +9,7 @@ Structured AI coding workflow orchestrator -- Plan, Implement, Contract, Evaluat
 
 ## What is PICE?
 
-PICE is a methodology for structured AI coding that breaks work into four formal phases: **Plan** (research and design), **Implement** (code generation from a plan), **Contract** (testable acceptance criteria), and **Evaluate** (adversarial grading against the contract). The CLI orchestrates this lifecycle -- it manages the state, the prompts, and the measurement while an AI assistant does the actual coding.
+PICE is a methodology for structured AI coding that breaks work into three formal phases: **Plan** (research, design, and contract negotiation), **Implement** (code generation from a plan), and **Contract-Evaluate** (adversarial grading of the implementation against the contract). The CLI orchestrates this lifecycle -- it manages the state, the prompts, and the measurement while an AI assistant does the actual coding.
 
 The key differentiator is **dual-model adversarial evaluation**. Instead of asking the same AI that wrote the code to judge it, PICE runs parallel evaluations from independent models -- Claude grades contract criteria while GPT-5.4 challenges the approach as an adversary. This eliminates the single-model blind spots that plague self-review workflows.
 
