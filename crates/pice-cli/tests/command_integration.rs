@@ -357,6 +357,127 @@ db_path = ".pice/metrics.db"
         .stdout(predicate::str::contains("\"passed\": true"));
 }
 
+// ═══ Phase 4 Tests ═══════════════════════════════════════════════════════════
+
+// ─── Phase 4: Help / Flag Tests ──────────────────────────────────────────────
+
+#[test]
+fn phase4_metrics_help() {
+    pice_cmd()
+        .arg("metrics")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"))
+        .stdout(predicate::str::contains("--csv"));
+}
+
+#[test]
+fn phase4_benchmark_help() {
+    pice_cmd()
+        .arg("benchmark")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--json"));
+}
+
+// ─── Phase 4: Metrics with Empty DB ──────────────────────────────────────────
+
+#[test]
+fn phase4_metrics_empty_db() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Run pice init to create a real metrics DB
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    // Run pice metrics --json against the empty DB
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("metrics")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total_evaluations\": 0"))
+        .stdout(predicate::str::contains("\"total_loops\": 0"));
+}
+
+// ─── Phase 4: Benchmark ─────────────────────────────────────────────────────
+
+#[test]
+fn phase4_benchmark_empty() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Init git repo
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("benchmark")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"total_commits\""))
+        .stdout(predicate::str::contains("\"coverage_pct\""));
+}
+
+// ─── Phase 4: Init creates real DB ──────────────────────────────────────────
+
+#[test]
+fn phase4_init_creates_real_db() {
+    let dir = tempfile::tempdir().unwrap();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("init")
+        .assert()
+        .success();
+
+    let db_path = dir.path().join(".pice/metrics.db");
+    assert!(db_path.exists());
+
+    // Verify it's a real SQLite DB (not empty) by checking file size
+    let metadata = std::fs::metadata(&db_path).unwrap();
+    assert!(metadata.len() > 0, "metrics.db should not be empty");
+}
+
+// ─── Phase 4: Status shows Last Eval column ─────────────────────────────────
+
+#[test]
+fn phase4_status_shows_evaluation_column() {
+    let dir = tempfile::tempdir().unwrap();
+    create_plan_with_contract(dir.path());
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Last Eval"));
+}
+
 // ═══ Phase 3 Tests ═══════════════════════════════════════════════════════════
 
 // ─── Phase 3: Help / Flag Tests ──────────────────────────────────────────────

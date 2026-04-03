@@ -23,6 +23,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 rust-embed = "8"
+rusqlite = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

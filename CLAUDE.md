@@ -48,7 +48,7 @@ pnpm typecheck                 # Type check (tsc --noEmit)
 cargo fmt --check && cargo clippy -- -D warnings && cargo test && pnpm lint && pnpm typecheck && pnpm test && pnpm build && cargo build --release
 ```
 
-**Expected baseline:** 121 Rust tests, 49 TypeScript tests, 0 lint errors, 0 warnings, clean release build.
+**Expected baseline:** 158 Rust tests, 49 TypeScript tests, 0 lint errors, 0 warnings, clean release build.
 
 ---
 
@@ -63,7 +63,7 @@ pice/
 │   │       ├── commands/      # One module per CLI command
 │   │       ├── engine/        # PICE loop state machine, lifecycle
 │   │       ├── config/        # .pice/ and .claude/ management
-│   │       ├── metrics/       # SQLite store, aggregation, telemetry
+│   │       ├── metrics/       # SQLite store (db, store, aggregator, telemetry)
 │   │       ├── templates/     # Scaffolding, file generation
 │   │       └── provider/      # Provider host, JSON-RPC, process mgmt
 │   └── pice-protocol/         # Shared JSON-RPC protocol types

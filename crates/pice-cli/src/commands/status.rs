@@ -2,6 +2,7 @@ use anyhow::Result;
 use clap::Args;
 
 use crate::engine::status;
+use crate::metrics;
 
 #[derive(Args, Debug)]
 pub struct StatusArgs {
@@ -12,7 +13,10 @@ pub struct StatusArgs {
 
 pub async fn run(args: &StatusArgs) -> Result<()> {
     let project_root = std::env::current_dir()?;
-    let project_status = status::scan_project(&project_root)?;
+
+    // Open metrics DB if available (for evaluation enrichment)
+    let db = metrics::open_metrics_db(&project_root).ok().flatten();
+    let project_status = status::scan_project_with_metrics(&project_root, db.as_ref())?;
 
     if args.json {
         let output = serde_json::to_string_pretty(&project_status)?;
@@ -34,8 +38,11 @@ pub async fn run(args: &StatusArgs) -> Result<()> {
         if project_status.plans.is_empty() {
             println!("No plans found.");
         } else {
-            println!("{:<40} {:<6} {:<10}", "Plan", "Tier", "Criteria");
-            println!("{}", "-".repeat(56));
+            println!(
+                "{:<40} {:<6} {:<10} {:<10}",
+                "Plan", "Tier", "Criteria", "Last Eval"
+            );
+            println!("{}", "\u{2500}".repeat(66));
             for plan in &project_status.plans {
                 if let Some(err) = &plan.parse_error {
                     println!(
@@ -49,11 +56,19 @@ pub async fn run(args: &StatusArgs) -> Result<()> {
                         .tier
                         .map(|t| t.to_string())
                         .unwrap_or_else(|| "-".to_string());
+                    let eval_str = match &plan.last_evaluation {
+                        Some(e) => {
+                            let status = if e.passed { "PASS" } else { "FAIL" };
+                            format!("{status} {:.1}", e.avg_score)
+                        }
+                        None => "--".to_string(),
+                    };
                     println!(
-                        "{:<40} {:<6} {:<10}",
+                        "{:<40} {:<6} {:<10} {:<10}",
                         truncate_str(&plan.title, 40),
                         tier,
                         plan.criteria_count,
+                        eval_str,
                     );
                 }
             }

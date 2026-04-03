@@ -6,6 +6,7 @@ use tracing::info;
 
 use crate::config::PiceConfig;
 use crate::engine::{orchestrator::ProviderOrchestrator, prompt, session};
+use crate::metrics;
 
 #[derive(Args, Debug)]
 pub struct CommitArgs {
@@ -137,6 +138,13 @@ pub async fn run(args: &CommitArgs) -> Result<()> {
         }
         let stderr = String::from_utf8_lossy(&commit_output.stderr);
         bail!("git commit failed: {}", stderr.trim());
+    }
+
+    // Record commit event (non-fatal, only on actual commits)
+    if let Ok(Some(db)) = metrics::open_metrics_db(&project_root) {
+        if let Err(e) = metrics::store::record_loop_event(&db, "commit", None, None) {
+            tracing::warn!("failed to record commit event: {e}");
+        }
     }
 
     if args.json {

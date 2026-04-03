@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use pice_protocol::EvaluateResultParams;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::config::PiceConfig;
 use crate::engine::{orchestrator::ProviderOrchestrator, output, plan_parser, prompt};
+use crate::metrics;
 
 #[derive(Args, Debug)]
 pub struct EvaluateArgs {
@@ -91,6 +92,18 @@ pub async fn run(args: &EvaluateArgs) -> Result<()> {
         // 5. Enforce contract: recompute pass/fail from scores and thresholds
         enforce_contract(&mut primary, contract);
 
+        // 5b. Record to metrics DB (non-fatal)
+        record_metrics(
+            &project_root,
+            &plan.path,
+            &contract.feature,
+            tier,
+            &primary,
+            &config,
+            Some(&config.evaluation.adversarial.provider),
+            Some(&config.evaluation.adversarial.model),
+        );
+
         // 6. Display results
         if args.json {
             let mut json = output::evaluation_json(&primary, adversarial.as_ref(), tier);
@@ -113,6 +126,18 @@ pub async fn run(args: &EvaluateArgs) -> Result<()> {
 
         // Enforce contract: recompute pass/fail from scores and thresholds
         enforce_contract(&mut primary, contract);
+
+        // Record to metrics DB (non-fatal)
+        record_metrics(
+            &project_root,
+            &plan.path,
+            &contract.feature,
+            tier,
+            &primary,
+            &config,
+            None,
+            None,
+        );
 
         if args.json {
             let json = output::evaluation_json(&primary, None, tier);
@@ -179,6 +204,59 @@ fn enforce_contract(result: &mut EvaluateResultParams, contract: &plan_parser::P
         );
     }
     result.passed = all_contract_passed;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_metrics(
+    project_root: &Path,
+    plan_path: &str,
+    feature_name: &str,
+    tier: u8,
+    result: &EvaluateResultParams,
+    config: &PiceConfig,
+    adversarial_provider: Option<&str>,
+    adversarial_model: Option<&str>,
+) {
+    if let Ok(Some(db)) = metrics::open_metrics_db(project_root) {
+        // Compute average score for telemetry
+        let avg_score = if result.scores.is_empty() {
+            0.0
+        } else {
+            result.scores.iter().map(|s| s.score as f64).sum::<f64>() / result.scores.len() as f64
+        };
+
+        if let Err(e) = metrics::store::record_evaluation(
+            &db,
+            plan_path,
+            feature_name,
+            tier,
+            result.passed,
+            &config.evaluation.primary.provider,
+            &config.evaluation.primary.model,
+            adversarial_provider,
+            adversarial_model,
+            result.summary.as_deref(),
+            &result.scores,
+        ) {
+            warn!("failed to record evaluation metrics: {e}");
+        }
+
+        // Queue telemetry (opt-in, non-fatal)
+        if config.telemetry.enabled {
+            let client = metrics::telemetry::TelemetryClient::new(&config.telemetry, project_root);
+            let event = metrics::telemetry::TelemetryEvent {
+                event_type: "evaluation".to_string(),
+                tier: Some(tier),
+                passed: Some(result.passed),
+                score_avg: Some(avg_score),
+                provider_type: config.evaluation.primary.provider.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Err(e) = client.queue_event(&db, &event) {
+                tracing::debug!("telemetry queue failed: {e}");
+            }
+        }
+    }
 }
 
 async fn run_primary_evaluation(

@@ -54,12 +54,18 @@ pub fn run_in(base: &Path, force: bool, json: bool) -> Result<()> {
         }
     }
 
-    // Create empty metrics.db placeholder
+    // Initialize metrics database with schema (or run migrations on existing DB).
+    // Never delete an existing metrics.db — it contains evaluation history.
     let metrics_db = pice_dir.join("metrics.db");
-    if !metrics_db.exists() || force {
+    if !metrics_db.exists() {
         std::fs::create_dir_all(&pice_dir)?;
-        std::fs::write(&metrics_db, "")?;
-        info!(path = %metrics_db.display(), "created metrics database placeholder");
+        crate::metrics::db::MetricsDb::open(&metrics_db)?;
+        info!(path = %metrics_db.display(), "initialized metrics database");
+    } else if force {
+        // On --force, open the existing DB and run any pending migrations
+        // instead of destroying evaluation history.
+        crate::metrics::db::MetricsDb::open(&metrics_db)?;
+        info!(path = %metrics_db.display(), "migrated existing metrics database");
     }
 
     let total_created = claude_result.created.len() + pice_result.created.len();

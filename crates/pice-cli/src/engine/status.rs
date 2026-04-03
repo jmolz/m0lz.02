@@ -4,6 +4,8 @@ use std::path::Path;
 use std::process::Command;
 
 use super::plan_parser::ParsedPlan;
+use crate::metrics::db::MetricsDb;
+use crate::metrics::store;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlanStatus {
@@ -16,6 +18,17 @@ pub struct PlanStatus {
     /// Non-empty when the plan file exists but could not be fully parsed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_error: Option<String>,
+    /// Latest evaluation result for this plan (if metrics DB is available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_evaluation: Option<LastEvaluation>,
+}
+
+/// Serializable summary of the most recent evaluation for a plan.
+#[derive(Debug, Clone, Serialize)]
+pub struct LastEvaluation {
+    pub passed: bool,
+    pub avg_score: f64,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,10 +39,19 @@ pub struct ProjectStatus {
     pub last_commit: String,
 }
 
-/// Scan the project root for plan files, git status, and branch info.
-/// Does NOT require a provider — reads local state only.
+/// Scan the project root without metrics enrichment.
+/// Used by tests and as a convenience wrapper.
+#[allow(dead_code)]
 pub fn scan_project(project_root: &Path) -> Result<ProjectStatus> {
-    let plans = scan_plans(project_root)?;
+    scan_project_with_metrics(project_root, None)
+}
+
+/// Scan with optional metrics DB for evaluation enrichment.
+pub fn scan_project_with_metrics(
+    project_root: &Path,
+    metrics_db: Option<&MetricsDb>,
+) -> Result<ProjectStatus> {
+    let plans = scan_plans(project_root, metrics_db)?;
     let branch = get_branch_name(project_root);
     let has_uncommitted_changes = has_uncommitted_changes(project_root);
     let last_commit = get_last_commit(project_root);
@@ -42,7 +64,7 @@ pub fn scan_project(project_root: &Path) -> Result<ProjectStatus> {
     })
 }
 
-fn scan_plans(project_root: &Path) -> Result<Vec<PlanStatus>> {
+fn scan_plans(project_root: &Path, metrics_db: Option<&MetricsDb>) -> Result<Vec<PlanStatus>> {
     let plans_dir = project_root.join(".claude/plans");
     if !plans_dir.is_dir() {
         return Ok(Vec::new());
@@ -70,6 +92,15 @@ fn scan_plans(project_root: &Path) -> Result<Vec<PlanStatus>> {
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown")
                 );
+
+                let last_evaluation = metrics_db
+                    .and_then(|db| store::get_latest_evaluation(db, &plan_path).ok().flatten())
+                    .map(|e| LastEvaluation {
+                        passed: e.passed,
+                        avg_score: e.avg_score,
+                        timestamp: e.timestamp,
+                    });
+
                 plans.push(PlanStatus {
                     path: plan_path,
                     title: plan.title,
@@ -77,6 +108,7 @@ fn scan_plans(project_root: &Path) -> Result<Vec<PlanStatus>> {
                     criteria_count,
                     has_contract,
                     parse_error: None,
+                    last_evaluation,
                 });
             }
             Err(e) => {
@@ -102,6 +134,7 @@ fn scan_plans(project_root: &Path) -> Result<Vec<PlanStatus>> {
                     criteria_count: 0,
                     has_contract: false,
                     parse_error: Some(e.to_string()),
+                    last_evaluation: None,
                 });
             }
         }

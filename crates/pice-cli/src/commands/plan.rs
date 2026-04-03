@@ -4,6 +4,7 @@ use tracing::info;
 
 use crate::config::PiceConfig;
 use crate::engine::{orchestrator::ProviderOrchestrator, prompt, session};
+use crate::metrics;
 
 #[derive(Args, Debug)]
 pub struct PlanArgs {
@@ -40,6 +41,18 @@ pub async fn run(args: &PlanArgs) -> Result<()> {
         tracing::warn!("provider shutdown failed: {e}");
     }
     session_result?;
+
+    // Record plan event (non-fatal)
+    if let Ok(Some(db)) = metrics::open_metrics_db(&project_root) {
+        if let Err(e) = metrics::store::record_loop_event(
+            &db,
+            "plan_created",
+            None,
+            Some(&serde_json::json!({ "description": args.description }).to_string()),
+        ) {
+            tracing::warn!("failed to record plan event: {e}");
+        }
+    }
 
     if args.json {
         let output = serde_json::json!({

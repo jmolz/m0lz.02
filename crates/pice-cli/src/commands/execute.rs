@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::config::PiceConfig;
 use crate::engine::{orchestrator::ProviderOrchestrator, plan_parser, prompt, session};
+use crate::metrics;
 
 #[derive(Args, Debug)]
 pub struct ExecuteArgs {
@@ -31,6 +32,15 @@ pub async fn run(args: &ExecuteArgs) -> Result<()> {
 
     let exec_prompt = prompt::build_execute_prompt(&plan.content, &project_root)?;
 
+    // Record execute_started event (non-fatal)
+    if let Ok(Some(db)) = metrics::open_metrics_db(&project_root) {
+        if let Err(e) =
+            metrics::store::record_loop_event(&db, "execute_started", Some(&plan.path), None)
+        {
+            tracing::warn!("failed to record execute_started event: {e}");
+        }
+    }
+
     info!(provider = %config.provider.name, "starting provider for execution");
     let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, &config).await?;
 
@@ -43,6 +53,15 @@ pub async fn run(args: &ExecuteArgs) -> Result<()> {
         tracing::warn!("provider shutdown failed: {e}");
     }
     session_result?;
+
+    // Record execute_completed event (non-fatal)
+    if let Ok(Some(db)) = metrics::open_metrics_db(&project_root) {
+        if let Err(e) =
+            metrics::store::record_loop_event(&db, "execute_completed", Some(&plan.path), None)
+        {
+            tracing::warn!("failed to record execute_completed event: {e}");
+        }
+    }
 
     if args.json {
         let output = serde_json::json!({
