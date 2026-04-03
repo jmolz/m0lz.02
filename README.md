@@ -2,9 +2,7 @@
 
 Structured AI coding workflow orchestrator -- Plan, Implement, Contract-Evaluate.
 
-[![CI](https://github.com/jacobmolz/pice/actions/workflows/ci.yml/badge.svg)](https://github.com/jacobmolz/pice/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/pice-cli)](https://crates.io/crates/pice-cli)
-[![npm](https://img.shields.io/npm/v/pice)](https://www.npmjs.com/package/pice)
+[![CI](https://github.com/jmolz/pice-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/jmolz/pice-framework/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## What is PICE?
