@@ -224,6 +224,19 @@ No. Telemetry is opt-in and off by default. When enabled, it collects anonymous 
 
 That's what the metrics engine is designed to answer. PICE tracks evaluation scores, pass rates, and workflow timing across your sessions so you can see whether structured workflows produce measurably better results than ad-hoc AI coding. Data over vibes.
 
+## Roadmap
+
+PICE v0.1 ships the core loop. The [roadmap](docs/roadmap.md) covers what's next — grounded in empirical research and mathematical foundations:
+
+- **v0.2 — Stack Loops** — per-layer PICE loops across the technology stack with seam verification at every boundary. [Why: software breaks at integration points, not inside components.](docs/roadmap.md#the-seam-problem)
+- **v0.3 — Arch Experts** — dynamically generated specialist agents inferred from your project's architecture files.
+- **v0.4 — Implicit Contract Inference** — automated cross-component assumption asymmetry detection from code and traffic.
+- **v0.5 — Self-Evolving Verification** — a closed-loop system where every execution makes the next one smarter, more targeted, and cheaper.
+
+Supporting research: [seam blindspot analysis](docs/research/seam-blindspot.md), [convergence analysis](docs/research/convergence-analysis.md), [originality analysis](docs/research/originality-analysis.md), and more in [`docs/research/`](docs/research/).
+
+For term definitions, see the [glossary](docs/glossary.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and contribution guidelines.
