@@ -6,11 +6,11 @@
   "main": "index.js",
   "files": ["bin", "index.js"],
   "optionalDependencies": {
-    "@pice/pice-darwin-arm64": "0.1.0",
-    "@pice/pice-darwin-x64": "0.1.0",
-    "@pice/pice-linux-arm64": "0.1.0",
-    "@pice/pice-linux-x64": "0.1.0",
-    "@pice/pice-win32-x64": "0.1.0"
+    "@jacobmolz/pice-darwin-arm64": "0.1.0",
+    "@jacobmolz/pice-darwin-x64": "0.1.0",
+    "@jacobmolz/pice-linux-arm64": "0.1.0",
+    "@jacobmolz/pice-linux-x64": "0.1.0",
+    "@jacobmolz/pice-win32-x64": "0.1.0"
   },
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/jacobmolz/pice" },

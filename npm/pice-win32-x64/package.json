@@ -1,5 +1,5 @@
 {
-  "name": "@pice/pice-win32-x64",
+  "name": "@jacobmolz/pice-win32-x64",
   "version": "0.1.0",
   "description": "PICE CLI binary for Windows x64",
   "os": ["win32"],

@@ -10,11 +10,11 @@ const fs = require("fs");
  * (Alpine, Void, etc.) are detected and rejected with a clear message.
  */
 const PLATFORM_MAP = {
-  "darwin-arm64": { pkg: "@pice/pice-darwin-arm64", bin: "pice" },
-  "darwin-x64": { pkg: "@pice/pice-darwin-x64", bin: "pice" },
-  "linux-arm64": { pkg: "@pice/pice-linux-arm64", bin: "pice" },
-  "linux-x64": { pkg: "@pice/pice-linux-x64", bin: "pice" },
-  "win32-x64": { pkg: "@pice/pice-win32-x64", bin: "pice.exe" },
+  "darwin-arm64": { pkg: "@jacobmolz/pice-darwin-arm64", bin: "pice" },
+  "darwin-x64": { pkg: "@jacobmolz/pice-darwin-x64", bin: "pice" },
+  "linux-arm64": { pkg: "@jacobmolz/pice-linux-arm64", bin: "pice" },
+  "linux-x64": { pkg: "@jacobmolz/pice-linux-x64", bin: "pice" },
+  "win32-x64": { pkg: "@jacobmolz/pice-win32-x64", bin: "pice.exe" },
 };
 
 /**
