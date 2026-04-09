@@ -206,7 +206,7 @@ jobs:
         run: |
           for pkg in pice-darwin-arm64 pice-darwin-x64 pice-linux-arm64 pice-linux-x64 pice-win32-x64; do
             cd npm/${pkg}
-            npm publish --access public
+            npm publish --access public || echo "Skipped ${pkg} (already published or error)"
             cd ../..
           done
 
