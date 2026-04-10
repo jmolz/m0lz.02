@@ -105,9 +105,11 @@ Based on the plan's success criteria and implementation tasks, write a JSON cont
 2. **Write criteria** — each must be:
    - Independently testable (no "works well" or "looks good")
    - Paired with a validation method (command, API call, or observable behavior)
-   - Assigned a threshold (7 standard, 8-9 for security/data integrity)
+   - Assigned a threshold between 8 and 10, inclusive. **The minimum allowed threshold is 8.** Use 8 for standard functionality and UX criteria, 9 for correctness or regression-safety criteria, and 10 for security, data integrity, secret handling, and multi-tenancy concerns. Any criterion below 8 is not allowed — if something feels like it should be threshold 7, the criterion is either too vague to test or shouldn't be in the contract at all.
 
 3. **Include at least one negative criterion** — something that should NOT happen (e.g., "Returns 403 when accessing another org's data", "Does not expose user email in public API response")
+
+4. **Validate before presenting** — before presenting the contract to the user, scan every `threshold` value. If any is below 8, raise it or remove the criterion. The negotiation step assumes the floor is already respected; the user should not have to remind you.
 
 ### Present for Negotiation
 

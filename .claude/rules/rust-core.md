@@ -9,8 +9,19 @@ paths:
 
 ## Crate Organization
 
-- `pice-cli` — binary crate, depends on `pice-protocol`
-- `pice-protocol` — library crate, zero external dependencies beyond serde. Both Rust core and TS providers depend on this contract.
+### v0.1 (current, shipped)
+
+- `pice-cli` — binary crate, depends on `pice-protocol`. Owns everything: state machine, provider host, metrics, templates.
+- `pice-protocol` — library crate, zero external dependencies beyond serde. Shared contract types for core↔provider JSON-RPC.
+
+### v0.2+ (post-refactor — see `PRDv2.md` and `.claude/rules/daemon.md`)
+
+- `pice-cli` — thin CLI adapter binary. Owns: arg parsing (clap), config discovery + validation, terminal rendering, desktop notifications, keyboard input for gate prompts, shell completions. Dispatches everything else to the daemon over a Unix socket / named pipe.
+- `pice-daemon` — long-running daemon binary. Owns: orchestrator (Stack Loops engine, adaptive algorithms, gate state manager, worktree lifecycle), provider process host (moved from cli), manifest CRUD, SQLite writes, daemon RPC server.
+- `pice-core` — shared library crate. Owns: config parsing (TOML + YAML), layer detection + `layers.toml` types, workflow.yaml types + validation, verification manifest schema + helpers, seam check trait + default library, adaptive algorithms (SPRT/ADTS/VEC as pure functions), daemon RPC types. Zero async dependencies, zero network. Pure logic + data types. Both CLI and daemon depend on it.
+- `pice-protocol` — unchanged. Still the shared contract for core↔provider JSON-RPC. Do NOT put daemon RPC types here; use `pice-core::protocol`.
+
+**Crate boundary rule**: if the CLI needs to preview something the daemon will execute (config parse, workflow validation, layer detection dry-run), the logic lives in `pice-core`. Both sides import from there. Never duplicate parsing or validation between `pice-cli` and `pice-daemon` — divergence is a bug.
 
 ## Error Handling
 

@@ -166,16 +166,16 @@ Execute in order, top to bottom. Each task is atomic.
 {
   "feature": "{Feature Name}",
   "tier": {1 | 2 | 3},
-  "pass_threshold": 7,
+  "pass_threshold": 8,
   "criteria": [
     {
       "name": "{Specific, testable criterion}",
-      "threshold": 7,
+      "threshold": 8,
       "validation": "{How to verify — exact command, URL, or observable behavior}"
     },
     {
       "name": "{Another criterion}",
-      "threshold": 8,
+      "threshold": 9,
       "validation": "{How to verify}"
     }
   ]
@@ -186,8 +186,8 @@ Execute in order, top to bottom. Each task is atomic.
 
 - Each criterion must be independently testable — no "works well" or "looks good"
 - Include the validation method: a command to run, an API call to make, or an observable behavior
-- Set higher thresholds (8-9) for security, data integrity, and multi-tenancy concerns
-- Set standard thresholds (7) for functionality and UX
+- **Thresholds: minimum 8, maximum 10.** Use 8 for standard functionality and UX criteria, 9 for correctness and regression-safety criteria, 10 for security, data integrity, secret handling, and multi-tenancy concerns. A threshold below 8 is never allowed — if it feels like a 7, the criterion is too vague to test or does not belong in the contract.
+- `pass_threshold` on the top-level contract object must also be at least 8.
 - Include at least one negative criterion (e.g., "Returns 403 when accessing another org's data")
 
 ---

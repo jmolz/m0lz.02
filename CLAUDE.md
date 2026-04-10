@@ -6,7 +6,10 @@ This file provides guidance to Claude Code when working with this repository.
 
 PICE CLI is an open-source workflow orchestrator for structured AI coding. It implements the Plan-Implement-Contract-Evaluate (PICE) methodology as a Rust-powered CLI with a TypeScript provider bridge, orchestrating AI coding sessions through a formal lifecycle with dual-model adversarial evaluation and quality metrics. Architecture uses a JSON-RPC provider protocol (inspired by MCP) enabling community-built providers for any AI coding tool.
 
-See `.claude/PRD.md` for the full product requirements document.
+- `.claude/PRD.md` — the v0.1 MVP PRD (shipped, 217 tests, treat as historical baseline)
+- `PRDv2.md` — the post-v0.1 roadmap spec (v0.2 Stack Loops, v0.3 Arch Experts + Dashboard, v0.4 Implicit Contract Inference, v0.5 Self-Evolving Verification). Read this before starting any v0.2+ work.
+
+**Versioning note:** v0.1 architecture (single `pice` binary, CLI-only) is what currently ships. v0.2 introduces a **headless daemon + CLI adapter split** — the Rust core becomes a long-running `pice-daemon` process; `pice` becomes the first of several adapters (CLI, dashboard, CI) that communicate with the daemon over a Unix socket / named pipe. When working on v0.2 code, read `.claude/rules/daemon.md`, `.claude/rules/stack-loops.md`, and `.claude/rules/workflow-yaml.md`.
 
 ---
 
@@ -218,13 +221,17 @@ When working on specific areas, read the corresponding reference:
 |------|------|------|
 | Rust core | `.claude/rules/rust-core.md` | Working on crates/ |
 | TypeScript providers | `.claude/rules/providers.md` | Working on packages/ |
-| JSON-RPC protocol | `.claude/rules/protocol.md` | Changing provider contract |
-| Metrics & telemetry | `.claude/rules/metrics.md` | Working on metrics engine |
+| JSON-RPC protocol | `.claude/rules/protocol.md` | Changing provider contract or daemon RPC |
+| Metrics & telemetry | `.claude/rules/metrics.md` | Working on metrics engine, audit trail, cost tracking |
 | Templates & scaffolding | `.claude/rules/templates.md` | Changing `pice init` output |
 | Visual assets & diagrams | `.claude/rules/docs-visual-assets.md` | Working on docs/images/, docs/diagrams/, or README visuals |
+| **Daemon architecture (v0.2+)** | `.claude/rules/daemon.md` | Working on `pice-daemon`, `pice-core`, CLI adapter, socket transport, manifest |
+| **Stack Loops (v0.2+)** | `.claude/rules/stack-loops.md` | Working on layer detection, DAG orchestration, worktree isolation, seam checks, context isolation |
+| **Workflow YAML + adaptive + gates (v0.2+)** | `.claude/rules/workflow-yaml.md` | Working on `.pice/workflow.yaml`, SPRT/ADTS/VEC, approval gates |
 
 For deep architecture reference: `.claude/docs/`
 For PICE methodology: `docs/methodology/`
+For post-v0.1 design: `PRDv2.md` + `docs/research/`
 
 ---
 
@@ -233,8 +240,13 @@ For PICE methodology: `docs/methodology/`
 - **Never `unwrap()` in library code** — use `?` operator with proper error types. Panics in the CLI core are bugs.
 - **stdout is the JSON-RPC channel for providers** — all provider logging goes to stderr. Writing to stdout breaks the protocol.
 - **Provider failures must not crash the CLI** — gracefully degrade (single-model eval, warning messages) instead of panicking.
-- **Evaluation sessions are context-isolated** — evaluator prompts must NEVER include implementation conversation or planning rationale. Only: contract, diff, CLAUDE.md.
+- **Evaluation sessions are context-isolated** — evaluator prompts must NEVER include implementation conversation or planning rationale. Only: contract, diff, CLAUDE.md. In v0.2+, the rule extends to **per-layer context isolation**: a layer evaluator only sees its own layer's contract + filtered diff + CLAUDE.md, never other layers' contracts, findings, or plan rationale.
 - **Templates are embedded at build time** — changes to `templates/` require a rebuild. Use `rust-embed` or `include_str!`.
 - **JSON-RPC protocol changes require both Rust and TS updates** — `pice-protocol` crate and `@pice/provider-protocol` package must stay in sync. Add roundtrip serialization tests for every new message type.
 - **Never commit API keys or secrets** — auth is handled via environment variables or subscription OAuth flows, never hardcoded.
 - **All CLI commands go through the provider protocol** — no direct SDK calls from Rust. The protocol IS the abstraction boundary.
+- **(v0.2+) CLI and daemon share parsing/validation via `pice-core`** — never duplicate config, layer, workflow, or manifest parsing logic in `pice-cli` and `pice-daemon`. Both depend on `pice-core`; the CLI previews what the daemon will execute, so divergence is a bug.
+- **(v0.2+) The verification manifest is the source of truth** — daemon reads and writes `~/.pice/state/{feature-id}.manifest.json`; every adapter (CLI, dashboard, CI) observes the same manifest. Never build parallel state stores.
+- **(v0.2+) Daemon RPC is a separate protocol from provider RPC** — the provider protocol is `pice-daemon`↔`provider` (spawn+stdio). The daemon RPC is `pice-cli`↔`pice-daemon` (socket+newline-JSON). They use JSON-RPC 2.0 but are DIFFERENT method namespaces, different consumers, different transports. Do not conflate.
+- **(v0.2+) Honor the ~96.6% confidence ceiling** — for dual-model correlated evaluators, confidence reports must never claim higher than the correlated-Condorcet ceiling (`docs/research/convergence-analysis.md`). Adaptive algorithms halt at the target; they do not pretend more passes breach the ceiling.
+- **(v0.2+) Always-run layers cannot be skipped** — `infrastructure`, `deployment`, `observability` layers execute regardless of change scope, unless explicitly overridden in `workflow.yaml` and logged to audit trail.
