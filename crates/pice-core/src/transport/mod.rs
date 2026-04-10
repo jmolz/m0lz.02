@@ -77,18 +77,26 @@ impl SocketPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes all tests in this module that mutate `PICE_DAEMON_SOCKET`.
+    ///
+    /// Rust's test harness runs tests in a single binary on multiple threads by
+    /// default. `set_var` / `remove_var` touch process-global state, so sibling
+    /// tests racing on the same env var will observe each other's writes. This
+    /// mutex makes the env-touching tests sequential with respect to each other
+    /// while leaving unrelated tests free to run in parallel. Held for the whole
+    /// test body so the save → mutate → assert → restore sequence is atomic.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[cfg(unix)]
     #[test]
     fn default_socket_path_respects_env_var_unix() {
-        // Save/restore env to avoid polluting other tests.
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let saved = std::env::var("PICE_DAEMON_SOCKET").ok();
 
-        // SAFETY: tests within a single binary run in the same process, and
-        // `cargo test` serializes env-dependent tests by default for this crate
-        // because we don't use `parallel` features. But to be safe in a
-        // multi-threaded test runner, we set/restore the var within the test
-        // body and do not rely on env state outside the assertion window.
         unsafe {
             std::env::set_var("PICE_DAEMON_SOCKET", "/tmp/pice-test.sock");
         }
@@ -110,7 +118,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn default_socket_path_platform_fallback_unix() {
-        // Save and clear PICE_DAEMON_SOCKET so the fallback path is exercised.
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let saved = std::env::var("PICE_DAEMON_SOCKET").ok();
         unsafe {
             std::env::remove_var("PICE_DAEMON_SOCKET");
@@ -140,6 +150,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn default_socket_path_platform_fallback_windows() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let saved = std::env::var("PICE_DAEMON_SOCKET").ok();
         unsafe {
             std::env::remove_var("PICE_DAEMON_SOCKET");
