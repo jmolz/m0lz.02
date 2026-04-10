@@ -4,10 +4,10 @@ use std::path::Path;
 use std::process::Command;
 use tracing::info;
 
-use crate::engine::prompt;
 use crate::metrics;
 use pice_core::config::PiceConfig;
 use pice_daemon::orchestrator::{session, NullSink, ProviderOrchestrator, SharedSink};
+use pice_daemon::prompt;
 use std::sync::Arc;
 
 #[derive(Args, Debug)]

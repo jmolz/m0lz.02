@@ -3,9 +3,10 @@ use clap::Args;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::engine::{output, prompt};
+use crate::engine::output;
 use pice_core::config::PiceConfig;
 use pice_daemon::orchestrator::{session, NullSink, ProviderOrchestrator, SharedSink};
+use pice_daemon::prompt;
 use std::sync::Arc;
 
 #[derive(Args, Debug)]

@@ -2,10 +2,11 @@ use anyhow::Result;
 use clap::Args;
 use tracing::info;
 
-use crate::engine::{output, prompt};
+use crate::engine::output;
 use crate::metrics;
 use pice_core::config::PiceConfig;
 use pice_daemon::orchestrator::{session, ProviderOrchestrator};
+use pice_daemon::prompt;
 
 #[derive(Args, Debug)]
 pub struct PlanArgs {
