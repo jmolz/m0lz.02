@@ -23,6 +23,7 @@ Thumbs.db
 # Claude Code user-local files
 .remember/
 .claude/skills/
+.worktrees/
 
 # Environment
 .env
