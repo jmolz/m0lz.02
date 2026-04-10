@@ -1,34 +1,22 @@
+//! Metrics module — CLI-side facade.
+//!
+//! In T14, the write side (`db`, `store`, `telemetry`) moved to
+//! `pice-daemon::metrics`. Read-only aggregation (`aggregator`) stays in
+//! `pice-cli` because `pice metrics` and `pice benchmark` are CLI commands
+//! that only query the database.
+//!
+//! The `pub use` re-exports below let existing callers keep using
+//! `crate::metrics::{db, store, telemetry, open_metrics_db, ...}` unchanged
+//! while the underlying code lives in pice-daemon. This is a path alias, not
+//! duplication — the rules in `.claude/rules/daemon.md` prohibit duplicated
+//! logic between the two crates, not shared-via-reexport APIs.
+//!
+//! When T19 converts the CLI writer commands (evaluate, plan, execute,
+//! commit) to daemon RPC calls, the re-exports for `db`/`store`/`telemetry`
+//! will be removed and the CLI will stop linking them directly.
+
 pub mod aggregator;
-pub mod db;
-pub mod store;
-pub mod telemetry;
 
-use anyhow::Result;
-use std::path::Path;
-
-use pice_core::config::PiceConfig;
-
-// Re-export the path normalization helper from pice-core so existing callers
-// (commands/execute.rs, commands/evaluate.rs) can keep using
-// `metrics::normalize_plan_path(..)` unchanged. The implementation lives in
-// `pice_core::paths` and is shared with pice-daemon.
-pub use pice_core::paths::normalize_plan_path;
-
-/// Open the metrics database for a project.
-/// Returns None if the DB file doesn't exist (project not initialized).
-pub fn open_metrics_db(project_root: &Path) -> Result<Option<db::MetricsDb>> {
-    let config_path = project_root.join(".pice/config.toml");
-    let config = PiceConfig::load(&config_path).unwrap_or_else(|_| PiceConfig::default());
-    let db_path = project_root.join(&config.metrics.db_path);
-    if !db_path.exists() {
-        return Ok(None);
-    }
-    Ok(Some(db::MetricsDb::open(&db_path)?))
-}
-
-/// Resolve the configured metrics DB path for a project (for init).
-pub fn resolve_metrics_db_path(project_root: &Path) -> std::path::PathBuf {
-    let config_path = project_root.join(".pice/config.toml");
-    let config = PiceConfig::load(&config_path).unwrap_or_else(|_| PiceConfig::default());
-    project_root.join(&config.metrics.db_path)
-}
+pub use pice_daemon::metrics::{
+    db, normalize_plan_path, open_metrics_db, resolve_metrics_db_path, store, telemetry,
+};

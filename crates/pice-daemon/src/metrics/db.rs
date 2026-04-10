@@ -19,8 +19,15 @@ impl MetricsDb {
         Ok(db)
     }
 
-    /// Open an in-memory database for testing.
-    #[cfg(test)]
+    /// Open an in-memory SQLite database with the full schema applied.
+    ///
+    /// Intended for tests — both this crate's own tests and downstream crates
+    /// (such as `pice-cli`'s `metrics::aggregator` tests) rely on it. Not gated
+    /// behind `#[cfg(test)]` because `#[cfg(test)]` is crate-local: when
+    /// `pice-cli` runs its tests, `pice-daemon` is compiled as a non-test
+    /// dependency and its `#[cfg(test)]` items are invisible. Keeping this
+    /// function unconditionally public is the simplest way to share the
+    /// test helper across crates.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory database")?;
         let db = Self { conn };
