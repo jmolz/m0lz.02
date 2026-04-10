@@ -24,9 +24,15 @@
 //! | [`provider`] | Provider registry lookup (path walking) |
 //! | [`prompt`] | Pure prompt helpers (read_claude_md, get_git_diff) |
 //! | [`paths`] | Path normalization helpers |
+//! | [`protocol`] | Daemon RPC type definitions (not provider RPC) |
+//! | [`cli`] | Shared `CommandRequest` / `CommandResponse` |
+//! | [`transport`] | Socket path abstractions (Unix / Windows pipe) |
 
+pub mod cli;
 pub mod config;
 pub mod paths;
 pub mod plan_parser;
 pub mod prompt;
+pub mod protocol;
 pub mod provider;
+pub mod transport;
