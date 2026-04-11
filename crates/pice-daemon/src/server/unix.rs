@@ -26,10 +26,9 @@
 //!
 //! ## Framing
 //!
-//! Each frame is one JSON object followed by exactly one `\n`. Multi-line JSON
-//! is not supported. Writers must not emit newlines inside a single message —
-//! serde_json's default serializer guarantees this for non-pretty output, and a
-//! `debug_assert!` enforces it in debug builds.
+//! Delegated to [`super::framing::JsonLineFramed`]. Each frame is one JSON
+//! object followed by exactly one `\n`. See that module for the full contract
+//! (EOF semantics, embedded-newline guard, read-buffer reuse).
 
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -37,9 +36,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
+
+use super::framing::JsonLineFramed;
 
 /// File mode applied to the socket after bind. Owner read/write only.
 const SOCKET_MODE: u32 = 0o600;
@@ -145,13 +145,13 @@ fn set_socket_permissions(path: &Path) -> Result<()> {
 
 /// A framed full-duplex connection over a Unix domain socket.
 ///
-/// Wraps a `UnixStream` with a persistent [`BufReader`] on the read side and a
-/// raw [`OwnedWriteHalf`] on the write side. The reader's buffer is reused
-/// across calls so messages arriving in the same kernel read are not dropped.
+/// Wraps `UnixStream::into_split` halves inside a
+/// [`JsonLineFramed`] which owns the framing buffer and read buffer reuse.
+/// The platform-specific `OwnedReadHalf` / `OwnedWriteHalf` types are kept
+/// (instead of `tokio::io::split`) because they give a lock-free split on
+/// the underlying file descriptor.
 pub struct UnixConnection {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
-    read_buf: Vec<u8>,
+    framed: JsonLineFramed<OwnedReadHalf, OwnedWriteHalf>,
 }
 
 impl UnixConnection {
@@ -161,56 +161,21 @@ impl UnixConnection {
     pub fn new(stream: UnixStream) -> Self {
         let (rd, wr) = stream.into_split();
         Self {
-            reader: BufReader::new(rd),
-            writer: wr,
-            read_buf: Vec::with_capacity(4096),
+            framed: JsonLineFramed::new(rd, wr),
         }
     }
 
-    /// Read one newline-delimited JSON message and deserialize it into `T`.
-    ///
-    /// Returns `Ok(None)` on clean EOF (peer closed the connection between
-    /// frames). A parse failure or transport error returns `Err`. The internal
-    /// read buffer is cleared on entry and reused across calls, so back-to-back
-    /// frames prefetched by the BufReader are preserved.
+    /// Read one newline-delimited JSON message. See
+    /// [`JsonLineFramed::read_message`] for the full contract (EOF handling,
+    /// parse errors, read-buffer reuse).
     pub async fn read_message<T: DeserializeOwned>(&mut self) -> Result<Option<T>> {
-        self.read_buf.clear();
-        let n = self
-            .reader
-            .read_until(b'\n', &mut self.read_buf)
-            .await
-            .context("transport read failed")?;
-        if n == 0 {
-            return Ok(None);
-        }
-        // Some peers may omit the trailing newline on the very last frame
-        // before closing. Accept both forms.
-        let slice: &[u8] = self.read_buf.strip_suffix(b"\n").unwrap_or(&self.read_buf);
-        let msg = serde_json::from_slice::<T>(slice)
-            .with_context(|| format!("failed to parse JSON frame ({} bytes)", slice.len()))?;
-        Ok(Some(msg))
+        self.framed.read_message().await
     }
 
-    /// Serialize `msg` as a single JSON object and write it followed by `\n`.
+    /// Serialize `msg` as one JSON object and write it followed by `\n`. See
+    /// [`JsonLineFramed::write_message`] for the embedded-newline guard.
     pub async fn write_message<T: Serialize>(&mut self, msg: &T) -> Result<()> {
-        let buf = serde_json::to_vec(msg).context("failed to serialize outgoing message")?;
-        debug_assert!(
-            !buf.contains(&b'\n'),
-            "serde_json output contained a newline — framing would break"
-        );
-        self.writer
-            .write_all(&buf)
-            .await
-            .context("transport write failed")?;
-        self.writer
-            .write_all(b"\n")
-            .await
-            .context("transport write (frame delimiter) failed")?;
-        self.writer
-            .flush()
-            .await
-            .context("transport flush failed")?;
-        Ok(())
+        self.framed.write_message(msg).await
     }
 }
 
@@ -220,6 +185,11 @@ mod tests {
     use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
     use serde_json::json;
     use tempfile::tempdir;
+    // `malformed_frame_returns_parse_error` writes raw bytes and shuts down the
+    // client side manually — both via extension-trait methods on `UnixStream`.
+    // The framing extraction removed these imports from the top of the module,
+    // so the test module imports them locally.
+    use tokio::io::AsyncWriteExt;
 
     /// Produces a temp socket path. The `TempDir` handle must outlive the
     /// listener, otherwise auto-cleanup will remove the directory before the
