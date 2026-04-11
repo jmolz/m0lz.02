@@ -7,9 +7,12 @@
 //! - T18: RPC method dispatch table (`server::router`)
 //!
 //! Transport modules are `#[cfg]`-gated per platform: only the matching one
-//! compiles on a given target. The orchestrator and router in T18+ will
-//! consume the platform-appropriate listener through a small trait defined
-//! here once the second impl lands.
+//! compiles on a given target. Both depend on the platform-neutral
+//! `framing` module for newline-delimited JSON-RPC framing. The orchestrator
+//! and router in T18+ will consume the platform-appropriate listener through
+//! a small trait defined here once T18 pulls on it.
+
+pub mod framing;
 
 #[cfg(unix)]
 pub mod unix;
