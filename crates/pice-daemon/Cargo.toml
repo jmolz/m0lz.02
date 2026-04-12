@@ -29,6 +29,8 @@ tracing-appender = "0.2"
 rusqlite = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+getrandom = { workspace = true }
+subtle = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
