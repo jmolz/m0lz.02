@@ -4,16 +4,17 @@
 //! - T15: Unix socket transport (`server::unix`) ✅
 //! - T16: Windows named pipe transport (`server::windows`) ✅
 //! - T17: authentication token generation + validation (`server::auth`) ✅
-//! - T18: RPC method dispatch table (`server::router`)
+//! - T18: RPC method dispatch table (`server::router`) ✅
 //!
 //! Transport modules are `#[cfg]`-gated per platform: only the matching one
 //! compiles on a given target. Both depend on the platform-neutral
-//! `framing` module for newline-delimited JSON-RPC framing. The orchestrator
-//! and router in T18+ will consume the platform-appropriate listener through
-//! a small trait defined here once T18 pulls on it.
+//! `framing` module for newline-delimited JSON-RPC framing. The router
+//! ([`router::route`]) is transport-agnostic — it operates on deserialized
+//! [`DaemonRequest`] values, not raw bytes.
 
 pub mod auth;
 pub mod framing;
+pub mod router;
 
 #[cfg(unix)]
 pub mod unix;
