@@ -26,3 +26,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+getrandom = "0.2"
+subtle = "2"
