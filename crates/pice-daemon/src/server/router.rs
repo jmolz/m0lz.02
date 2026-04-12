@@ -86,6 +86,20 @@ impl DaemonContext {
         }
     }
 
+    /// Construct a minimal context for inline mode (no socket, no auth).
+    ///
+    /// Used by `PICE_DAEMON_INLINE=1` and integration tests. Skips: socket
+    /// setup, auth token generation, stale-cleanup, watchdog. The token is
+    /// set to an empty string since inline mode never validates auth.
+    pub fn inline() -> Self {
+        Self {
+            active_token: String::new(),
+            version: env!("CARGO_PKG_VERSION"),
+            start_time: Instant::now(),
+            shutdown_requested: AtomicBool::new(false),
+        }
+    }
+
     /// Check whether a shutdown has been requested.
     ///
     /// The lifecycle event loop (T21) calls this to decide when to begin the
