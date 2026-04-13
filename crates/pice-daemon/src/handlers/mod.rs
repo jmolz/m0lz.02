@@ -154,34 +154,51 @@ mod tests {
         assert!(dir.path().join(".pice/config.toml").exists());
     }
 
+    /// Provider-backed handlers (prime, plan, execute, review) require a real
+    /// provider binary and are tested in integration tests. Unit tests verify
+    /// early-exit paths (e.g., missing plan file) or that the handler returns
+    /// an error when the provider is unavailable.
+
     #[tokio::test]
-    async fn dispatch_prime() {
+    async fn dispatch_prime_errors_without_provider() {
         let ctx = test_ctx();
         let req = CommandRequest::Prime(pice_core::cli::PrimeRequest { json: false });
-        let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        // Provider startup will fail in the test environment — that's expected.
+        let result = dispatch(req, &ctx, &NullSink).await;
+        assert!(result.is_err(), "prime should error without a provider");
     }
 
     #[tokio::test]
-    async fn dispatch_plan() {
+    async fn dispatch_plan_errors_without_provider() {
         let ctx = test_ctx();
         let req = CommandRequest::Plan(pice_core::cli::PlanRequest {
             description: "test feature".to_string(),
             json: false,
         });
-        let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        let result = dispatch(req, &ctx, &NullSink).await;
+        assert!(result.is_err(), "plan should error without a provider");
     }
 
     #[tokio::test]
-    async fn dispatch_execute() {
-        let ctx = test_ctx();
+    async fn dispatch_execute_missing_plan_returns_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx =
+            DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
         let req = CommandRequest::Execute(pice_core::cli::ExecuteRequest {
-            plan_path: std::path::PathBuf::from("plan.md"),
+            plan_path: std::path::PathBuf::from("nonexistent-plan.md"),
             json: false,
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        match &resp {
+            CommandResponse::Exit { code, message } => {
+                assert_eq!(*code, 1);
+                assert!(
+                    message.contains("not found"),
+                    "should mention plan not found, got: {message}"
+                );
+            }
+            other => panic!("expected Exit response for missing plan, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -196,11 +213,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_review() {
+    async fn dispatch_review_errors_without_provider() {
         let ctx = test_ctx();
         let req = CommandRequest::Review(pice_core::cli::ReviewRequest { json: false });
-        let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        let result = dispatch(req, &ctx, &NullSink).await;
+        assert!(result.is_err(), "review should error without a provider");
     }
 
     #[tokio::test]
