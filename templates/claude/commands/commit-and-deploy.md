@@ -31,7 +31,7 @@ cargo build --release
 pnpm build
 ```
 
-**Expected baseline:** 168 Rust tests, 49 TypeScript tests, 0 lint errors, 0 warnings, clean release build.
+**Expected baseline:** 271 Rust tests (1 ignored), 49 TypeScript tests, 0 lint errors, 0 warnings, clean release build.
 
 ## Determine Context (Worktree or Main)
 

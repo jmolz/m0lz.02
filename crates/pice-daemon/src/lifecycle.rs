@@ -166,7 +166,7 @@ async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
     use crate::server::windows::WindowsPipeListener;
     use pice_core::protocol::DaemonRequest;
 
-    let listener = WindowsPipeListener::bind(name)?;
+    let listener = WindowsPipeListener::bind(name).await?;
     info!(pipe = %name, "daemon listening");
 
     loop {

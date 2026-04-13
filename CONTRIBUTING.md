@@ -30,8 +30,10 @@ pnpm test
 ## Project Structure
 
 ```
-crates/pice-cli/              Rust binary (CLI, engine, metrics, provider host)
-crates/pice-protocol/         Shared JSON-RPC types (Rust side)
+crates/pice-cli/              Thin CLI adapter (arg parsing, terminal rendering, daemon RPC)
+crates/pice-daemon/           Headless daemon (orchestrator, provider host, metrics, templates)
+crates/pice-core/             Shared library (config, protocol types, pure logic — zero async)
+crates/pice-protocol/         Shared JSON-RPC types for core↔provider communication
 packages/provider-protocol/   Shared JSON-RPC types (TypeScript side)
 packages/provider-base/       Provider utilities
 packages/provider-claude-code/ Claude Code SDK provider
@@ -44,7 +46,7 @@ templates/                    Files embedded in binary for pice init
 
 | Area | Directories | Language |
 |------|-------------|----------|
-| Core CLI, engine, metrics | `crates/`, `templates/` | Rust |
+| CLI adapter, daemon, core logic | `crates/`, `templates/` | Rust |
 | Providers | `packages/` | TypeScript |
 | JSON-RPC protocol | `crates/pice-protocol/` AND `packages/provider-protocol/` | Both |
 
@@ -60,7 +62,7 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build && \
 cargo build --release
 ```
 
-Expected baseline: 167 Rust tests, 49 TypeScript tests, zero lint errors, zero warnings, clean release build.
+Expected baseline: 271 Rust tests (1 ignored), 49 TypeScript tests, zero lint errors, zero warnings, clean release build.
 
 ## Testing
 
