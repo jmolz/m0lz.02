@@ -452,6 +452,10 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
 
         let result = get_project_tree(dir.path()).unwrap();
-        assert!(result.contains("src/main.rs"));
+        // Check for both Unix and Windows path separators
+        assert!(
+            result.contains("src/main.rs") || result.contains("src\\main.rs"),
+            "expected tree to contain src/main.rs or src\\main.rs, got:\n{result}"
+        );
     }
 }
