@@ -204,10 +204,12 @@ mod tests {
     #[test]
     fn default_log_path_ends_with_expected_suffix() {
         let p = default_log_path();
-        let s = p.to_string_lossy();
+        let expected_suffix = Path::new(".pice").join("logs").join("daemon.log");
         assert!(
-            s.ends_with(".pice/logs/daemon.log"),
-            "expected path ending with .pice/logs/daemon.log, got {s}"
+            p.ends_with(&expected_suffix),
+            "expected path ending with {}, got {}",
+            expected_suffix.display(),
+            p.display()
         );
     }
 
