@@ -44,6 +44,9 @@ pub async fn run_session(
         working_directory: project_root.to_string_lossy().to_string(),
         model: None,
         system_prompt: None,
+        layer: None,
+        layer_paths: None,
+        contract_path: None,
     })?;
     let create_result = orchestrator
         .request(methods::SESSION_CREATE, Some(create_params))

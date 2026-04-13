@@ -230,6 +230,23 @@ pub struct SessionCreateParams {
         rename = "systemPrompt"
     )]
     pub system_prompt: Option<String>,
+    /// v0.2: layer name for stack loops (e.g., "backend", "frontend").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+    /// v0.2: glob patterns for this layer's files.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "layerPaths"
+    )]
+    pub layer_paths: Option<Vec<String>>,
+    /// v0.2: path to layer contract file.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "contractPath"
+    )]
+    pub contract_path: Option<String>,
 }
 
 /// Result of the `session/create` method.
@@ -519,6 +536,9 @@ mod tests {
             working_directory: "/tmp/project".to_string(),
             model: None,
             system_prompt: None,
+            layer: None,
+            layer_paths: None,
+            contract_path: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("\"workingDirectory\""));
@@ -534,6 +554,9 @@ mod tests {
             working_directory: "/tmp/project".to_string(),
             model: Some("claude-opus-4-6".to_string()),
             system_prompt: Some("You are a planner.".to_string()),
+            layer: None,
+            layer_paths: None,
+            contract_path: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("\"model\""));
@@ -541,6 +564,61 @@ mod tests {
         let parsed: SessionCreateParams = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.model.unwrap(), "claude-opus-4-6");
         assert_eq!(parsed.system_prompt.unwrap(), "You are a planner.");
+    }
+
+    #[test]
+    fn session_create_with_layer_fields() {
+        let params = SessionCreateParams {
+            working_directory: "/tmp/worktree/backend".to_string(),
+            model: None,
+            system_prompt: None,
+            layer: Some("backend".to_string()),
+            layer_paths: Some(vec!["src/server/**".to_string(), "lib/**".to_string()]),
+            contract_path: Some(".pice/contracts/backend.toml".to_string()),
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        // Verify camelCase serialization
+        assert!(json.contains("\"layer\""));
+        assert!(json.contains("\"layerPaths\""));
+        assert!(json.contains("\"contractPath\""));
+        // Verify snake_case is NOT in JSON
+        assert!(!json.contains("\"layer_paths\""));
+        assert!(!json.contains("\"contract_path\""));
+        // Roundtrip
+        let parsed: SessionCreateParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.layer.unwrap(), "backend");
+        assert_eq!(
+            parsed.layer_paths.unwrap(),
+            vec!["src/server/**", "lib/**"]
+        );
+        assert_eq!(
+            parsed.contract_path.unwrap(),
+            ".pice/contracts/backend.toml"
+        );
+    }
+
+    #[test]
+    fn session_create_without_layer_fields() {
+        let params = SessionCreateParams {
+            working_directory: "/tmp/project".to_string(),
+            model: None,
+            system_prompt: None,
+            layer: None,
+            layer_paths: None,
+            contract_path: None,
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        // Layer fields must be absent from JSON when None (backwards compatible)
+        assert!(!json.contains("\"layer\""));
+        assert!(!json.contains("\"layerPaths\""));
+        assert!(!json.contains("\"contractPath\""));
+        // Deserialize a v0.1 payload without layer fields
+        let v1_json = r#"{"workingDirectory":"/old/project"}"#;
+        let parsed: SessionCreateParams = serde_json::from_str(v1_json).unwrap();
+        assert_eq!(parsed.working_directory, "/old/project");
+        assert!(parsed.layer.is_none());
+        assert!(parsed.layer_paths.is_none());
+        assert!(parsed.contract_path.is_none());
     }
 
     #[test]

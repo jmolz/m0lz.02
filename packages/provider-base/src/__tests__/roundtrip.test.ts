@@ -261,6 +261,42 @@ describe('JSON-RPC roundtrip (matches Rust wire format)', () => {
     expect(parsed.systemPrompt).toBe('You are a planner.');
   });
 
+  it('SessionCreateParams with layer fields (v0.2)', () => {
+    const params: SessionCreateParams = {
+      workingDirectory: '/tmp/worktree/backend',
+      layer: 'backend',
+      layerPaths: ['src/server/**', 'lib/**'],
+      contractPath: '.pice/contracts/backend.toml',
+    };
+    const json = JSON.stringify(params);
+    expect(json).toContain('"layer"');
+    expect(json).toContain('"layerPaths"');
+    expect(json).toContain('"contractPath"');
+    // Verify no snake_case leaks
+    expect(json).not.toContain('"layer_paths"');
+    expect(json).not.toContain('"contract_path"');
+    const parsed: SessionCreateParams = JSON.parse(json);
+    expect(parsed.layer).toBe('backend');
+    expect(parsed.layerPaths).toEqual(['src/server/**', 'lib/**']);
+    expect(parsed.contractPath).toBe('.pice/contracts/backend.toml');
+  });
+
+  it('SessionCreateParams without layer fields (backwards compatible)', () => {
+    const params: SessionCreateParams = { workingDirectory: '/tmp/project' };
+    const json = JSON.stringify(params);
+    // Layer fields must be absent when not set
+    expect(json).not.toContain('"layer"');
+    expect(json).not.toContain('"layerPaths"');
+    expect(json).not.toContain('"contractPath"');
+    // Deserialize a v0.1 payload without layer fields
+    const v1Json = '{"workingDirectory":"/old/project"}';
+    const parsed: SessionCreateParams = JSON.parse(v1Json);
+    expect(parsed.workingDirectory).toBe('/old/project');
+    expect(parsed.layer).toBeUndefined();
+    expect(parsed.layerPaths).toBeUndefined();
+    expect(parsed.contractPath).toBeUndefined();
+  });
+
   it('EvaluateCreateParams with optional fields', () => {
     const params: EvaluateCreateParams = {
       contract: { criteria: [] },

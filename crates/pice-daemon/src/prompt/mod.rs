@@ -5,6 +5,7 @@
 //! `pice-core::prompt::helpers` in T6.
 
 pub mod builders;
+pub mod layer_builder;
 
 pub use builders::{
     build_adversarial_prompt, build_commit_prompt, build_evaluate_prompt, build_execute_prompt,

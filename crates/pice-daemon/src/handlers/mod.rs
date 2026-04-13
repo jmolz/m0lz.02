@@ -30,6 +30,7 @@ pub mod evaluate;
 pub mod execute;
 pub mod handoff;
 pub mod init;
+pub mod layers;
 pub mod metrics;
 pub mod plan;
 pub mod prime;
@@ -101,6 +102,7 @@ pub async fn dispatch(
         CommandRequest::Status(r) => status::run(r, ctx, sink).await,
         CommandRequest::Metrics(r) => metrics::run(r, ctx, sink).await,
         CommandRequest::Benchmark(r) => benchmark::run(r, ctx, sink).await,
+        CommandRequest::Layers(r) => layers::run(r, ctx, sink).await,
     }
 }
 
@@ -120,6 +122,7 @@ mod tests {
         let ctx = DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
         let req = CommandRequest::Init(pice_core::cli::InitRequest {
             force: false,
+            upgrade: false,
             json: false,
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
@@ -398,6 +401,7 @@ db_path = ".pice/metrics.db"
         let ctx = DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
         let req = CommandRequest::Init(pice_core::cli::InitRequest {
             force: false,
+            upgrade: false,
             json: true,
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");

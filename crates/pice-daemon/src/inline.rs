@@ -100,6 +100,7 @@ mod tests {
         };
         let req = CommandRequest::Init(InitRequest {
             force: false,
+            upgrade: false,
             json: false,
         });
         let _resp = run_command(req, &sink).await.expect("run_command");

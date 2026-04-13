@@ -8,6 +8,10 @@ pub struct InitArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Upgrade a v0.1 project: generate layers.toml and contract templates
+    #[arg(long)]
+    pub upgrade: bool,
+
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -17,6 +21,7 @@ impl From<InitArgs> for InitRequest {
     fn from(args: InitArgs) -> Self {
         InitRequest {
             force: args.force,
+            upgrade: args.upgrade,
             json: args.json,
         }
     }

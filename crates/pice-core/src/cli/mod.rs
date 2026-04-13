@@ -41,6 +41,7 @@ pub enum CommandRequest {
     Status(StatusRequest),
     Metrics(MetricsRequest),
     Benchmark(BenchmarkRequest),
+    Layers(LayersRequest),
     // NOTE: Completions is handled entirely by clap at the CLI layer.
     // NOTE: Daemon subcommand (start/stop/etc.) is also CLI-only.
 }
@@ -69,6 +70,8 @@ pub enum CommandResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitRequest {
     pub force: bool,
+    #[serde(default)]
+    pub upgrade: bool,
     pub json: bool,
 }
 
@@ -129,6 +132,21 @@ pub struct BenchmarkRequest {
     pub json: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayersRequest {
+    pub subcommand: LayersSubcommand,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "kebab-case")]
+pub enum LayersSubcommand {
+    Detect { write: bool, force: bool },
+    List,
+    Check,
+    Graph,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +155,7 @@ mod tests {
     fn init_request_roundtrip() {
         let req = CommandRequest::Init(InitRequest {
             force: true,
+            upgrade: false,
             json: false,
         });
         let wire = serde_json::to_string(&req).unwrap();
@@ -146,8 +165,38 @@ mod tests {
         match parsed {
             CommandRequest::Init(r) => {
                 assert!(r.force);
+                assert!(!r.upgrade);
                 assert!(!r.json);
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn init_request_upgrade_roundtrip() {
+        let req = CommandRequest::Init(InitRequest {
+            force: false,
+            upgrade: true,
+            json: false,
+        });
+        let wire = serde_json::to_string(&req).unwrap();
+        let parsed: CommandRequest = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            CommandRequest::Init(r) => {
+                assert!(r.upgrade);
+                assert!(!r.force);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn init_request_upgrade_defaults_false() {
+        // Backwards compat: old JSON without "upgrade" field should default to false
+        let json = r#"{"command":"init","force":false,"json":false}"#;
+        let parsed: CommandRequest = serde_json::from_str(json).unwrap();
+        match parsed {
+            CommandRequest::Init(r) => assert!(!r.upgrade),
             _ => panic!("wrong variant"),
         }
     }
@@ -256,6 +305,50 @@ mod tests {
     }
 
     #[test]
+    fn layers_request_roundtrip() {
+        let req = CommandRequest::Layers(LayersRequest {
+            subcommand: LayersSubcommand::Detect {
+                write: true,
+                force: false,
+            },
+            json: false,
+        });
+        let wire = serde_json::to_string(&req).unwrap();
+        assert!(wire.contains("\"command\":\"layers\""));
+        let parsed: CommandRequest = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            CommandRequest::Layers(r) => {
+                assert!(!r.json);
+                match r.subcommand {
+                    LayersSubcommand::Detect { write, force } => {
+                        assert!(write);
+                        assert!(!force);
+                    }
+                    _ => panic!("wrong subcommand"),
+                }
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn layers_subcommand_list_roundtrip() {
+        let req = CommandRequest::Layers(LayersRequest {
+            subcommand: LayersSubcommand::List,
+            json: true,
+        });
+        let wire = serde_json::to_string(&req).unwrap();
+        let parsed: CommandRequest = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            CommandRequest::Layers(r) => {
+                assert!(r.json);
+                matches!(r.subcommand, LayersSubcommand::List);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
     fn command_request_kebab_case_tag() {
         // Verify every variant uses kebab-case tags matching the clap command names.
         for (req, expected_tag) in [
@@ -278,6 +371,13 @@ mod tests {
                     json: false,
                 }),
                 "evaluate",
+            ),
+            (
+                CommandRequest::Layers(LayersRequest {
+                    subcommand: LayersSubcommand::Graph,
+                    json: false,
+                }),
+                "layers",
             ),
         ] {
             let wire = serde_json::to_string(&req).unwrap();

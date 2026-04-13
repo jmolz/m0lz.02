@@ -54,6 +54,72 @@ pub async fn run(
         }
     };
 
+    // Check for Stack Loops (v0.2): if .pice/layers.toml exists, run per-layer evaluation
+    let layers_path = project_root.join(".pice/layers.toml");
+    if layers_path.exists() {
+        let layers_config = pice_core::layers::LayersConfig::load(&layers_path)
+            .context("failed to load layers config")?;
+
+        let manifest = crate::orchestrator::stack_loops::run_stack_loops(
+            &layers_config,
+            &plan_path,
+            project_root,
+            &config.evaluation.primary.provider,
+            &config.evaluation.primary.model,
+            config,
+            sink,
+            req.json,
+        )
+        .await?;
+
+        // Format and return results from manifest
+        if req.json {
+            return Ok(CommandResponse::Json {
+                value: serde_json::to_value(&manifest)?,
+            });
+        } else {
+            let mut output = format!(
+                "\nStack Loops Evaluation — {} layers\n",
+                manifest.layers.len()
+            );
+            output.push_str(&"=".repeat(39));
+            output.push('\n');
+            for lr in &manifest.layers {
+                let status_str = match lr.status {
+                    pice_core::layers::manifest::LayerStatus::Passed => "PASS",
+                    pice_core::layers::manifest::LayerStatus::Failed => "FAIL",
+                    _ => "SKIP",
+                };
+                output.push_str(&format!("  [{status_str}] {}\n", lr.name));
+            }
+            let overall = match manifest.overall_status {
+                pice_core::layers::manifest::ManifestStatus::Passed => "PASS",
+                _ => "FAIL",
+            };
+            output.push_str(&format!("\nOverall: {overall}\n"));
+
+            if matches!(
+                manifest.overall_status,
+                pice_core::layers::manifest::ManifestStatus::Passed
+            ) {
+                return Ok(CommandResponse::Text { content: output });
+            } else {
+                return Ok(CommandResponse::Exit {
+                    code: 2,
+                    message: output,
+                });
+            }
+        }
+    }
+
+    // v0.1: Single-loop evaluation (existing code below)
+    if !req.json {
+        sink.send_chunk(
+            "No .pice/layers.toml found — running single-loop evaluation (v0.1 behavior).\n",
+        );
+        sink.send_chunk("  Run `pice layers detect --write` to enable per-layer evaluation.\n\n");
+    }
+
     let tier = contract.tier;
     let contract_json = serde_json::to_value(&contract).context("failed to serialize contract")?;
 

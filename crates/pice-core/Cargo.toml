@@ -16,6 +16,8 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
+glob = "0.3"
+sha2 = "0.10"
 # NOTE: pice-core is PURE logic. Do NOT add tokio, reqwest, rusqlite, or any
 # async/network/database dependency. Graded by contract criterion #1 of the
 # Phase 0 plan (see .claude/plans/phase-0-daemon-foundation.md).

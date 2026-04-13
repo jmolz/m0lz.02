@@ -57,6 +57,9 @@ enum Commands {
     /// Before/after workflow effectiveness comparison
     Benchmark(commands::benchmark::BenchmarkArgs),
 
+    /// Manage layer detection and configuration
+    Layers(commands::layers::LayersArgs),
+
     /// Manage the daemon process (start, stop, status, restart, logs)
     Daemon(commands::daemon::DaemonArgs),
 
@@ -92,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status(args) => commands::status::run(args).await,
         Commands::Metrics(args) => commands::metrics::run(args).await,
         Commands::Benchmark(args) => commands::benchmark::run(args).await,
+        Commands::Layers(args) => commands::layers::run(args).await,
         Commands::Daemon(args) => commands::daemon::run(args).await,
         Commands::Completions { shell } => {
             let mut cmd = <Cli as clap::CommandFactory>::command();

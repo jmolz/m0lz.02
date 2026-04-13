@@ -56,6 +56,9 @@ export interface SessionCreateParams {
   workingDirectory: string;
   model?: string;
   systemPrompt?: string;
+  layer?: string;           // v0.2: layer name for stack loops
+  layerPaths?: string[];    // v0.2: glob patterns for this layer's files
+  contractPath?: string;    // v0.2: path to layer contract
 }
 
 export interface SessionCreateResult {

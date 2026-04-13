@@ -20,6 +20,7 @@
 
 pub mod core;
 pub mod session;
+pub mod stack_loops;
 pub mod stream;
 
 pub use core::ProviderOrchestrator;

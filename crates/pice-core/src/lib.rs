@@ -26,10 +26,12 @@
 //! | [`paths`] | Path normalization helpers |
 //! | [`protocol`] | Daemon RPC type definitions (not provider RPC) |
 //! | [`cli`] | Shared `CommandRequest` / `CommandResponse` |
+//! | [`layers`] | Layer types, detection, diff filtering, manifest |
 //! | [`transport`] | Socket path abstractions (Unix / Windows pipe) |
 
 pub mod cli;
 pub mod config;
+pub mod layers;
 pub mod paths;
 pub mod plan_parser;
 pub mod prompt;

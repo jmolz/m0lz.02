@@ -221,6 +221,7 @@ async fn all_command_types_dispatch_successfully() {
             "init",
             CommandRequest::Init(InitRequest {
                 force: false,
+                upgrade: false,
                 json: false,
             }),
         ),
