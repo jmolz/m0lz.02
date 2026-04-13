@@ -25,7 +25,30 @@ Read the ENTIRE plan before writing any code. Understand:
 
 ---
 
-## Step 2: Verify Preconditions
+## Step 2: Set Up Worktree
+
+All feature execution happens in an isolated git worktree. Check the plan's `## Worktree` section for the branch name and path.
+
+```bash
+git branch --show-current
+git worktree list
+```
+
+**If NOT already in the correct worktree**, create one:
+
+```bash
+# From the main repo directory
+git worktree add {worktree-path} -b {branch-name}
+cd {worktree-path}
+```
+
+**If a worktree already exists** for this feature (e.g., resuming work), navigate to it:
+
+```bash
+cd {worktree-path}
+```
+
+### Verify Preconditions
 
 ```bash
 git status
@@ -34,10 +57,10 @@ git branch --show-current
 
 Check:
 
+- You are in the worktree directory, on the feature branch
 - Working tree is clean (or only has expected changes)
-- Correct branch is checked out
 - Any required env vars are set (check `.env` or `.env.example`)
-- Dependencies are installed
+- Dependencies are installed (run the install command — worktrees share `node_modules` but may need setup)
 
 ---
 
