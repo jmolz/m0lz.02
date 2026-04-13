@@ -1,3 +1,7 @@
+// v0.1 aggregation logic — dead code after T23 rewrites metrics/benchmark
+// commands to go through the adapter. Retained for unit tests.
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use serde::Serialize;
 

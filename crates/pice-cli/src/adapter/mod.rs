@@ -17,13 +17,6 @@
 //! auto-start spawns `pice-daemon` as a detached child process and polls the
 //! socket for readiness.
 //!
-//! T23 rewrites all 11 command dispatchers to call [`dispatch`]; until then,
-//! the existing v0.1 command handlers remain wired in `main.rs`.
-
-// T23 rewrites command dispatchers to call adapter::dispatch(). Until then,
-// nothing in main.rs calls into this module, so all items appear dead.
-#![allow(dead_code)]
-
 pub mod autostart;
 pub mod inline;
 pub mod transport;

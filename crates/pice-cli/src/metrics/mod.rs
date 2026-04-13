@@ -17,6 +17,10 @@
 
 pub mod aggregator;
 
+// v0.1 re-exports — only resolve_metrics_db_path and db remain used (by
+// init::run_in tests). The rest become dead after T23 rewrites commands to
+// go through the adapter. Will be fully removed when daemon handlers are ported.
+#[allow(unused_imports)]
 pub use pice_daemon::metrics::{
     db, normalize_plan_path, open_metrics_db, resolve_metrics_db_path, store, telemetry,
 };
