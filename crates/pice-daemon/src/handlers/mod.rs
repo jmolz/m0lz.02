@@ -115,22 +115,6 @@ mod tests {
         DaemonContext::new_for_test("test-token")
     }
 
-    /// Helper: assert a response is a non-empty Text or Json variant.
-    fn assert_stub_response(resp: &CommandResponse) {
-        match resp {
-            CommandResponse::Text { content } => {
-                assert!(
-                    content.contains("stub"),
-                    "stub should mention 'stub', got: {content}"
-                );
-            }
-            CommandResponse::Json { value } => {
-                assert_eq!(value["status"], "stub");
-            }
-            other => panic!("expected Text or Json stub, got: {other:?}"),
-        }
-    }
-
     #[tokio::test]
     async fn dispatch_init() {
         let dir = tempfile::tempdir().unwrap();
@@ -202,14 +186,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_evaluate() {
-        let ctx = test_ctx();
+    async fn dispatch_evaluate_missing_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx =
+            DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
         let req = CommandRequest::Evaluate(pice_core::cli::EvaluateRequest {
             plan_path: std::path::PathBuf::from("plan.md"),
             json: false,
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        match &resp {
+            CommandResponse::Exit { code, message } => {
+                assert_eq!(*code, 1);
+                assert!(
+                    message.contains("plan file not found"),
+                    "expected 'plan file not found', got: {message}"
+                );
+            }
+            other => panic!("expected Exit{{code:1}} for missing plan, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -221,53 +216,188 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_commit() {
-        let ctx = test_ctx();
+    async fn dispatch_commit_nothing_staged() {
+        // Use a temp dir with a git repo but no staged changes
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let ctx =
+            DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
         let req = CommandRequest::Commit(pice_core::cli::CommitRequest {
             message: None,
             dry_run: false,
             json: false,
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        match &resp {
+            CommandResponse::Exit { code, message } => {
+                assert_eq!(*code, 1);
+                assert!(
+                    message.contains("nothing staged"),
+                    "expected 'nothing staged', got: {message}"
+                );
+            }
+            other => panic!("expected Exit response, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
-    async fn dispatch_handoff() {
-        let ctx = test_ctx();
+    async fn dispatch_commit_with_message_dry_run() {
+        // Use a temp dir with a git repo and staged changes
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::write(dir.path().join("file.rs"), "fn main() {}").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "file.rs"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        let ctx =
+            DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
+        let req = CommandRequest::Commit(pice_core::cli::CommitRequest {
+            message: Some("test: dry run commit".to_string()),
+            dry_run: true,
+            json: false,
+        });
+        let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
+        match &resp {
+            CommandResponse::Text { content } => {
+                assert!(
+                    content.contains("Dry run"),
+                    "expected dry run output, got: {content}"
+                );
+                assert!(content.contains("test: dry run commit"));
+            }
+            other => panic!("expected Text response for dry run, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_handoff_errors_without_provider() {
+        // Handoff requires a provider. Point config at a nonexistent provider
+        // so ProviderOrchestrator::start fails immediately.
+        let dir = tempfile::tempdir().unwrap();
+        let pice_dir = dir.path().join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        std::fs::write(
+            pice_dir.join("config.toml"),
+            r#"
+[provider]
+name = "nonexistent-provider"
+[evaluation]
+[evaluation.primary]
+provider = "nonexistent-provider"
+model = "fake"
+[evaluation.adversarial]
+provider = "nonexistent-provider"
+model = "fake"
+effort = "high"
+enabled = false
+[evaluation.tiers]
+tier1_models = ["fake"]
+tier2_models = ["fake"]
+tier3_models = ["fake"]
+tier3_agent_team = false
+[telemetry]
+enabled = false
+endpoint = "https://telemetry.pice.dev/v1/events"
+[metrics]
+db_path = ".pice/metrics.db"
+"#,
+        )
+        .unwrap();
+
+        // Construct context — it loads config from the temp dir
+        let ctx =
+            DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
+
         let req = CommandRequest::Handoff(pice_core::cli::HandoffRequest {
             output: None,
             json: false,
         });
-        let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        // Provider start will fail — verify it returns an error, not a panic
+        let result = dispatch(req, &ctx, &NullSink).await;
+        assert!(result.is_err(), "expected provider start error");
     }
 
     #[tokio::test]
     async fn dispatch_status() {
-        let ctx = test_ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx =
+            DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
         let req = CommandRequest::Status(pice_core::cli::StatusRequest { json: false });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        match &resp {
+            CommandResponse::Text { content } => {
+                assert!(
+                    content.contains("PICE Status"),
+                    "status should contain header, got: {content}"
+                );
+            }
+            other => panic!("expected Text response for status, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
     async fn dispatch_metrics() {
-        let ctx = test_ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx =
+            DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
         let req = CommandRequest::Metrics(pice_core::cli::MetricsRequest {
             json: false,
             csv: false,
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        match &resp {
+            CommandResponse::Text { content } => {
+                assert!(
+                    content.contains("metrics") || content.contains("Metrics") || content.contains("pice init"),
+                    "metrics should return text output, got: {content}"
+                );
+            }
+            other => panic!("expected Text response for metrics, got: {other:?}"),
+        }
     }
 
     #[tokio::test]
     async fn dispatch_benchmark() {
-        let ctx = test_ctx();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx =
+            DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
         let req = CommandRequest::Benchmark(pice_core::cli::BenchmarkRequest { json: false });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-        assert_stub_response(&resp);
+        match &resp {
+            CommandResponse::Text { content } => {
+                assert!(
+                    content.contains("Benchmark"),
+                    "benchmark should contain header, got: {content}"
+                );
+            }
+            other => panic!("expected Text response for benchmark, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

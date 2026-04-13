@@ -43,17 +43,17 @@ pub async fn run_command(req: CommandRequest, sink: &dyn StreamSink) -> Result<C
 mod tests {
     use super::*;
     use crate::orchestrator::NullSink;
-    use pice_core::cli::StatusRequest;
+    use pice_core::cli::{InitRequest, StatusRequest};
 
     #[tokio::test]
-    async fn inline_status_returns_stub_response() {
+    async fn inline_status_returns_text_response() {
         let req = CommandRequest::Status(StatusRequest { json: false });
         let resp = run_command(req, &NullSink).await.expect("run_command");
         match resp {
             CommandResponse::Text { content } => {
                 assert!(
-                    content.contains("stub"),
-                    "inline status should return stub, got: {content}"
+                    content.contains("PICE Status"),
+                    "status should contain header, got: {content}"
                 );
             }
             other => panic!("expected Text response, got: {other:?}"),
@@ -62,23 +62,23 @@ mod tests {
 
     #[tokio::test]
     async fn inline_json_mode_returns_json_variant() {
-        // Use evaluate (still a stub) to test json-mode variant selection
-        // without needing a temp directory or API keys.
-        let req = CommandRequest::Evaluate(pice_core::cli::EvaluateRequest {
-            plan_path: std::path::PathBuf::from("plan.md"),
-            json: true,
-        });
+        // Evaluate with a missing plan file returns Exit in JSON mode
+        // (plan file not found), so use status --json instead.
+        let req = CommandRequest::Status(StatusRequest { json: true });
         let resp = run_command(req, &NullSink).await.expect("run_command");
         match resp {
             CommandResponse::Json { value } => {
-                assert_eq!(value["status"], "stub");
+                assert!(
+                    value["plans"].is_array(),
+                    "status JSON should have plans array, got: {value}"
+                );
             }
             other => panic!("expected Json response, got: {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn inline_streams_to_sink() {
+    async fn inline_init_creates_files() {
         use std::sync::Mutex;
 
         struct CaptureSink {
@@ -91,16 +91,23 @@ mod tests {
             }
         }
 
+        // Use a temp dir so init has a clean project root
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
         let sink = CaptureSink {
             chunks: Mutex::new(Vec::new()),
         };
-        let req = CommandRequest::Status(StatusRequest { json: false });
+        let req = CommandRequest::Init(InitRequest {
+            force: false,
+            json: false,
+        });
         let _resp = run_command(req, &sink).await.expect("run_command");
 
         let chunks = sink.chunks.lock().unwrap();
         assert!(
             !chunks.is_empty(),
-            "handler should have sent at least one chunk"
+            "init handler should have sent at least one chunk"
         );
     }
 }

@@ -155,17 +155,18 @@ impl DaemonContext {
 
     /// Test-only constructor with a custom project root.
     ///
-    /// Used by handler tests that need to point at a temporary directory
-    /// (e.g., `init` handler tests that scaffold files).
+    /// Loads config from the project root's `.pice/config.toml` if present,
+    /// otherwise uses defaults.
     #[cfg(test)]
     pub(crate) fn new_for_test_with_root(token: &str, project_root: PathBuf) -> Self {
+        let config = load_config(&project_root);
         Self {
             active_token: token.to_string(),
             version: "0.1.0-test",
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
             project_root,
-            config: PiceConfig::default(),
+            config,
         }
     }
 }

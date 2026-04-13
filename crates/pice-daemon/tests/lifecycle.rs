@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pice_core::cli::{CommandRequest, CommandResponse, PrimeRequest, StatusRequest};
+use pice_core::cli::{CommandRequest, CommandResponse, StatusRequest};
 use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
 use pice_core::transport::SocketPath;
 use pice_daemon::lifecycle;
@@ -95,8 +95,8 @@ async fn full_lifecycle_multiple_rpcs_on_one_connection() {
     assert!(result["version"].as_str().is_some());
     assert!(result["uptime_seconds"].as_u64().is_some());
 
-    // 2. Dispatch a status command.
-    let status_req = CommandRequest::Status(StatusRequest { json: false });
+    // 2. Dispatch a status command (no provider needed).
+    let status_req = CommandRequest::Status(StatusRequest { json: true });
     let params = serde_json::to_value(&status_req).expect("serialize");
     let dispatch_req = DaemonRequest::new(2, methods::CLI_DISPATCH, &token, params);
     conn.write_message(&dispatch_req).await.expect("write");
@@ -108,19 +108,22 @@ async fn full_lifecycle_multiple_rpcs_on_one_connection() {
     let cmd_resp: CommandResponse =
         serde_json::from_value(status_resp.result.expect("result")).expect("deserialize");
     match cmd_resp {
-        CommandResponse::Text { content } => {
-            assert!(content.contains("stub"), "status should return stub");
+        CommandResponse::Json { value } => {
+            assert!(value["plans"].is_array(), "status json should have plans");
         }
-        other => panic!("expected Text, got: {other:?}"),
+        other => panic!("expected Json, got: {other:?}"),
     }
 
-    // 3. Dispatch a prime command.
-    let prime_req = CommandRequest::Prime(PrimeRequest { json: false });
-    let params = serde_json::to_value(&prime_req).expect("serialize");
+    // 3. Dispatch an evaluate command with missing plan (no provider needed).
+    let eval_req = CommandRequest::Evaluate(pice_core::cli::EvaluateRequest {
+        plan_path: "nonexistent.md".into(),
+        json: false,
+    });
+    let params = serde_json::to_value(&eval_req).expect("serialize");
     let dispatch_req = DaemonRequest::new(3, methods::CLI_DISPATCH, &token, params);
     conn.write_message(&dispatch_req).await.expect("write");
-    let prime_resp: DaemonResponse = conn.read_message().await.expect("read").expect("not EOF");
-    assert!(prime_resp.error.is_none(), "prime dispatch should succeed");
+    let eval_resp: DaemonResponse = conn.read_message().await.expect("read").expect("not EOF");
+    assert!(eval_resp.error.is_none(), "eval dispatch should succeed (Exit response, not error)");
 
     // 4. Shutdown.
     let shutdown_resp = rpc(&mut conn, 99, methods::DAEMON_SHUTDOWN, &token).await;
@@ -197,7 +200,11 @@ async fn shutdown_removes_socket_file() {
     );
 }
 
-/// Dispatch all 11 command types to verify handler wiring is complete.
+/// Dispatch non-provider command types to verify handler wiring is complete.
+///
+/// Provider-dependent commands (prime, plan, review, handoff) are tested in
+/// the integration test suite with the stub provider. Here we only test
+/// commands that complete without spawning a provider process.
 #[tokio::test]
 async fn all_command_types_dispatch_successfully() {
     use pice_core::cli::*;
@@ -205,7 +212,8 @@ async fn all_command_types_dispatch_successfully() {
     let (_dir, socket_path, token_path, handle) = start_daemon().await;
     let (mut conn, token) = raw_connect(&socket_path, &token_path).await;
 
-    let commands: Vec<(&str, CommandRequest)> = vec![
+    // Commands that don't need a provider — should all return success responses.
+    let no_provider_commands: Vec<(&str, CommandRequest)> = vec![
         (
             "init",
             CommandRequest::Init(InitRequest {
@@ -213,44 +221,25 @@ async fn all_command_types_dispatch_successfully() {
                 json: false,
             }),
         ),
-        ("prime", CommandRequest::Prime(PrimeRequest { json: false })),
         (
-            "plan",
-            CommandRequest::Plan(PlanRequest {
-                description: "test".into(),
-                json: false,
-            }),
-        ),
-        (
-            "execute",
+            "execute-missing",
             CommandRequest::Execute(ExecuteRequest {
-                plan_path: "test.md".into(),
+                plan_path: "nonexistent.md".into(),
                 json: false,
             }),
         ),
         (
-            "evaluate",
+            "evaluate-missing",
             CommandRequest::Evaluate(EvaluateRequest {
-                plan_path: "test.md".into(),
+                plan_path: "nonexistent.md".into(),
                 json: false,
             }),
         ),
         (
-            "review",
-            CommandRequest::Review(ReviewRequest { json: false }),
-        ),
-        (
-            "commit",
+            "commit-nothing-staged",
             CommandRequest::Commit(CommitRequest {
                 message: None,
                 dry_run: false,
-                json: false,
-            }),
-        ),
-        (
-            "handoff",
-            CommandRequest::Handoff(HandoffRequest {
-                output: None,
                 json: false,
             }),
         ),
@@ -271,11 +260,14 @@ async fn all_command_types_dispatch_successfully() {
         ),
     ];
 
-    for (i, (name, cmd)) in commands.into_iter().enumerate() {
+    for (i, (name, cmd)) in no_provider_commands.into_iter().enumerate() {
         let params = serde_json::to_value(&cmd).expect("serialize");
         let req = DaemonRequest::new((i + 10) as u64, methods::CLI_DISPATCH, &token, params);
         conn.write_message(&req).await.expect("write");
         let resp: DaemonResponse = conn.read_message().await.expect("read").expect("not EOF");
+        // All of these should complete without error — they either succeed
+        // or return CommandResponse::Exit (which is still a success at the
+        // RPC level, just an application-level failure).
         assert!(
             resp.error.is_none(),
             "{name} dispatch failed: {:?}",
