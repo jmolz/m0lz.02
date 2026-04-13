@@ -140,6 +140,7 @@ impl DaemonClient {
     /// Send a `daemon/shutdown` RPC to request orderly daemon shutdown.
     ///
     /// Used by `pice daemon stop` (T24) and test cleanup.
+    #[allow(dead_code)] // T24 wires this into `pice daemon stop`.
     pub async fn shutdown(&mut self) -> Result<()> {
         let req = DaemonRequest::new(
             99,

@@ -1,12 +1,8 @@
 use anyhow::Result;
 use clap::Args;
-use std::path::Path;
-use tracing::info;
+use pice_core::cli::{CommandRequest, InitRequest};
 
-use crate::templates::extract_templates;
-use pice_core::config::PiceConfig;
-
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct InitArgs {
     /// Overwrite existing files instead of skipping them
     #[arg(long)]
@@ -17,12 +13,34 @@ pub struct InitArgs {
     pub json: bool,
 }
 
-pub async fn run(args: &InitArgs) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    run_in(&cwd, args.force, args.json)
+impl From<InitArgs> for InitRequest {
+    fn from(args: InitArgs) -> Self {
+        InitRequest {
+            force: args.force,
+            json: args.json,
+        }
+    }
 }
 
+pub async fn run(args: &InitArgs) -> Result<()> {
+    let req = CommandRequest::Init(args.clone().into());
+    let resp = crate::adapter::dispatch(req).await?;
+    super::render_response(resp)
+}
+
+// ─── v0.1 logic (retained for tests; migrates to daemon handlers) ─────────
+
+use std::path::Path;
+use tracing::info;
+
+use crate::templates::extract_templates;
+use pice_core::config::PiceConfig;
+
 /// Core init logic, testable with an explicit base directory.
+///
+/// v0.1 implementation — retained for unit tests until the daemon handler
+/// (`pice-daemon::handlers::init`) is fully ported from stubs.
+#[allow(dead_code)]
 pub fn run_in(base: &Path, force: bool, json: bool) -> Result<()> {
     let claude_dir = base.join(".claude");
     let pice_dir = base.join(".pice");
@@ -55,8 +73,6 @@ pub fn run_in(base: &Path, force: bool, json: bool) -> Result<()> {
     }
 
     // Initialize metrics database with schema (or run migrations on existing DB).
-    // Resolve path from config (supports non-default db_path).
-    // Never delete an existing DB — it contains evaluation history.
     let metrics_db = crate::metrics::resolve_metrics_db_path(base);
     if !metrics_db.exists() {
         if let Some(parent) = metrics_db.parent() {
@@ -65,8 +81,6 @@ pub fn run_in(base: &Path, force: bool, json: bool) -> Result<()> {
         crate::metrics::db::MetricsDb::open(&metrics_db)?;
         info!(path = %metrics_db.display(), "initialized metrics database");
     } else if force {
-        // On --force, open the existing DB and run any pending migrations
-        // instead of destroying evaluation history.
         crate::metrics::db::MetricsDb::open(&metrics_db)?;
         info!(path = %metrics_db.display(), "migrated existing metrics database");
     }
