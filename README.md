@@ -1,3 +1,17 @@
+<p align="center">
+  <img src="branch-mark.svg" width="48" height="48" alt="m0lz.02 branch mark — pice variant">
+</p>
+
+<h1 align="center">m0lz.02</h1>
+
+<p align="center">
+  <strong>PICE</strong> — Structured AI coding workflow orchestrator<br>
+  Plan → Implement → Contract-Evaluate with dual-model adversarial evaluation<br>
+  <a href="https://m0lz.dev/writing/pice-framework">m0lz.dev/writing/pice-framework</a>
+</p>
+
+---
+
 # PICE CLI
 
 Structured AI coding workflow orchestrator -- Plan, Implement, Contract-Evaluate.
