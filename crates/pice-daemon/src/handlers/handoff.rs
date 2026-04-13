@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::to_shared_sink;
 use crate::orchestrator::session;
-use crate::orchestrator::{ProviderOrchestrator, StreamSink};
+use crate::orchestrator::{NullSink, ProviderOrchestrator, SharedSink, StreamSink};
 use crate::prompt::builders;
 use crate::server::router::DaemonContext;
 
@@ -23,9 +23,12 @@ pub async fn run(
 
     // Stream and capture: in text mode, handoff streams to the terminal while
     // collecting text. In JSON mode, use NullSink to keep stdout clean.
-    let shared: crate::orchestrator::SharedSink = if req.json {
-        std::sync::Arc::new(crate::orchestrator::NullSink)
+    let shared: SharedSink = if req.json {
+        std::sync::Arc::new(NullSink)
     } else {
+        // SAFETY INVARIANT: the session is awaited to completion before this
+        // handler returns, so the Arc from to_shared_sink is dropped while
+        // the borrowed `sink` is still alive.
         to_shared_sink(sink)
     };
     let captured =
