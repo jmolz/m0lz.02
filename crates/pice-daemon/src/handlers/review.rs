@@ -21,6 +21,8 @@ pub async fn run(
 
     let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, config).await?;
     if !req.json {
+        // SAFETY INVARIANT: session is awaited to completion before this handler
+        // returns, so the Arc from to_shared_sink is dropped while `sink` is alive.
         orchestrator.on_notification(streaming_handler(to_shared_sink(sink)));
     }
 
