@@ -88,12 +88,20 @@ pub async fn run(
                 let status_str = match lr.status {
                     pice_core::layers::manifest::LayerStatus::Passed => "PASS",
                     pice_core::layers::manifest::LayerStatus::Failed => "FAIL",
-                    _ => "SKIP",
+                    pice_core::layers::manifest::LayerStatus::Pending => "PENDING",
+                    pice_core::layers::manifest::LayerStatus::InProgress => "IN-PROGRESS",
+                    pice_core::layers::manifest::LayerStatus::Skipped => "SKIP",
                 };
-                output.push_str(&format!("  [{status_str}] {}\n", lr.name));
+                let detail = lr
+                    .halted_by
+                    .as_ref()
+                    .map(|r| format!(" — {r}"))
+                    .unwrap_or_default();
+                output.push_str(&format!("  [{status_str}] {}{detail}\n", lr.name));
             }
             let overall = match manifest.overall_status {
                 pice_core::layers::manifest::ManifestStatus::Passed => "PASS",
+                pice_core::layers::manifest::ManifestStatus::InProgress => "IN-PROGRESS",
                 _ => "FAIL",
             };
             output.push_str(&format!("\nOverall: {overall}\n"));
