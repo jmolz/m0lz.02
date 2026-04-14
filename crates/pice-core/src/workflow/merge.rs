@@ -45,8 +45,11 @@ use crate::workflow::trigger;
 /// trigger that is *semantically stricter* than the project trigger
 /// (e.g., user `always` vs project `tier >= 3`, where `always` is a
 /// superset of conditions) will still be rejected. Full AST-implication
-/// checking is deferred — see the trigger floor comments at the call
-/// sites.
+/// checking is deferred to v0.3 — see the trigger floor comments at the
+/// call sites. Tracked against PRDv2 Feature 9 (review gates) since the
+/// same grammar drives both surfaces; if users report false positives on
+/// v0.2, upgrade this to a subset check via truth-table enumeration over
+/// the finite context domain (tier 1–3, layer names, cost buckets, etc.).
 fn triggers_equivalent(project: &str, user: &str) -> bool {
     // Byte-identical strings are always equivalent — no need to parse, and
     // crucially we MUST NOT collapse a parse failure to a "rewrite"
