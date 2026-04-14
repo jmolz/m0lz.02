@@ -42,6 +42,7 @@ pub enum CommandRequest {
     Metrics(MetricsRequest),
     Benchmark(BenchmarkRequest),
     Layers(LayersRequest),
+    Validate(ValidateRequest),
     // NOTE: Completions is handled entirely by clap at the CLI layer.
     // NOTE: Daemon subcommand (start/stop/etc.) is also CLI-only.
 }
@@ -145,6 +146,13 @@ pub enum LayersSubcommand {
     List,
     Check,
     Graph,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidateRequest {
+    pub json: bool,
+    #[serde(default)]
+    pub check_models: bool,
 }
 
 #[cfg(test)]
@@ -327,6 +335,35 @@ mod tests {
                     _ => panic!("wrong subcommand"),
                 }
             }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn validate_request_roundtrip() {
+        let req = CommandRequest::Validate(ValidateRequest {
+            json: true,
+            check_models: false,
+        });
+        let wire = serde_json::to_string(&req).unwrap();
+        assert!(wire.contains("\"command\":\"validate\""));
+        let parsed: CommandRequest = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            CommandRequest::Validate(r) => {
+                assert!(r.json);
+                assert!(!r.check_models);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn validate_request_check_models_defaults_false() {
+        // Backwards compat: old JSON without check_models defaults to false.
+        let json = r#"{"command":"validate","json":false}"#;
+        let parsed: CommandRequest = serde_json::from_str(json).unwrap();
+        match parsed {
+            CommandRequest::Validate(r) => assert!(!r.check_models),
             _ => panic!("wrong variant"),
         }
     }

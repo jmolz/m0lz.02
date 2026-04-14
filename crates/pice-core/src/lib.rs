@@ -38,3 +38,4 @@ pub mod prompt;
 pub mod protocol;
 pub mod provider;
 pub mod transport;
+pub mod workflow;

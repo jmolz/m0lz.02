@@ -60,6 +60,9 @@ pub async fn run(
         let layers_config = pice_core::layers::LayersConfig::load(&layers_path)
             .context("failed to load layers config")?;
 
+        let workflow = pice_core::workflow::loader::resolve(project_root)
+            .context("failed to resolve workflow.yaml")?;
+
         let stack_cfg = crate::orchestrator::stack_loops::StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -67,6 +70,7 @@ pub async fn run(
             primary_provider: &config.evaluation.primary.provider,
             primary_model: &config.evaluation.primary.model,
             pice_config: config,
+            workflow: &workflow,
         };
         let manifest =
             crate::orchestrator::stack_loops::run_stack_loops(&stack_cfg, sink, req.json).await?;

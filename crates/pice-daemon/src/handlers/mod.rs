@@ -36,6 +36,7 @@ pub mod plan;
 pub mod prime;
 pub mod review;
 pub mod status;
+pub mod validate;
 
 use std::sync::Arc;
 
@@ -103,6 +104,7 @@ pub async fn dispatch(
         CommandRequest::Metrics(r) => metrics::run(r, ctx, sink).await,
         CommandRequest::Benchmark(r) => benchmark::run(r, ctx, sink).await,
         CommandRequest::Layers(r) => layers::run(r, ctx, sink).await,
+        CommandRequest::Validate(r) => validate::run(r, ctx, sink).await,
     }
 }
 

@@ -60,6 +60,9 @@ enum Commands {
     /// Manage layer detection and configuration
     Layers(commands::layers::LayersArgs),
 
+    /// Validate .pice/ configuration (workflow.yaml, layers.toml, contracts)
+    Validate(commands::validate::ValidateArgs),
+
     /// Manage the daemon process (start, stop, status, restart, logs)
     Daemon(commands::daemon::DaemonArgs),
 
@@ -96,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Metrics(args) => commands::metrics::run(args).await,
         Commands::Benchmark(args) => commands::benchmark::run(args).await,
         Commands::Layers(args) => commands::layers::run(args).await,
+        Commands::Validate(args) => commands::validate::run(args).await,
         Commands::Daemon(args) => commands::daemon::run(args).await,
         Commands::Completions { shell } => {
             let mut cmd = <Cli as clap::CommandFactory>::command();

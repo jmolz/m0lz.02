@@ -17,6 +17,7 @@ use pice_core::layers::manifest::{
 };
 use pice_core::layers::{active_layers, LayersConfig};
 use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
+use pice_core::workflow::WorkflowConfig;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -38,6 +39,9 @@ pub struct StackLoopsConfig<'a> {
     pub primary_model: &'a str,
     /// Phase 2: full PICE config for tier/adversarial settings.
     pub pice_config: &'a PiceConfig,
+    /// Phase 2: merged workflow config — `layer_overrides.{layer}.tier` takes
+    /// precedence over `defaults.tier` on a per-layer basis.
+    pub workflow: &'a WorkflowConfig,
 }
 
 /// Run the Stack Loops evaluation pipeline.
@@ -222,6 +226,12 @@ pub async fn run_stack_loops(
             // Phase 1: Record as PENDING — no provider evaluation yet.
             // Full provider evaluation is wired in Phase 2. We fail closed:
             // layers are NOT marked as PASSED without real evaluation.
+            //
+            // Phase 2 observability: the effective tier (from workflow
+            // `layer_overrides.{layer}.tier` with fallback to `defaults.tier`)
+            // is recorded in `halted_by` so workflow.yaml changes drive
+            // observable manifest output (PRDv2 Phase 2 validation criterion).
+            let effective_tier = effective_tier_for(cfg.workflow, layer_name);
             let timestamp = chrono::Utc::now().to_rfc3339();
 
             let layer_result = LayerResult {
@@ -239,7 +249,7 @@ pub async fn run_stack_loops(
                     )],
                 }],
                 seam_checks: Vec::new(),
-                halted_by: None,
+                halted_by: Some(format!("phase-1-pending-tier-{effective_tier}")),
                 final_confidence: None,
                 total_cost_usd: None,
             };
@@ -279,6 +289,15 @@ pub async fn run_stack_loops(
     );
 
     Ok(manifest)
+}
+
+/// Resolve the effective tier for a layer: override wins, else defaults.
+fn effective_tier_for(workflow: &WorkflowConfig, layer_name: &str) -> u8 {
+    workflow
+        .layer_overrides
+        .get(layer_name)
+        .and_then(|o| o.tier)
+        .unwrap_or(workflow.defaults.tier)
 }
 
 /// Load a layer-specific contract file, falling back to a generic message.
@@ -336,6 +355,10 @@ mod tests {
     use crate::orchestrator::NullSink;
     use pice_core::layers::{LayerDef, LayersConfig, LayersTable};
     use std::collections::BTreeMap;
+
+    fn test_workflow() -> pice_core::workflow::WorkflowConfig {
+        pice_core::workflow::loader::embedded_defaults()
+    }
 
     fn test_layers_config() -> LayersConfig {
         let mut defs = BTreeMap::new();
@@ -450,6 +473,7 @@ mod tests {
         std::fs::write(&plan_path, "# Test Plan").unwrap();
 
         let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
         let cfg = StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -457,6 +481,7 @@ mod tests {
             primary_provider: "test-provider",
             primary_model: "test-model",
             pice_config: &pice_config,
+            workflow: &workflow,
         };
 
         let manifest = run_stack_loops(&cfg, &NullSink, false).await.unwrap();
@@ -474,6 +499,12 @@ mod tests {
             backend.status,
             LayerStatus::Pending,
             "backend with file changes should be PENDING (fail closed)"
+        );
+        // Phase 2 observability: effective tier recorded in halted_by
+        assert_eq!(
+            backend.halted_by.as_deref(),
+            Some("phase-1-pending-tier-2"),
+            "backend should record the framework default tier 2"
         );
 
         // Frontend depends_on backend → transitively activated, but has no
@@ -537,6 +568,7 @@ mod tests {
         std::fs::write(&plan_path, "# Test Plan").unwrap();
 
         let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
         let cfg = StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -544,6 +576,7 @@ mod tests {
             primary_provider: "test-provider",
             primary_model: "test-model",
             pice_config: &pice_config,
+            workflow: &workflow,
         };
 
         let manifest = run_stack_loops(&cfg, &NullSink, true).await.unwrap();

@@ -11,6 +11,7 @@ pub mod plan;
 pub mod prime;
 pub mod review;
 pub mod status;
+pub mod validate;
 
 use anyhow::Result;
 use pice_core::cli::CommandResponse;
