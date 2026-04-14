@@ -281,8 +281,8 @@ layer_overrides:
             // message directly.
             CommandResponse::Exit { code, message } => {
                 assert_eq!(code, 1);
-                let value: serde_json::Value = serde_json::from_str(&message)
-                    .expect("Exit message should contain valid JSON");
+                let value: serde_json::Value =
+                    serde_json::from_str(&message).expect("Exit message should contain valid JSON");
                 assert_eq!(value["ok"], false);
                 let errs = value["errors"].as_array().unwrap();
                 assert!(!errs.is_empty());

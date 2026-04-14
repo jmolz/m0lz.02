@@ -181,10 +181,17 @@ layer_overrides:
         .output()
         .unwrap();
 
-    // In JSON mode, the handler returns a Json response with ok:false
-    // rather than Exit{code:1}. Exit code is 0 but the JSON payload
-    // surfaces the failure via `ok` and `errors`. Asserting on that shape
-    // is the machine-readable contract callers actually consume.
+    // JSON-mode validation failure must EXIT 1 (so CI scripts like
+    // `pice validate --json && deploy` fail closed) AND emit the
+    // structured report on stdout (so machine callers can consume
+    // ok/errors/warnings). The render layer routes JSON-shaped Exit
+    // messages to stdout.
+    assert!(
+        !output.status.success(),
+        "JSON-mode validate on invalid workflow must exit nonzero; exit: {:?}, stderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let json: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("expected JSON on stdout; parse error: {e}\n{stdout}"));
