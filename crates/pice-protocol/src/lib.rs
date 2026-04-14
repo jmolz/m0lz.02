@@ -587,10 +587,7 @@ mod tests {
         // Roundtrip
         let parsed: SessionCreateParams = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.layer.unwrap(), "backend");
-        assert_eq!(
-            parsed.layer_paths.unwrap(),
-            vec!["src/server/**", "lib/**"]
-        );
+        assert_eq!(parsed.layer_paths.unwrap(), vec!["src/server/**", "lib/**"]);
         assert_eq!(
             parsed.contract_path.unwrap(),
             ".pice/contracts/backend.toml"
