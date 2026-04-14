@@ -306,16 +306,31 @@ fn merge_layer_override_fields(
     }
 
     if overlay.trigger.is_some() {
-        // Adding a stricter trigger is allowed; removing one (empty string
-        // sentinel) is not. The floor is the project's per-layer trigger.
+        // The project trigger is a SPECIFIC committed expression. Removal is
+        // a violation; semantic weakening (e.g., rewriting `always` to
+        // `false`, or `tier >= 3` to `tier >= 999` so the gate never fires)
+        // would also bypass the project floor — but proving "stricter"
+        // requires AST implication checking, which we don't have yet.
+        //
+        // Interim policy: when the project has set a trigger, the user must
+        // either OMIT their override (no change to the project trigger) or
+        // provide an EXACT MATCH. Any divergent value — including the empty
+        // string sentinel for removal — is a floor violation. AST-based
+        // implication checking can relax this in a future phase.
         let project_trigger = project_layer.trigger.as_deref();
         if let (Some(pt), Some(o)) = (project_trigger, overlay.trigger.as_deref()) {
-            if o.is_empty() && !pt.is_empty() {
+            if o != pt {
+                let reason = if o.is_empty() {
+                    "required gate trigger cannot be removed"
+                } else {
+                    "required gate trigger cannot be weakened or rewritten; \
+                     omit the override to keep the project trigger or match it exactly"
+                };
                 violations.push(FloorViolation {
                     field: format!("layer_overrides.{layer}.trigger"),
                     project: pt.to_string(),
-                    user: String::new(),
-                    reason: "required gate trigger cannot be removed",
+                    user: o.to_string(),
+                    reason,
                 });
                 return;
             }
@@ -351,18 +366,37 @@ fn merge_review(
                 b.enabled = overlay.enabled;
             }
 
-            // Trigger: overlay may add or tighten. Removing a project trigger
-            // is a violation (treated as setting to empty string or None when
-            // project had one).
-            if b.trigger.is_some() && overlay.trigger.is_none() {
-                violations.push(FloorViolation {
-                    field: "review.trigger".into(),
-                    project: b.trigger.clone().unwrap_or_default(),
-                    user: "(removed)".into(),
-                    reason: "required gate trigger cannot be removed",
-                });
-            } else if overlay.trigger.is_some() {
-                b.trigger = overlay.trigger.clone();
+            // Trigger floor: the project committed to a SPECIFIC expression.
+            // Removing it is a violation; rewriting it to a weaker expression
+            // (e.g., `always` → `false`, or `tier >= 3` → `tier >= 999`)
+            // would also bypass the gate, but proving semantic strictness
+            // requires AST implication. Interim policy: any non-matching
+            // override of an existing project trigger is a violation. The
+            // user must omit the override (keep project's) or match exactly.
+            // AST-based implication can relax this in a future phase.
+            match (b.trigger.as_deref(), overlay.trigger.as_deref()) {
+                (Some(_), None) => {
+                    violations.push(FloorViolation {
+                        field: "review.trigger".into(),
+                        project: b.trigger.clone().unwrap_or_default(),
+                        user: "(removed)".into(),
+                        reason: "required gate trigger cannot be removed",
+                    });
+                }
+                (Some(pt), Some(o)) if o != pt => {
+                    violations.push(FloorViolation {
+                        field: "review.trigger".into(),
+                        project: pt.to_string(),
+                        user: o.to_string(),
+                        reason: "required gate trigger cannot be weakened or rewritten; \
+                                 omit the override to keep the project trigger or match it exactly",
+                    });
+                }
+                (_, Some(_)) => {
+                    // No project trigger set, OR exact match — overlay wins.
+                    b.trigger = overlay.trigger.clone();
+                }
+                (None, None) => {}
             }
 
             // Other fields are tuning knobs — overlay wins.
@@ -509,6 +543,105 @@ mod tests {
         });
         let err = merge_with_floor(b, u).unwrap_err().to_string();
         assert!(err.contains("review"), "err: {err}");
+    }
+
+    #[test]
+    fn review_trigger_weakening_to_false_rejected() {
+        // Project committed `review.trigger = "always"`. User rewrites to
+        // `"false"` — syntactically a valid trigger expression, semantically
+        // a gate that never fires. This is a floor bypass: the user has
+        // disabled the gate without removing the field.
+        let mut b = base();
+        b.review = Some(ReviewConfig {
+            enabled: true,
+            trigger: Some("always".into()),
+            ..Default::default()
+        });
+        let mut u = overlay_from(&b);
+        u.review = Some(ReviewConfig {
+            enabled: true,
+            trigger: Some("false".into()),
+            ..b.review.clone().unwrap()
+        });
+        let err = merge_with_floor(b, u).unwrap_err();
+        let fv = err.downcast_ref::<FloorViolations>().unwrap();
+        assert!(
+            fv.violations
+                .iter()
+                .any(|v| v.field == "review.trigger" && v.user == "false"),
+            "expected review.trigger weakening violation, got: {fv:?}"
+        );
+    }
+
+    #[test]
+    fn review_trigger_rewriting_to_arbitrary_expression_rejected() {
+        // Project committed `tier >= 3`. User rewrites to `tier >= 999` —
+        // syntactically valid but semantically unreachable. Floor bypass.
+        let mut b = base();
+        b.review = Some(ReviewConfig {
+            enabled: true,
+            trigger: Some("tier >= 3".into()),
+            ..Default::default()
+        });
+        let mut u = overlay_from(&b);
+        u.review = Some(ReviewConfig {
+            enabled: true,
+            trigger: Some("tier >= 999".into()),
+            ..b.review.clone().unwrap()
+        });
+        let err = merge_with_floor(b, u).unwrap_err();
+        let fv = err.downcast_ref::<FloorViolations>().unwrap();
+        assert!(fv.violations.iter().any(|v| v.field == "review.trigger"));
+    }
+
+    #[test]
+    fn review_trigger_exact_match_allowed() {
+        // Confirming the policy escape valve: a user may match the project
+        // trigger exactly. This is the supported way to "acknowledge" the
+        // gate without overriding it.
+        let mut b = base();
+        b.review = Some(ReviewConfig {
+            enabled: true,
+            trigger: Some("tier >= 3".into()),
+            ..Default::default()
+        });
+        let mut u = overlay_from(&b);
+        u.review = Some(ReviewConfig {
+            enabled: true,
+            trigger: Some("tier >= 3".into()),
+            timeout_hours: 12, // tighten timeout — allowed (tuning knob)
+            ..b.review.clone().unwrap()
+        });
+        let merged = merge_with_floor(b, u).expect("exact-match trigger should pass");
+        assert_eq!(merged.review.unwrap().trigger.as_deref(), Some("tier >= 3"));
+    }
+
+    #[test]
+    fn layer_override_trigger_weakening_rejected() {
+        // Same policy applied to per-layer triggers: project sets
+        // `infrastructure.trigger = "always"`, user rewrites to `"false"`.
+        let mut b = base();
+        b.layer_overrides.insert(
+            "infrastructure".into(),
+            LayerOverride {
+                trigger: Some("always".into()),
+                ..Default::default()
+            },
+        );
+        let mut u = overlay_from(&b);
+        u.layer_overrides.insert(
+            "infrastructure".into(),
+            LayerOverride {
+                trigger: Some("false".into()),
+                ..Default::default()
+            },
+        );
+        let err = merge_with_floor(b, u).unwrap_err();
+        let fv = err.downcast_ref::<FloorViolations>().unwrap();
+        assert!(fv
+            .violations
+            .iter()
+            .any(|v| v.field == "layer_overrides.infrastructure.trigger"));
     }
 
     #[test]
