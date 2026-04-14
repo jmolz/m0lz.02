@@ -50,7 +50,7 @@ impl StreamSink for TerminalSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pice_core::cli::{InitRequest, StatusRequest};
+    use pice_core::cli::StatusRequest;
     use pice_daemon::orchestrator::NoticeLevel;
 
     #[tokio::test]

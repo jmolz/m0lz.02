@@ -293,7 +293,7 @@ mod tests {
                     "should have created files"
                 );
                 assert!(
-                    value["created"].as_array().unwrap().len() > 0,
+                    !value["created"].as_array().unwrap().is_empty(),
                     "created array should not be empty"
                 );
             }

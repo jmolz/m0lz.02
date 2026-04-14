@@ -14,7 +14,7 @@
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pice_core::cli::{CommandRequest, CommandResponse, StatusRequest};
@@ -55,7 +55,7 @@ async fn start_daemon() -> (
 
 /// Connect a raw `UnixConnection` to the daemon, returning the connection
 /// and the auth token.
-async fn raw_connect(socket_path: &SocketPath, token_path: &PathBuf) -> (UnixConnection, String) {
+async fn raw_connect(socket_path: &SocketPath, token_path: &Path) -> (UnixConnection, String) {
     let path = match socket_path {
         SocketPath::Unix(p) => p,
         _ => panic!("expected Unix socket path"),

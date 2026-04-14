@@ -566,9 +566,8 @@ depends_on = ["backend", "database"]
                     !value["layers"].as_array().unwrap().is_empty(),
                     "layers array should not be empty"
                 );
-                assert_eq!(
-                    value["written"].as_bool().unwrap(),
-                    false,
+                assert!(
+                    !value["written"].as_bool().unwrap(),
                     "dry run should not write"
                 );
                 assert!(value["toml"].is_string(), "should include TOML string");
