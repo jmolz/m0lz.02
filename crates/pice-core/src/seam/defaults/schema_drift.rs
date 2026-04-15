@@ -21,7 +21,9 @@ impl SeamCheck for SchemaDriftCheck {
         boundary.touches("database") || boundary.touches("backend") || boundary.touches("api")
     }
     fn run(&self, ctx: &SeamContext<'_>) -> SeamResult {
-        let mut model_fields: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // ORM-side: keyed by PHYSICAL table name (post-`@@map`). Holds the
+        // ORM model name and the field map (physical-col → ORM field name).
+        let mut models: BTreeMap<String, PrismaModel> = BTreeMap::new();
         let mut model_file: BTreeMap<String, PathBuf> = BTreeMap::new();
         let mut ddl_columns: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut ddl_file: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -38,12 +40,10 @@ impl SeamCheck for SchemaDriftCheck {
                 .to_ascii_lowercase();
             match ext.as_str() {
                 "prisma" => {
-                    for (model, fields) in parse_prisma(&content) {
-                        model_fields
-                            .entry(model.clone())
-                            .or_default()
-                            .extend(fields);
-                        model_file.entry(model).or_insert(rel.clone());
+                    for parsed in parse_prisma(&content) {
+                        let phys = parsed.table_name.clone();
+                        model_file.entry(phys.clone()).or_insert(rel.clone());
+                        models.insert(phys, parsed);
                     }
                 }
                 "sql" => {
@@ -62,44 +62,62 @@ impl SeamCheck for SchemaDriftCheck {
         let mut findings: Vec<SeamFinding> = Vec::new();
         let mut matched_tables: BTreeSet<String> = BTreeSet::new();
 
-        for (model, fields) in &model_fields {
-            // Match model → table by case-insensitive name (Prisma default).
-            let table_key = ddl_columns
+        for (phys_table, model) in &models {
+            // Match by PHYSICAL table name, case-insensitive (Postgres
+            // default folds unquoted identifiers to lowercase). Without
+            // `@@map` this still works because `phys_table == model_name`.
+            let ddl_key = ddl_columns
                 .keys()
-                .find(|t| t.eq_ignore_ascii_case(model))
+                .find(|t| t.eq_ignore_ascii_case(phys_table))
                 .cloned();
-            let Some(table) = table_key else {
+            let Some(ddl_key) = ddl_key else {
                 // Fail-closed: an ORM model with no matching DDL is schema
                 // drift — the archetypal "changed ORM, forgot the migration"
-                // case. This path used to silently return Passed.
+                // case.
                 let mut f = SeamFinding::new(format!(
-                    "ORM model '{model}' has no matching migration table — \
-                     schema drift: migration is missing or the table was renamed"
+                    "ORM model '{}' (physical table '{}') has no matching migration \
+                     table — schema drift: migration is missing or the table was renamed",
+                    model.model_name, phys_table
                 ));
-                if let Some(p) = model_file.get(model).cloned() {
+                if let Some(p) = model_file.get(phys_table).cloned() {
                     f = f.with_file(p);
                 }
                 findings.push(f);
                 continue;
             };
-            matched_tables.insert(table.clone());
-            let columns = ddl_columns.get(&table).cloned().unwrap_or_default();
-            for field in fields.difference(&columns) {
+            matched_tables.insert(ddl_key.clone());
+            let columns = ddl_columns.get(&ddl_key).cloned().unwrap_or_default();
+            // Compare physical column names. `model.fields` is keyed by
+            // physical column name (from `@map`, defaulting to ORM field).
+            for phys_col in model.fields.keys() {
+                if columns.iter().any(|c| c.eq_ignore_ascii_case(phys_col)) {
+                    continue;
+                }
+                let orm_field = model
+                    .fields
+                    .get(phys_col)
+                    .cloned()
+                    .unwrap_or_else(|| phys_col.clone());
                 let mut f = SeamFinding::new(format!(
-                    "ORM model '{model}' declares field '{field}' which is missing from the \
-                     migration for table '{table}'"
+                    "ORM model '{}' declares field '{}' (physical column '{}') which is \
+                     missing from the migration for table '{}'",
+                    model.model_name, orm_field, phys_col, ddl_key
                 ));
-                if let Some(p) = model_file.get(model).cloned() {
+                if let Some(p) = model_file.get(phys_table).cloned() {
                     f = f.with_file(p);
                 }
                 findings.push(f);
             }
-            for column in columns.difference(fields) {
+            for column in &columns {
+                if model.fields.keys().any(|c| c.eq_ignore_ascii_case(column)) {
+                    continue;
+                }
                 let mut f = SeamFinding::new(format!(
-                    "migration for table '{table}' has column '{column}' which is missing \
-                     from the ORM model '{model}'"
+                    "migration for table '{}' has column '{}' which is missing \
+                     from the ORM model '{}'",
+                    ddl_key, column, model.model_name
                 ));
-                if let Some(p) = ddl_file.get(&table).cloned() {
+                if let Some(p) = ddl_file.get(&ddl_key).cloned() {
                     f = f.with_file(p);
                 }
                 findings.push(f);
@@ -109,10 +127,10 @@ impl SeamCheck for SchemaDriftCheck {
         // Symmetric pass: migration tables with no matching ORM model are also
         // drift (migration added without updating the ORM, or model renamed).
         for table in ddl_columns.keys() {
-            if matched_tables.contains(table) {
+            if matched_tables.iter().any(|m| m.eq_ignore_ascii_case(table)) {
                 continue;
             }
-            let has_model = model_fields.keys().any(|m| m.eq_ignore_ascii_case(table));
+            let has_model = models.keys().any(|phys| phys.eq_ignore_ascii_case(table));
             if has_model {
                 continue;
             }
@@ -134,10 +152,25 @@ impl SeamCheck for SchemaDriftCheck {
     }
 }
 
-/// Very small Prisma parser — captures `model Foo { field Type }` blocks.
-fn parse_prisma(content: &str) -> BTreeMap<String, BTreeSet<String>> {
-    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut current: Option<String> = None;
+/// Result of parsing a Prisma model. `model_name` is the ORM name used in
+/// queries; `table_name` is the physical SQL table name (from `@@map`,
+/// defaulting to `model_name`). `fields` maps the physical column name (from
+/// `@map`, defaulting to the ORM field name) to the ORM field name. This
+/// lets the drift checker compare PHYSICAL names against migration DDL
+/// (which knows nothing about Prisma) while still surfacing the ORM-side
+/// names in findings for operator clarity.
+#[derive(Debug, Default)]
+struct PrismaModel {
+    model_name: String,
+    table_name: String,
+    fields: BTreeMap<String, String>,
+}
+
+/// Very small Prisma parser — captures `model Foo { field Type }` blocks
+/// with `@@map("phys_table")` and `@map("phys_col")` mappings.
+fn parse_prisma(content: &str) -> Vec<PrismaModel> {
+    let mut out: Vec<PrismaModel> = Vec::new();
+    let mut current: Option<PrismaModel> = None;
     for raw in content.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with("//") {
@@ -150,33 +183,75 @@ fn parse_prisma(content: &str) -> BTreeMap<String, BTreeSet<String>> {
                 .unwrap_or(rest.len());
             let name = rest[..end].trim().to_string();
             if !name.is_empty() {
-                current = Some(name);
+                if let Some(prev) = current.take() {
+                    out.push(prev);
+                }
+                current = Some(PrismaModel {
+                    model_name: name.clone(),
+                    table_name: name,
+                    fields: BTreeMap::new(),
+                });
                 continue;
             }
         }
         if line.starts_with('}') {
-            current = None;
+            if let Some(prev) = current.take() {
+                out.push(prev);
+            }
             continue;
         }
-        if let Some(model) = current.as_ref() {
-            // First whitespace-delimited token is the field name. Skip
-            // blank lines and the `@@...` block-level directives.
-            if line.starts_with("@@") || line.starts_with('@') {
+        if let Some(model) = current.as_mut() {
+            // Block-level mapping: `@@map("physical_table")`.
+            if let Some(rest) = line.strip_prefix("@@map(") {
+                if let Some(name) = parse_quoted_arg(rest) {
+                    model.table_name = name;
+                }
                 continue;
             }
+            if line.starts_with("@@") {
+                // Other block directives (e.g. `@@index`) are not relevant
+                // to drift detection.
+                continue;
+            }
+            // Field line: capture the field name (first token) and any
+            // inline `@map("phys_col")` attribute.
             let name = line
                 .split_whitespace()
                 .next()
                 .unwrap_or("")
                 .trim_end_matches('?');
-            if !name.is_empty() && name.chars().next().is_some_and(|c| c.is_alphabetic()) {
-                out.entry(model.clone())
-                    .or_default()
-                    .insert(name.to_string());
+            if name.is_empty() || !name.chars().next().is_some_and(|c| c.is_alphabetic()) {
+                continue;
             }
+            let mut physical_col = name.to_string();
+            if let Some(idx) = line.find("@map(") {
+                let after = &line[idx + "@map(".len()..];
+                if let Some(mapped) = parse_quoted_arg(after) {
+                    physical_col = mapped;
+                }
+            }
+            model.fields.insert(physical_col, name.to_string());
         }
     }
+    if let Some(prev) = current.take() {
+        out.push(prev);
+    }
     out
+}
+
+/// Parse the first quoted string argument out of `("foo", ...)` or `("foo")`.
+/// Tolerates single OR double quotes and surrounding whitespace.
+fn parse_quoted_arg(s: &str) -> Option<String> {
+    let s = s.trim_start();
+    let bytes = s.as_bytes();
+    let quote = match bytes.first()? {
+        b'"' => b'"',
+        b'\'' => b'\'',
+        _ => return None,
+    };
+    let rest = &s[1..];
+    let end = rest.bytes().position(|b| b == quote)?;
+    Some(rest[..end].to_string())
 }
 
 /// Parse `CREATE TABLE name ( col type, ... );` blocks. Handles quoted
@@ -438,10 +513,97 @@ mod tests {
     fn parse_prisma_basic() {
         let schema = "model User {\n  id Int @id\n  email String?\n  @@index([email])\n}\n";
         let parsed = parse_prisma(schema);
-        let fields = parsed.get("User").unwrap();
-        assert!(fields.contains("id"));
-        assert!(fields.contains("email"));
-        assert!(!fields.contains("@@index"));
+        let user = parsed
+            .iter()
+            .find(|m| m.model_name == "User")
+            .expect("model parsed");
+        assert_eq!(user.table_name, "User");
+        assert!(user.fields.contains_key("id"));
+        assert!(user.fields.contains_key("email"));
+        assert!(!user.fields.contains_key("@@index"));
+    }
+
+    #[test]
+    fn passes_when_prisma_uses_at_at_map_for_table() {
+        // Phase 3 third-round adversarial review fix: previously, an
+        // unchanged Prisma schema using `@@map("users")` would be reported
+        // as missing-table because the checker compared the ORM model name
+        // 'User' against the migration table 'users'. Now the parser
+        // captures `@@map` and the checker compares physical names.
+        let (dir, rels) = fixture(&[
+            (
+                "prisma/schema.prisma",
+                "model User {\n  id Int @id\n  email String\n  @@map(\"users\")\n}\n",
+            ),
+            (
+                "migrations/001.sql",
+                "CREATE TABLE users (id INT PRIMARY KEY, email TEXT);",
+            ),
+        ]);
+        let boundary = LayerBoundary::new("backend", "database");
+        let ctx = ctx(&dir, &boundary, &rels);
+        let result = SchemaDriftCheck.run(&ctx);
+        assert_eq!(
+            result,
+            SeamResult::Passed,
+            "Prisma @@map should match physical table name; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn passes_when_prisma_uses_at_map_for_field() {
+        // Field-level `@map("phys_col")` must compare the physical column
+        // name against migration columns, not the ORM field name.
+        let (dir, rels) = fixture(&[
+            (
+                "prisma/schema.prisma",
+                "model User {\n  id Int @id\n  emailAddress String @map(\"email_address\")\n}\n",
+            ),
+            (
+                "migrations/001.sql",
+                "CREATE TABLE User (id INT PRIMARY KEY, email_address TEXT);",
+            ),
+        ]);
+        let boundary = LayerBoundary::new("backend", "database");
+        let ctx = ctx(&dir, &boundary, &rels);
+        let result = SchemaDriftCheck.run(&ctx);
+        assert_eq!(
+            result,
+            SeamResult::Passed,
+            "Prisma @map field should match physical column; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn fails_when_at_at_map_table_is_actually_missing() {
+        // `@@map` does not let the schema "lie" — if the physical table
+        // really doesn't exist in the migration, drift still fires.
+        let (dir, rels) = fixture(&[
+            (
+                "prisma/schema.prisma",
+                "model User {\n  id Int @id\n  @@map(\"missing_table\")\n}\n",
+            ),
+            (
+                "migrations/001.sql",
+                "CREATE TABLE users (id INT PRIMARY KEY);",
+            ),
+        ]);
+        let boundary = LayerBoundary::new("backend", "database");
+        let ctx = ctx(&dir, &boundary, &rels);
+        let result = SchemaDriftCheck.run(&ctx);
+        assert!(
+            result.is_failed(),
+            "@@map pointing at missing table must Failed, got {result:?}"
+        );
+        let msgs: Vec<&str> = result
+            .findings()
+            .iter()
+            .map(|f| f.message.as_str())
+            .collect();
+        assert!(
+            msgs.iter().any(|m| m.contains("missing_table")),
+            "finding should name the missing physical table: {msgs:?}"
+        );
     }
 
     #[test]

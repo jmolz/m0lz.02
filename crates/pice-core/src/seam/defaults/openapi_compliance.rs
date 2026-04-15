@@ -35,6 +35,16 @@ impl SeamCheck for OpenApiComplianceCheck {
         let mut spec_file_paths: Vec<PathBuf> = Vec::new();
         let mut handler_file_paths: Vec<PathBuf> = Vec::new();
 
+        // Track plausible-but-unrecognized artifacts for the double-miss
+        // silent-bypass guard (Phase 3 third-round review fix). These are
+        // files that LOOK like they could be spec or handler shapes
+        // (`.yaml`/`.yml`/`.json` for specs; recognized source extensions
+        // for handlers) but neither narrow heuristic could classify. If
+        // EITHER bucket is non-empty when both saw_* flags are false, we
+        // refuse to claim "Passed" — we can't compare, but artifacts exist.
+        let mut plausible_spec_artifacts: Vec<PathBuf> = Vec::new();
+        let mut plausible_handler_artifacts: Vec<PathBuf> = Vec::new();
+
         for rel in ctx.boundary_files {
             let full = ctx.repo_root.join(rel);
             let Ok(content) = std::fs::read_to_string(&full) else {
@@ -54,6 +64,14 @@ impl SeamCheck for OpenApiComplianceCheck {
                     handler_props.entry(name.clone()).or_insert(ty);
                     handler_file.entry(name).or_insert(rel.clone());
                 }
+            } else {
+                // Catch the double-miss case: file is plausibly a spec or
+                // handler but didn't match the narrow heuristic.
+                if file_looks_plausibly_spec_like(rel, &content) {
+                    plausible_spec_artifacts.push(rel.clone());
+                } else if file_looks_plausibly_handler_like(rel) {
+                    plausible_handler_artifacts.push(rel.clone());
+                }
             }
         }
 
@@ -64,7 +82,54 @@ impl SeamCheck for OpenApiComplianceCheck {
         // (Phase 3 adversarial review: a renamed/moved spec OR a handler the
         // parser could not recognize would otherwise produce a clean boundary.)
         match (saw_spec_file, saw_handler_file) {
-            (false, false) => return SeamResult::Passed,
+            (false, false) => {
+                // Double-miss guard (Phase 3 third-round review fix). If
+                // there are plausible-but-unclassified artifacts on BOTH
+                // sides, refuse to silently Pass — emit a Warning so the
+                // operator widens the heuristic or renames their files.
+                // Requiring BOTH sides keeps the guard from over-triggering
+                // on a single utility source file with no comparable spec.
+                if !plausible_spec_artifacts.is_empty() && !plausible_handler_artifacts.is_empty() {
+                    let mut summary = String::from(
+                        "OpenAPI compliance: boundary contains plausible spec/handler \
+                         artifacts that neither heuristic could classify; cannot compare. ",
+                    );
+                    if !plausible_spec_artifacts.is_empty() {
+                        summary.push_str(&format!(
+                            "Possible spec files: {}. ",
+                            plausible_spec_artifacts
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    if !plausible_handler_artifacts.is_empty() {
+                        summary.push_str(&format!(
+                            "Possible handler files: {}. ",
+                            plausible_handler_artifacts
+                                .iter()
+                                .map(|p| p.display().to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    summary.push_str(
+                        "Rename spec files to `openapi.*` / `swagger.*` (or place under \
+                         an `openapi` path component) and add `return {` / `.json(` \
+                         response shapes to handler files so the parser can recognize them.",
+                    );
+                    let mut f = SeamFinding::new(summary);
+                    if let Some(p) = plausible_spec_artifacts
+                        .first()
+                        .or_else(|| plausible_handler_artifacts.first())
+                    {
+                        f = f.with_file(p.clone());
+                    }
+                    return SeamResult::Warning(vec![f]);
+                }
+                return SeamResult::Passed;
+            }
             (true, false) => {
                 let mut f = SeamFinding::new(
                     "OpenAPI spec file detected on this boundary but no recognizable \
@@ -208,6 +273,45 @@ fn looks_like_handler_file(rel: &std::path::Path, content: &str) -> bool {
         "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "rs" | "py" | "go" | "java" | "kt"
     );
     is_source && (content.contains("return {") || content.contains(".json("))
+}
+
+/// Plausibility check for "this file COULD be a spec but the narrow
+/// `looks_like_spec_file` heuristic missed it." Used by the double-miss
+/// silent-bypass guard. Catches renamed YAML/JSON specs (`api-spec.yaml`,
+/// `schema.json`) by checking the file extension AND content markers
+/// `openapi:` / `swagger:` / `"openapi"` / `"swagger"`.
+fn file_looks_plausibly_spec_like(rel: &std::path::Path, content: &str) -> bool {
+    let ext = rel
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "yaml" | "yml" | "json") {
+        return false;
+    }
+    let lower = content.to_ascii_lowercase();
+    lower.contains("openapi:")
+        || lower.contains("swagger:")
+        || lower.contains("\"openapi\"")
+        || lower.contains("\"swagger\"")
+        || lower.contains("paths:")
+}
+
+/// Plausibility check for "this file COULD be a handler but the narrow
+/// `looks_like_handler_file` heuristic missed it." Catches handlers that
+/// return via response helpers, typed objects, or framework-specific
+/// patterns the literal-string parser doesn't recognize. Conservative —
+/// only triggers on recognized source extensions.
+fn file_looks_plausibly_handler_like(rel: &std::path::Path) -> bool {
+    let ext = rel
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "rs" | "py" | "go" | "java" | "kt"
+    )
 }
 
 /// Parse OpenAPI YAML/JSON for response property names and types. Skips over
@@ -557,6 +661,57 @@ mod tests {
         assert!(
             matches!(result, SeamResult::Warning(_)),
             "renamed spec must surface as Warning, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn warns_when_double_miss_with_plausible_spec_and_handler() {
+        // Phase 3 third-round adversarial finding: a renamed spec
+        // (`api-spec.yaml`) AND a Rust handler that uses a typed response
+        // (no `return {` / `.json(` literal) would previously fall through
+        // both heuristics and silently Pass. The double-miss guard now
+        // catches plausible-but-unclassified artifacts and emits Warning.
+        let (dir, rels) = fixture(&[
+            (
+                "specs/api-spec.yaml",
+                "openapi: 3.0.0\npaths:\n  /x:\n    get: {}\n",
+            ),
+            (
+                "src/handlers.rs",
+                "fn h() -> Json<Resp> { Json(Resp { id: 1 }) }\n",
+            ),
+        ]);
+        let boundary = LayerBoundary::new("api", "frontend");
+        let result = OpenApiComplianceCheck.run(&ctx(&dir, &boundary, &rels));
+        assert!(
+            matches!(result, SeamResult::Warning(_)),
+            "double-miss with plausible artifacts must Warning, got {result:?}"
+        );
+        let msg = &result.findings()[0].message;
+        assert!(
+            msg.contains("plausible spec/handler artifacts")
+                && msg.contains("api-spec.yaml")
+                && msg.contains("handlers.rs"),
+            "warning must name both plausible artifacts: {msg}"
+        );
+    }
+
+    #[test]
+    fn passes_when_only_plausible_spec_and_no_source() {
+        // A renamed YAML spec ALONE on the boundary (no source files at
+        // all) doesn't fire the double-miss guard — there's nothing on the
+        // handler side to compare. The asymmetry is real but unactionable;
+        // single-side plausibles do not trigger Warning to keep noise low.
+        let (dir, rels) = fixture(&[(
+            "config/api.yaml",
+            "openapi: 3.0.0\npaths:\n  /x:\n    get: {}\n",
+        )]);
+        let boundary = LayerBoundary::new("api", "frontend");
+        let result = OpenApiComplianceCheck.run(&ctx(&dir, &boundary, &rels));
+        assert_eq!(
+            result,
+            SeamResult::Passed,
+            "single-side plausible artifact must NOT over-trigger Warning, got {result:?}"
         );
     }
 

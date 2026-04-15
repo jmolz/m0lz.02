@@ -241,7 +241,7 @@ pub fn validate_cross_references(cfg: &WorkflowConfig, layers: &LayersConfig) ->
                     field: format!("seams.{boundary}"),
                     message: format!(
                         "seam boundary '{boundary}' does not reference known layers; \
-                         use 'A-B' or 'A->B' where both A and B appear in layers.order ({})",
+                         use 'A↔B' or 'A<->B' where both A and B appear in layers.order ({})",
                         known_layers.join(", ")
                     ),
                     line: None,
@@ -258,14 +258,18 @@ fn seam_boundary_references_known_layers(
     boundary: &str,
     known: &std::collections::HashSet<&str>,
 ) -> bool {
-    let parts: Vec<&str> = boundary
-        .split(['-', '>', '<', '↔', '→'])
-        .filter(|s| !s.is_empty())
-        .collect();
-    if parts.is_empty() {
-        return false;
+    // Use the canonical parser instead of ad-hoc tokenization.
+    // (Phase 3 third-round adversarial review fix — the previous
+    // `split(['-', '>', '<', '↔', '→'])` shredded valid hyphenated layer
+    // names like `auth-service↔api-gateway` into four tokens, then rejected
+    // the boundary as unknown-layer even though `LayerBoundary::parse`
+    // accepts those names everywhere else. validate_all runs before
+    // orchestration, so a repo with hyphenated layer IDs would fail closed
+    // before any seam check ran.)
+    match LayerBoundary::parse(boundary) {
+        Ok(b) => known.contains(b.a.as_str()) && known.contains(b.b.as_str()),
+        Err(_) => false,
     }
-    parts.iter().all(|p| known.contains(p))
 }
 
 // ─── Seam checks ────────────────────────────────────────────────────────────
@@ -712,9 +716,14 @@ mod tests {
 
     #[test]
     fn known_seam_boundary_passes() {
+        // Boundary spelled with the canonical `↔` separator (or `<->`).
+        // Phase 3 third-round adversarial review fix tightened the
+        // boundary parser to reject ad-hoc `-` delimiters since hyphens
+        // are valid layer-name characters; tests must use the documented
+        // separator.
         let mut cfg = embedded_defaults();
         let mut seams = BTreeMap::new();
-        seams.insert("backend-frontend".into(), vec!["check1".into()]);
+        seams.insert("backend↔frontend".into(), vec!["check1".into()]);
         cfg.seams = Some(seams);
         let layers = sample_layers();
         let report = validate_cross_references(&cfg, &layers);
@@ -879,6 +888,66 @@ mod tests {
         assert!(err.message.contains("config_mismatch"));
         assert!(err.message.contains("backend"));
         assert!(err.message.contains("frontend"));
+    }
+
+    #[test]
+    fn seam_validator_accepts_hyphenated_layer_names() {
+        // Phase 3 third-round adversarial review fix: the previous tokenizer
+        // split on `-`, exploding `auth-service↔api-gateway` into four parts
+        // and rejecting it as unknown-layer. Both `↔` and `<->` boundary
+        // forms must round-trip when layer names contain hyphens.
+        use crate::layers::{LayerDef, LayersConfig, LayersTable};
+        let mut defs = BTreeMap::new();
+        defs.insert(
+            "auth-service".into(),
+            LayerDef {
+                paths: vec!["services/auth/**".into()],
+                always_run: false,
+                contract: None,
+                depends_on: vec![],
+                layer_type: None,
+                environment_variants: None,
+            },
+        );
+        defs.insert(
+            "api-gateway".into(),
+            LayerDef {
+                paths: vec!["services/gateway/**".into()],
+                always_run: false,
+                contract: None,
+                depends_on: vec![],
+                layer_type: None,
+                environment_variants: None,
+            },
+        );
+        let layers = LayersConfig {
+            layers: LayersTable {
+                order: vec!["auth-service".into(), "api-gateway".into()],
+                defs,
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        // Both spellings of the boundary separator should be accepted.
+        for raw in [
+            "auth-service↔api-gateway",
+            "api-gateway↔auth-service",
+            "auth-service<->api-gateway",
+        ] {
+            let mut cfg = embedded_defaults();
+            let mut seams = BTreeMap::new();
+            // version_skew applies to every boundary, so applies_to noise
+            // doesn't pollute this hyphenated-name regression test.
+            seams.insert(raw.into(), vec!["version_skew".into()]);
+            cfg.seams = Some(seams);
+            let report = validate_seams(&cfg, &layers, &sample_registry());
+            assert!(
+                report.is_ok(),
+                "hyphenated layer boundary '{raw}' must validate; got errors: {:?}",
+                report.errors
+            );
+        }
     }
 
     #[test]

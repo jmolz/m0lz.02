@@ -252,3 +252,133 @@ paths = ["Dockerfile"]
          layers[].seam_checks[]; got: {json}"
     );
 }
+
+/// Phase 3 third-round adversarial fix: missing plan file under `--json`
+/// must emit ExitJson on stdout with exit 1, not a plain text Exit on stderr.
+#[test]
+fn evaluate_json_missing_plan_emits_exit_json_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    git_init(dir.path());
+    let layers = r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#;
+    fs::create_dir_all(dir.path().join(".pice")).unwrap();
+    fs::write(dir.path().join(".pice/layers.toml"), layers).unwrap();
+
+    let output = pice_cmd()
+        .current_dir(dir.path())
+        .args(["evaluate", ".claude/plans/does-not-exist.md", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "missing plan must exit 1; stderr: {}, stdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("missing-plan failure must emit JSON on stdout; parse error: {e}\n{stdout}")
+    });
+    assert_eq!(json["status"], "plan-not-found");
+    assert!(json["plan_path"].is_string());
+}
+
+/// Phase 3 third-round adversarial fix: a plan with no `## Contract` section
+/// under `--json` must emit ExitJson on stdout with exit 2 (criterion-2 = no
+/// evaluation possible), not a plain text Exit on stderr.
+#[test]
+fn evaluate_json_no_contract_section_emits_exit_json_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    git_init(dir.path());
+    let layers = r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#;
+    fs::create_dir_all(dir.path().join(".pice")).unwrap();
+    fs::write(dir.path().join(".pice/layers.toml"), layers).unwrap();
+
+    // Plan exists but has no Contract section.
+    let plan_dir = dir.path().join(".claude/plans");
+    fs::create_dir_all(&plan_dir).unwrap();
+    let plan_path = plan_dir.join("p.md");
+    fs::write(&plan_path, "# P\n\nJust some prose. No contract.\n").unwrap();
+
+    let output = pice_cmd()
+        .current_dir(dir.path())
+        .args(["evaluate", plan_path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "no-contract must exit 2; stderr: {}, stdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("no-contract failure must emit JSON on stdout; parse error: {e}\n{stdout}")
+    });
+    assert_eq!(json["status"], "no-contract-section");
+    assert!(json["plan_path"].is_string());
+}
+
+/// Phase 3 third-round adversarial fix: a malformed plan (Contract heading
+/// without a json fence) under `--json` must emit ExitJson on stdout with
+/// exit 1.
+#[test]
+fn evaluate_json_plan_parse_failure_emits_exit_json_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    git_init(dir.path());
+    let layers = r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#;
+    fs::create_dir_all(dir.path().join(".pice")).unwrap();
+    fs::write(dir.path().join(".pice/layers.toml"), layers).unwrap();
+
+    let plan_dir = dir.path().join(".claude/plans");
+    fs::create_dir_all(&plan_dir).unwrap();
+    let plan_path = plan_dir.join("p.md");
+    // Contract heading present but no ```json fence — plan_parser surfaces
+    // this as an error rather than Ok(None).
+    fs::write(
+        &plan_path,
+        "# P\n\n## Contract\n\nNo JSON fence here, just prose.\n",
+    )
+    .unwrap();
+
+    let output = pice_cmd()
+        .current_dir(dir.path())
+        .args(["evaluate", plan_path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "plan parse failure must exit 1; stderr: {}, stdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("plan-parse failure must emit JSON on stdout; parse error: {e}\n{stdout}")
+    });
+    assert_eq!(json["status"], "plan-parse-failed");
+    assert!(json["error"].is_string());
+}

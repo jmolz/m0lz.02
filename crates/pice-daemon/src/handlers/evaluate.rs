@@ -27,6 +27,19 @@ pub async fn run(
     };
 
     if !plan_path.exists() {
+        // Phase 3 third-round adversarial review fix: pre-orchestrator
+        // failures under `--json` must use ExitJson so machine callers can
+        // parse the structured failure payload on stdout instead of a plain
+        // text message on stderr.
+        if req.json {
+            return Ok(CommandResponse::ExitJson {
+                code: 1,
+                value: json!({
+                    "status": "plan-not-found",
+                    "plan_path": plan_path.display().to_string(),
+                }),
+            });
+        }
         return Ok(CommandResponse::Exit {
             code: 1,
             message: format!("plan file not found: {}", plan_path.display()),
@@ -37,6 +50,16 @@ pub async fn run(
     let plan = match ParsedPlan::load(&plan_path) {
         Ok(p) => p,
         Err(e) => {
+            if req.json {
+                return Ok(CommandResponse::ExitJson {
+                    code: 1,
+                    value: json!({
+                        "status": "plan-parse-failed",
+                        "plan_path": plan_path.display().to_string(),
+                        "error": e.to_string(),
+                    }),
+                });
+            }
             return Ok(CommandResponse::Exit {
                 code: 1,
                 message: format!("failed to parse plan: {e}"),
@@ -47,6 +70,15 @@ pub async fn run(
     let contract = match &plan.contract {
         Some(c) => c.clone(),
         None => {
+            if req.json {
+                return Ok(CommandResponse::ExitJson {
+                    code: 2,
+                    value: json!({
+                        "status": "no-contract-section",
+                        "plan_path": plan_path.display().to_string(),
+                    }),
+                });
+            }
             return Ok(CommandResponse::Exit {
                 code: 2,
                 message: format!("no contract section found in {}", plan_path.display()),
