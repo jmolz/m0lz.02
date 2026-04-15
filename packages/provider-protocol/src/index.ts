@@ -17,6 +17,7 @@ export type {
   ResponseCompleteParams,
   ResponseToolUseParams,
   EvaluateCreateParams,
+  SeamCheckSpec,
   EvaluateCreateResult,
   EvaluateScoreParams,
   EvaluateScoreResult,

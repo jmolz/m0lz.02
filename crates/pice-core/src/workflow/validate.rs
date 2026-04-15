@@ -8,6 +8,8 @@
 use serde::Serialize;
 
 use crate::layers::LayersConfig;
+use crate::seam::types::{LayerBoundary, ParseBoundaryError};
+use crate::seam::Registry;
 use crate::workflow::schema::WorkflowConfig;
 use crate::workflow::trigger;
 use crate::workflow::SCHEMA_VERSION;
@@ -266,6 +268,157 @@ fn seam_boundary_references_known_layers(
     parts.iter().all(|p| known.contains(p))
 }
 
+// ─── Seam checks ────────────────────────────────────────────────────────────
+
+/// Validate every `seams.{boundary}` entry against the layer graph and the
+/// registered seam-check library. Enforces the six rules documented at
+/// `.claude/rules/stack-loops.md`:
+///
+/// 1. Boundary key parses as `"A↔B"` or `"A<->B"`.
+/// 2. Both `A` and `B` appear in `layers.order ∩ layers.defs`.
+/// 3. `A != B` (enforced by `LayerBoundary::parse`).
+/// 4. Every check ID exists in `registry.ids_in_order()`.
+/// 5. No duplicate check IDs within a single boundary's list.
+/// 6. No inverted duplicate boundaries (`"A↔B"` and `"B↔A"` both present).
+///
+/// Collect-all semantics: every error surfaces, no short-circuit.
+pub fn validate_seams(
+    cfg: &WorkflowConfig,
+    layers: &LayersConfig,
+    registry: &Registry,
+) -> ValidationReport {
+    let mut report = ValidationReport::default();
+
+    let Some(seams) = cfg.seams.as_ref() else {
+        return report;
+    };
+
+    // Authoritative layer set = `order ∩ defs` (see `validate_cross_references`
+    // for the invariant).
+    let order_set: std::collections::HashSet<&str> =
+        layers.layers.order.iter().map(|s| s.as_str()).collect();
+    let defs_set: std::collections::HashSet<&str> =
+        layers.layers.defs.keys().map(|s| s.as_str()).collect();
+    let known: std::collections::HashSet<&str> =
+        order_set.intersection(&defs_set).copied().collect();
+    let mut known_sorted: Vec<&str> = known.iter().copied().collect();
+    known_sorted.sort();
+
+    // Rule 6: track seen canonical boundaries to surface inverted duplicates.
+    let mut seen_canonical: std::collections::HashSet<String> = Default::default();
+
+    for (raw_key, check_ids) in seams {
+        // Rule 1 & 3: parse boundary.
+        let boundary = match LayerBoundary::parse(raw_key) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = match &e {
+                    ParseBoundaryError::MissingSeparator(_) => {
+                        "boundary key must contain '↔' or '<->'".to_string()
+                    }
+                    ParseBoundaryError::TooManySeparators(_) => {
+                        "boundary key must reference exactly two layers".to_string()
+                    }
+                    ParseBoundaryError::EmptySide(_) => {
+                        "boundary key has an empty layer name on one side".to_string()
+                    }
+                    ParseBoundaryError::SelfBoundary(n) => {
+                        format!("boundary '{n}↔{n}' references the same layer on both sides")
+                    }
+                    ParseBoundaryError::NameTooLong { limit, .. } => {
+                        format!("boundary layer name exceeds {limit} characters")
+                    }
+                };
+                report.errors.push(ValidationError {
+                    field: format!("seams.{raw_key}"),
+                    message: msg,
+                    line: None,
+                    column: None,
+                });
+                continue;
+            }
+        };
+
+        // Rule 2: both layers must be known.
+        if !known.contains(boundary.a.as_str()) {
+            report.errors.push(ValidationError {
+                field: format!("seams.{raw_key}"),
+                message: format!(
+                    "unknown layer '{}' in seam boundary; known layers: {}",
+                    boundary.a,
+                    known_sorted.join(", ")
+                ),
+                line: None,
+                column: None,
+            });
+        }
+        if !known.contains(boundary.b.as_str()) {
+            report.errors.push(ValidationError {
+                field: format!("seams.{raw_key}"),
+                message: format!(
+                    "unknown layer '{}' in seam boundary; known layers: {}",
+                    boundary.b,
+                    known_sorted.join(", ")
+                ),
+                line: None,
+                column: None,
+            });
+        }
+
+        // Rule 6: detect inverted duplicate AFTER a prior canonical entry
+        // was already recorded. `LayerBoundary::parse` canonicalizes, so two
+        // distinct raw keys that canonicalize to the same form are the
+        // diagnostic signal. The RAW key must not yet be the canonical form
+        // (otherwise we'd be complaining about a self-collision on the first
+        // pass).
+        let canonical = boundary.canonical();
+        if !seen_canonical.insert(canonical.clone()) {
+            report.errors.push(ValidationError {
+                field: format!("seams.{raw_key}"),
+                message: format!(
+                    "inverted duplicate boundary: '{raw_key}' and an earlier entry both \
+                     canonicalize to '{canonical}'; keep only one"
+                ),
+                line: None,
+                column: None,
+            });
+            // Don't also surface rule 4/5 for the shadowed entry — the dup is
+            // the real bug and listing its checks twice is noise.
+            continue;
+        }
+
+        // Rule 5: duplicate check ids within the same boundary.
+        let mut seen_ids: std::collections::HashSet<&str> = Default::default();
+        for id in check_ids {
+            if !seen_ids.insert(id.as_str()) {
+                report.errors.push(ValidationError {
+                    field: format!("seams.{raw_key}"),
+                    message: format!("duplicate seam check id '{id}' in boundary"),
+                    line: None,
+                    column: None,
+                });
+            }
+        }
+
+        // Rule 4: every check ID must be registered.
+        for id in check_ids {
+            if !registry.contains(id) {
+                let known_ids = registry.ids_in_order().join(", ");
+                report.errors.push(ValidationError {
+                    field: format!("seams.{raw_key}"),
+                    message: format!(
+                        "unknown seam check id '{id}'; registered checks: {known_ids}"
+                    ),
+                    line: None,
+                    column: None,
+                });
+            }
+        }
+    }
+
+    report
+}
+
 // ─── Model checks ───────────────────────────────────────────────────────────
 
 /// Validate model names against a provider's capability list. If `known_models`
@@ -312,16 +465,29 @@ pub fn validate_models(cfg: &WorkflowConfig, known_models: Option<&[String]>) ->
 // ─── Umbrella ───────────────────────────────────────────────────────────────
 
 /// Run every validation pass and aggregate the results.
+///
+/// If `seam_registry` is `None`, seam-check ID validation is skipped with a
+/// warning; callers that have no registry handy (e.g. legacy preview paths)
+/// get permissive behavior but the daemon always passes `Some(&registry)`.
 pub fn validate_all(
     cfg: &WorkflowConfig,
     layers: Option<&LayersConfig>,
     known_models: Option<&[String]>,
+    seam_registry: Option<&Registry>,
 ) -> ValidationReport {
     let mut report = ValidationReport::default();
     report.extend(validate_schema_only(cfg));
     report.extend(validate_triggers(cfg));
     if let Some(layers) = layers {
         report.extend(validate_cross_references(cfg, layers));
+        match seam_registry {
+            Some(reg) => report.extend(validate_seams(cfg, layers, reg)),
+            None if cfg.seams.is_some() => report.warnings.push(ValidationWarning {
+                field: "seams".into(),
+                message: "seam check registry not provided; skipping seam ID validation".into(),
+            }),
+            None => {}
+        }
     } else {
         report.warnings.push(ValidationWarning {
             field: "layers.toml".into(),
@@ -408,7 +574,7 @@ mod tests {
     fn valid_workflow_passes() {
         let cfg = embedded_defaults();
         let layers = sample_layers();
-        let report = validate_all(&cfg, Some(&layers), Some(&["sonnet".into()]));
+        let report = validate_all(&cfg, Some(&layers), Some(&["sonnet".into()]), None);
         assert!(report.is_ok(), "unexpected errors: {:?}", report.errors);
     }
 
@@ -561,6 +727,152 @@ mod tests {
         assert!(report.errors.len() >= 3);
     }
 
+    // ─── Seam validation tests ──────────────────────────────────────────
+
+    fn sample_registry() -> crate::seam::Registry {
+        crate::seam::default_registry()
+    }
+
+    #[test]
+    fn seam_validator_accepts_well_formed_boundary() {
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        seams.insert(
+            "backend↔infrastructure".into(),
+            vec!["config_mismatch".into()],
+        );
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+    }
+
+    #[test]
+    fn seam_validator_rejects_missing_separator() {
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        seams.insert("backendinfra".into(), vec!["config_mismatch".into()]);
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(!report.is_ok());
+        assert!(report.errors[0].message.contains("'↔'"));
+    }
+
+    #[test]
+    fn seam_validator_rejects_self_boundary() {
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        seams.insert("backend↔backend".into(), vec!["config_mismatch".into()]);
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(!report.is_ok());
+        assert!(report.errors[0].message.contains("same layer"));
+    }
+
+    #[test]
+    fn seam_validator_rejects_unknown_layer() {
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        seams.insert("ghost↔backend".into(), vec!["config_mismatch".into()]);
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.message.contains("ghost")));
+    }
+
+    #[test]
+    fn seam_validator_rejects_unknown_check_id() {
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        seams.insert(
+            "backend↔infrastructure".into(),
+            vec!["does_not_exist".into()],
+        );
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(!report.is_ok());
+        assert!(report.errors[0]
+            .message
+            .contains("unknown seam check id 'does_not_exist'"));
+    }
+
+    #[test]
+    fn seam_validator_rejects_duplicate_check_id_in_boundary() {
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        seams.insert(
+            "backend↔infrastructure".into(),
+            vec!["config_mismatch".into(), "config_mismatch".into()],
+        );
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(!report.is_ok());
+        assert!(report.errors[0]
+            .message
+            .contains("duplicate seam check id 'config_mismatch'"));
+    }
+
+    #[test]
+    fn seam_validator_rejects_inverted_duplicate_boundary() {
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        // BTreeMap iteration is alphabetical — `backend↔frontend` comes
+        // before `frontend↔backend`. The second (inverted) key should
+        // surface as the duplicate error.
+        seams.insert(
+            "backend↔frontend".into(),
+            vec!["config_mismatch".into()],
+        );
+        seams.insert(
+            "frontend↔backend".into(),
+            vec!["config_mismatch".into()],
+        );
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(!report.is_ok());
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.message.contains("inverted duplicate")),
+            "expected inverted duplicate error, got: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn seam_validator_collects_all_errors() {
+        // Single invalid entry producing multiple simultaneous findings.
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        seams.insert(
+            "ghost↔other_ghost".into(),
+            vec!["unknown_check".into(), "unknown_check".into()],
+        );
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(!report.is_ok());
+        // Two unknown layers + one duplicate id + one unknown-id error.
+        assert!(
+            report.errors.len() >= 3,
+            "expected multiple errors collected, got {}: {:?}",
+            report.errors.len(),
+            report.errors
+        );
+    }
+
+    #[test]
+    fn seam_validator_accepts_ascii_separator() {
+        let mut cfg = embedded_defaults();
+        let mut seams = BTreeMap::new();
+        seams.insert(
+            "backend<->infrastructure".into(),
+            vec!["config_mismatch".into()],
+        );
+        cfg.seams = Some(seams);
+        let report = validate_seams(&cfg, &sample_layers(), &sample_registry());
+        assert!(report.is_ok(), "errors: {:?}", report.errors);
+    }
+
     #[test]
     fn all_presets_valid() {
         use crate::workflow::loader;
@@ -587,6 +899,7 @@ mod tests {
                 &merged,
                 Some(&fixture_layers),
                 Some(&["sonnet".into(), "opus".into(), "haiku".into()]),
+                None,
             );
             assert!(
                 report.is_ok(),

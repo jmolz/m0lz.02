@@ -37,5 +37,6 @@ pub mod plan_parser;
 pub mod prompt;
 pub mod protocol;
 pub mod provider;
+pub mod seam;
 pub mod transport;
 pub mod workflow;

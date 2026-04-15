@@ -15,6 +15,7 @@ import type {
   ResponseCompleteParams,
   ResponseToolUseParams,
   EvaluateCreateParams,
+  SeamCheckSpec,
   EvaluateScoreResult,
   CriterionScore,
   EvaluateResultParams,
@@ -311,6 +312,49 @@ describe('JSON-RPC roundtrip (matches Rust wire format)', () => {
     const parsed: EvaluateCreateParams = JSON.parse(json);
     expect(parsed.model).toBe('gpt-5.4');
     expect(parsed.effort).toBe('high');
+  });
+
+  it('EvaluateCreate seam_checks roundtrip', () => {
+    const params: EvaluateCreateParams = {
+      contract: { criteria: [] },
+      diff: '',
+      claudeMd: '',
+      seamChecks: [
+        { id: 'config_mismatch', boundary: 'backend↔infrastructure' },
+        {
+          id: 'schema_drift',
+          boundary: 'backend↔database',
+          args: { strict: true },
+        },
+      ],
+    };
+    const json = JSON.stringify(params);
+    expect(json).toContain('"seamChecks"');
+    expect(json).toContain('backend↔infrastructure');
+    const parsed: EvaluateCreateParams = JSON.parse(json);
+    expect(parsed.seamChecks).toHaveLength(2);
+    expect(parsed.seamChecks?.[0].id).toBe('config_mismatch');
+    expect(parsed.seamChecks?.[1].args?.strict).toBe(true);
+  });
+
+  it('EvaluateCreate omits seamChecks when absent', () => {
+    const params: EvaluateCreateParams = {
+      contract: {},
+      diff: '',
+      claudeMd: '',
+    };
+    const json = JSON.stringify(params);
+    expect(json).not.toContain('seamChecks');
+  });
+
+  it('SeamCheckSpec shape is assignable and serializes', () => {
+    const spec: SeamCheckSpec = {
+      id: 'openapi_compliance',
+      boundary: 'api↔frontend',
+    };
+    const json = JSON.stringify(spec);
+    const parsed: SeamCheckSpec = JSON.parse(json);
+    expect(parsed).toEqual(spec);
   });
 
   it('error codes match between TS and Rust', () => {

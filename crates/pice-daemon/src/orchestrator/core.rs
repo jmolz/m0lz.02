@@ -104,6 +104,7 @@ impl ProviderOrchestrator {
             claude_md,
             model,
             effort,
+            seam_checks: None,
         })?;
         let create_result = self.request("evaluate/create", Some(create_params)).await?;
         let session_id = create_result

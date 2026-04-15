@@ -66,7 +66,13 @@ pub async fn run(
         );
     }
 
-    let report = validate::validate_all(&resolved, layers.as_ref(), known_models.as_deref());
+    let seam_registry = pice_core::seam::default_registry();
+    let report = validate::validate_all(
+        &resolved,
+        layers.as_ref(),
+        known_models.as_deref(),
+        Some(&seam_registry),
+    );
 
     if req.json {
         let value = json!({

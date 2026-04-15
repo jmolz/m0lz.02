@@ -98,6 +98,49 @@ pub fn record_evaluation(
     }
 }
 
+/// A single seam finding row to insert.
+#[derive(Debug, Clone)]
+pub struct SeamFindingRow<'a> {
+    pub layer: &'a str,
+    pub boundary: &'a str,
+    pub check_id: &'a str,
+    pub category: u8,
+    /// Lower-case wire form: `passed`, `warning`, or `failed`. The CHECK
+    /// constraint on `seam_findings.status` rejects anything else.
+    pub status: &'a str,
+    pub details: Option<&'a str>,
+}
+
+/// Insert a seam finding attached to the given evaluation. Returns the new
+/// row id. The caller is expected to be within the same transaction as the
+/// evaluation insert, or to call this after `record_evaluation` returns the
+/// evaluation id.
+pub fn insert_seam_finding(
+    db: &MetricsDb,
+    evaluation_id: i64,
+    finding: &SeamFindingRow<'_>,
+) -> Result<i64> {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    db.conn()
+        .execute(
+            "INSERT INTO seam_findings (evaluation_id, layer, boundary, check_id, \
+             category, status, details, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                evaluation_id,
+                finding.layer,
+                finding.boundary,
+                finding.check_id,
+                finding.category,
+                finding.status,
+                finding.details,
+                timestamp,
+            ],
+        )
+        .context("failed to insert seam finding")?;
+    Ok(db.conn().last_insert_rowid())
+}
+
 /// Record a lifecycle event (plan_created, execute_started, etc.).
 pub fn record_loop_event(
     db: &MetricsDb,

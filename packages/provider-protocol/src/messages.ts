@@ -101,6 +101,21 @@ export interface EvaluateCreateParams {
   claudeMd: string;
   model?: string;
   effort?: string;
+  /**
+   * Seam check specs for this layer's boundaries. Omitted for v0.1 providers;
+   * the daemon tolerates absence and defaults to no seam verification.
+   */
+  seamChecks?: SeamCheckSpec[];
+}
+
+/**
+ * Per-boundary seam check specification. Mirrored from `pice-protocol` Rust
+ * crate so the TS + Rust sides stay in sync (see `.claude/rules/protocol.md`).
+ */
+export interface SeamCheckSpec {
+  id: string;
+  boundary?: string;
+  args?: Record<string, unknown>;
 }
 
 export interface EvaluateCreateResult {

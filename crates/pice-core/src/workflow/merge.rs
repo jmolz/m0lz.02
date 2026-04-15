@@ -162,13 +162,10 @@ pub fn merge_with_floor(base: WorkflowConfig, overlay: WorkflowConfig) -> Result
 
     merge_review(&mut out.review, overlay.review.as_ref(), &mut violations);
 
-    // seams: purely additive overlay (no floor). Overlay keys replace base.
-    if let Some(overlay_seams) = overlay.seams {
-        let base_seams = out.seams.get_or_insert_with(BTreeMap::new);
-        for (k, v) in overlay_seams {
-            base_seams.insert(k, v);
-        }
-    }
+    // Seams use per-boundary replacement with an existence floor — see
+    // `merge_seams`. An empty user override for a project-declared boundary
+    // is rejected as a floor violation; new user boundaries are additive.
+    merge_seams(&mut out.seams, overlay.seams.as_ref(), &mut violations);
 
     if !violations.is_empty() {
         return Err(FloorViolations { violations }.into());
@@ -441,6 +438,102 @@ fn merge_review(
             b.timeout_hours = overlay.timeout_hours;
             b.on_timeout = overlay.on_timeout;
             b.notification = overlay.notification.clone();
+        }
+    }
+}
+
+/// Merge a user/overlay `seams` map onto a base/project map with per-boundary
+/// replacement semantics and an existence floor.
+///
+/// **Framework → project** callers use [`overlay`] instead (additive, no
+/// floor). This function is only called by [`merge_with_floor`] for the
+/// project → user step.
+///
+/// Rules (documented in `.claude/rules/stack-loops.md` seam section):
+///
+/// 1. **Project boundary existence is a floor.** If the project declares
+///    boundary `"A↔B"`, the user may:
+///    - Omit the boundary → the project list is preserved.
+///    - Restate the boundary with a non-empty list → the list REPLACES the
+///      project list.
+///    - Restate with `[]` (empty) → FLOOR VIOLATION; a user cannot
+///      silently turn off required boundary checks.
+/// 2. **New user boundaries are additive.** A boundary declared by the user
+///    but not by the project is inserted as-is (empty-list still rejected
+///    since a boundary with no checks is indistinguishable from "off").
+/// 3. **Check-list direction is not floor-guarded.** Swapping a strict check
+///    for a lenient one, or reordering, is a legitimate project-specific
+///    choice — mirrors the `max_passes` exemption from Phase 2 floor merge.
+///    The validator still rejects UNKNOWN check IDs and duplicate IDs.
+/// 4. **Boundary keys are canonicalized.** `"A↔B"` and `"B↔A"` address the
+///    same boundary. If user and project spell the same boundary
+///    differently, the user entry replaces the project entry and the
+///    canonical key wins in the output map. Malformed boundary keys
+///    (missing separator, self-boundary) are passed through unchanged —
+///    `validate_seams` will reject them on the resolved config.
+pub fn merge_seams(
+    base: &mut Option<BTreeMap<String, Vec<String>>>,
+    overlay: Option<&BTreeMap<String, Vec<String>>>,
+    violations: &mut Vec<FloorViolation>,
+) {
+    let Some(overlay) = overlay else {
+        return;
+    };
+
+    // Build a canonical-form lookup of project-declared boundaries so user
+    // entries expressed with either separator (`↔` or `<->`) or inverted
+    // order collide with the correct project entry.
+    let base_map = base.get_or_insert_with(BTreeMap::new);
+    let mut project_canonical_keys: std::collections::HashMap<String, String> = Default::default();
+    for key in base_map.keys() {
+        if let Ok(b) = crate::seam::types::LayerBoundary::parse(key) {
+            project_canonical_keys.insert(b.canonical(), key.clone());
+        }
+    }
+
+    for (raw_key, user_list) in overlay {
+        let canonical = crate::seam::types::LayerBoundary::parse(raw_key)
+            .map(|b| b.canonical())
+            .ok();
+
+        // Is this a project-declared boundary (by canonical form)?
+        let project_key = canonical
+            .as_ref()
+            .and_then(|c| project_canonical_keys.get(c).cloned());
+
+        if user_list.is_empty() {
+            // Empty list = disable the boundary. Forbidden for any boundary
+            // (project-declared or brand-new user addition) because the
+            // semantics are ambiguous — use a real check ID or omit the key.
+            let project_display = project_key
+                .as_ref()
+                .and_then(|k| base_map.get(k))
+                .map(|v| format!("{v:?}"))
+                .unwrap_or_else(|| "(none)".into());
+            violations.push(FloorViolation {
+                field: format!("seams.{raw_key}"),
+                project: project_display,
+                user: "[]".into(),
+                reason: "seam boundary check list cannot be empty — \
+                         omit the key to inherit the project list, or list real check IDs",
+            });
+            continue;
+        }
+
+        match project_key {
+            Some(existing_key) => {
+                // User is replacing a project-declared boundary. Remove the
+                // project's original key (may differ in spelling) and insert
+                // under the user's raw key so the output reflects user intent.
+                base_map.remove(&existing_key);
+                base_map.insert(raw_key.clone(), user_list.clone());
+            }
+            None => {
+                // New user boundary — additive. If raw_key is already in
+                // base_map (same raw spelling without a parseable
+                // canonical), just replace.
+                base_map.insert(raw_key.clone(), user_list.clone());
+            }
         }
     }
 }
@@ -1084,6 +1177,138 @@ mod tests {
             fv.violations.len() >= 7,
             "expected at least 7 violations, got {}: {fields:?}",
             fv.violations.len()
+        );
+    }
+
+    // ─── Seam merge tests ───────────────────────────────────────────────
+
+    fn base_with_seams(entries: &[(&str, &[&str])]) -> WorkflowConfig {
+        let mut cfg = base();
+        let mut map = BTreeMap::new();
+        for (k, v) in entries {
+            map.insert(k.to_string(), v.iter().map(|s| s.to_string()).collect());
+        }
+        cfg.seams = Some(map);
+        cfg
+    }
+
+    fn overlay_with_seams(entries: &[(&str, &[&str])]) -> WorkflowConfig {
+        let mut cfg = base();
+        let mut map = BTreeMap::new();
+        for (k, v) in entries {
+            map.insert(k.to_string(), v.iter().map(|s| s.to_string()).collect());
+        }
+        cfg.seams = Some(map);
+        cfg
+    }
+
+    #[test]
+    fn seam_replace_wins_on_user_override() {
+        let project = base_with_seams(&[("backend↔infrastructure", &["config_mismatch"])]);
+        let user =
+            overlay_with_seams(&[("backend↔infrastructure", &["schema_drift", "version_skew"])]);
+        let merged = merge_with_floor(project, user).unwrap();
+        let seams = merged.seams.unwrap();
+        assert_eq!(
+            seams.get("backend↔infrastructure").unwrap(),
+            &vec!["schema_drift".to_string(), "version_skew".to_string()]
+        );
+    }
+
+    #[test]
+    fn seam_omit_preserves_project_list() {
+        let project = base_with_seams(&[("backend↔infrastructure", &["config_mismatch"])]);
+        let user = base(); // no seams at all
+        let merged = merge_with_floor(project, user).unwrap();
+        let seams = merged.seams.unwrap();
+        assert_eq!(
+            seams.get("backend↔infrastructure").unwrap(),
+            &vec!["config_mismatch".to_string()]
+        );
+    }
+
+    #[test]
+    fn seam_empty_list_for_project_boundary_is_violation() {
+        let project = base_with_seams(&[("backend↔infrastructure", &["config_mismatch"])]);
+        let user = overlay_with_seams(&[("backend↔infrastructure", &[])]);
+        let err = merge_with_floor(project, user).unwrap_err();
+        let fv: &FloorViolations = err.downcast_ref::<FloorViolations>().expect("FloorViolations");
+        assert!(fv
+            .violations
+            .iter()
+            .any(|v| v.field == "seams.backend↔infrastructure"
+                && v.reason.contains("cannot be empty")));
+    }
+
+    #[test]
+    fn seam_empty_list_for_new_user_boundary_also_rejected() {
+        let project = base();
+        let user = overlay_with_seams(&[("backend↔infrastructure", &[])]);
+        let err = merge_with_floor(project, user).unwrap_err();
+        let fv: &FloorViolations = err.downcast_ref::<FloorViolations>().expect("FloorViolations");
+        assert!(fv.violations.iter().any(|v| v.user == "[]"));
+    }
+
+    #[test]
+    fn seam_user_may_add_new_boundary() {
+        let project = base_with_seams(&[("backend↔database", &["schema_drift"])]);
+        let user =
+            overlay_with_seams(&[("frontend↔api", &["openapi_compliance"])]);
+        let merged = merge_with_floor(project, user).unwrap();
+        let seams = merged.seams.unwrap();
+        assert!(seams.contains_key("backend↔database"));
+        assert!(seams.contains_key("frontend↔api"));
+    }
+
+    #[test]
+    fn seam_framework_to_project_is_overlay_not_floor() {
+        // The framework→project step uses `overlay`, which does NOT apply
+        // the empty-list floor. Projects MAY remove a framework-declared
+        // boundary by setting it to a new list; but this test just verifies
+        // overlay's additive behavior for seams.
+        let framework = base_with_seams(&[("backend↔infrastructure", &["config_mismatch"])]);
+        let project =
+            overlay_with_seams(&[("frontend↔api", &["openapi_compliance"])]);
+        let merged = overlay(framework, project);
+        let seams = merged.seams.unwrap();
+        assert!(seams.contains_key("backend↔infrastructure"));
+        assert!(seams.contains_key("frontend↔api"));
+    }
+
+    #[test]
+    fn seam_user_list_ordering_preserved() {
+        let project = base_with_seams(&[("backend↔infrastructure", &["config_mismatch"])]);
+        let user = overlay_with_seams(&[(
+            "backend↔infrastructure",
+            &["schema_drift", "auth_handoff", "version_skew"],
+        )]);
+        let merged = merge_with_floor(project, user).unwrap();
+        let list = merged
+            .seams
+            .unwrap()
+            .get("backend↔infrastructure")
+            .cloned()
+            .unwrap();
+        assert_eq!(list, vec!["schema_drift", "auth_handoff", "version_skew"]);
+    }
+
+    #[test]
+    fn seam_canonicalization_collides_inverted_keys() {
+        // User expresses the boundary in inverted form with `<->`; it
+        // must collide with the project's canonical `↔` form and replace.
+        let project = base_with_seams(&[("backend↔infrastructure", &["config_mismatch"])]);
+        let user =
+            overlay_with_seams(&[("infrastructure<->backend", &["version_skew"])]);
+        let merged = merge_with_floor(project, user).unwrap();
+        let seams = merged.seams.unwrap();
+        // The project's original key is gone; user's raw key wins.
+        assert!(
+            !seams.contains_key("backend↔infrastructure"),
+            "project key should be replaced: {seams:?}"
+        );
+        assert_eq!(
+            seams.get("infrastructure<->backend").unwrap(),
+            &vec!["version_skew".to_string()]
         );
     }
 }

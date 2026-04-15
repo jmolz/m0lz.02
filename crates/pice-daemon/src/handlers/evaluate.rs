@@ -69,8 +69,13 @@ pub async fn run(
         // orchestration — e.g. a layer_override referencing a ghost layer
         // would be ignored at runtime. `pice validate` runs the same
         // checks; this mirrors them at execution time.
-        let report =
-            pice_core::workflow::validate::validate_all(&workflow, Some(&layers_config), None);
+        let seam_registry = pice_core::seam::default_registry();
+        let report = pice_core::workflow::validate::validate_all(
+            &workflow,
+            Some(&layers_config),
+            None,
+            Some(&seam_registry),
+        );
         if !report.is_ok() {
             let mut message = String::from("workflow.yaml has validation errors:\n");
             for e in &report.errors {

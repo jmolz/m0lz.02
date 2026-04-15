@@ -311,7 +311,7 @@ pub struct ResponseCompleteParams {
 }
 
 /// Parameters for the `evaluate/create` method.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EvaluateCreateParams {
     pub contract: serde_json::Value,
     pub diff: String,
@@ -321,6 +321,28 @@ pub struct EvaluateCreateParams {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Seam check specs for this layer's boundaries. Omitted for v0.1
+    /// providers; the daemon tolerates absence and defaults to no seam
+    /// verification.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "seamChecks"
+    )]
+    pub seam_checks: Option<Vec<SeamCheckSpec>>,
+}
+
+/// Wire-form seam check specification, mirrored from `pice-core::seam::types`
+/// so the protocol crate stays dependency-light. Kept PartialEq + strict
+/// serde so roundtrip tests catch drift.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SeamCheckSpec {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boundary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Result of the `evaluate/create` method.
@@ -649,11 +671,16 @@ mod tests {
             claude_md: "# Rules".to_string(),
             model: None,
             effort: None,
+            seam_checks: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("\"claudeMd\""));
         assert!(!json.contains("\"model\""));
         assert!(!json.contains("\"effort\""));
+        assert!(
+            !json.contains("seamChecks"),
+            "None seam_checks should be skipped: {json}"
+        );
         let parsed: EvaluateCreateParams = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.diff, "+added line");
     }
@@ -666,6 +693,7 @@ mod tests {
             claude_md: "# Rules".to_string(),
             model: Some("gpt-5.4".to_string()),
             effort: Some("high".to_string()),
+            seam_checks: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("\"model\""));
@@ -673,6 +701,45 @@ mod tests {
         let parsed: EvaluateCreateParams = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.model.unwrap(), "gpt-5.4");
         assert_eq!(parsed.effort.unwrap(), "high");
+    }
+
+    #[test]
+    fn evaluate_create_seam_checks_roundtrip() {
+        let params = EvaluateCreateParams {
+            contract: json!({"criteria": []}),
+            diff: String::new(),
+            claude_md: String::new(),
+            model: None,
+            effort: None,
+            seam_checks: Some(vec![
+                SeamCheckSpec {
+                    id: "config_mismatch".into(),
+                    boundary: Some("backend↔infrastructure".into()),
+                    args: None,
+                },
+                SeamCheckSpec {
+                    id: "schema_drift".into(),
+                    boundary: Some("backend↔database".into()),
+                    args: Some({
+                        let mut m = serde_json::Map::new();
+                        m.insert("strict".into(), json!(true));
+                        m
+                    }),
+                },
+            ]),
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(json.contains("seamChecks"));
+        assert!(json.contains("backend↔infrastructure"));
+        let parsed: EvaluateCreateParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, params);
+    }
+
+    #[test]
+    fn seam_check_spec_denies_unknown_fields_in_protocol_crate() {
+        let bad = r#"{"id":"x","typo":1}"#;
+        let res: Result<SeamCheckSpec, _> = serde_json::from_str(bad);
+        assert!(res.is_err(), "unknown field should be rejected");
     }
 
     #[test]

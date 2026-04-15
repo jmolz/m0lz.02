@@ -13,15 +13,17 @@ use anyhow::{Context, Result};
 use pice_core::config::PiceConfig;
 use pice_core::layers::filter::filter_diff_by_globs;
 use pice_core::layers::manifest::{
-    LayerResult, LayerStatus, ManifestStatus, PassResult, VerificationManifest,
+    CheckStatus, LayerResult, LayerStatus, ManifestStatus, PassResult, VerificationManifest,
 };
 use pice_core::layers::{active_layers, LayersConfig};
 use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
+use pice_core::seam::{default_registry, Registry};
 use pice_core::workflow::WorkflowConfig;
-use std::path::Path;
+use std::collections::{BTreeMap, HashSet};
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
-use super::StreamSink;
+use super::{run_seams_for_layer, StreamSink};
 use crate::prompt::layer_builder::build_layer_evaluation_prompt;
 
 /// Configuration for a Stack Loops evaluation run.
@@ -86,6 +88,35 @@ pub async fn run_stack_loops(
         layers = ?active,
         "computed active layers"
     );
+
+    // Build the merged seam map (project `layers.toml [seams]` + workflow
+    // `seams` overlay). In a future phase this will also apply
+    // `workflow::merge::merge_seams` for the user level. For now we use
+    // the workflow value if present, falling back to layers.toml.
+    let merged_seams: BTreeMap<String, Vec<String>> = cfg
+        .workflow
+        .seams
+        .clone()
+        .or_else(|| config.seams.clone())
+        .unwrap_or_default();
+
+    // Tag every changed file to its layers so seam checks have the
+    // `boundary_files` = `layer_paths[a] ∪ layer_paths[b]` union.
+    let mut layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for file in &changed_files {
+        for layer in pice_core::layers::tag_file_to_layers(config, file) {
+            layer_paths
+                .entry(layer)
+                .or_default()
+                .push(PathBuf::from(file));
+        }
+    }
+
+    // Active-layer set as HashSet for runner.
+    let active_set: HashSet<String> = active.iter().cloned().collect();
+
+    // Seam registry: default checks + any future plugin checks (v0.3).
+    let seam_registry: Registry = default_registry();
 
     if !json_mode {
         sink.send_chunk(&format!("Stack Loops: {} active layers\n", active.len()));
@@ -191,12 +222,32 @@ pub async fn run_stack_loops(
                     )
                 };
                 info!(layer = %layer_name, always_run = is_always_run, "empty diff for active layer");
+                // Even with no own-diff, seam checks may still fire — especially
+                // for always_run layers like `infrastructure`. Run them and
+                // downgrade to Failed on any Failed finding.
+                let seam_checks = run_seams_for_layer(
+                    layer_name,
+                    &active_set,
+                    &merged_seams,
+                    &seam_registry,
+                    project_root,
+                    &full_diff,
+                    &layer_paths,
+                );
+                let first_failed = seam_checks
+                    .iter()
+                    .find(|c| c.status == CheckStatus::Failed)
+                    .map(|c| c.name.clone());
+                let (final_status, final_reason) = match first_failed {
+                    Some(failed_id) => (LayerStatus::Failed, format!("seam:{failed_id}")),
+                    None => (status, reason),
+                };
                 manifest.add_layer_result(LayerResult {
                     name: layer_name.clone(),
-                    status,
+                    status: final_status,
                     passes: Vec::new(),
-                    seam_checks: Vec::new(),
-                    halted_by: Some(reason),
+                    seam_checks,
+                    halted_by: Some(final_reason),
                     final_confidence: None,
                     total_cost_usd: None,
                 });
@@ -234,9 +285,38 @@ pub async fn run_stack_loops(
             let effective_tier = effective_tier_for(cfg.workflow, layer_name);
             let timestamp = chrono::Utc::now().to_rfc3339();
 
+            // Phase 3 — run seam checks between this layer and its active
+            // boundary peers. Fail-closed: any `Failed` finding transitions
+            // the layer from `Pending` to `Failed` with `halted_by = "seam:<id>"`.
+            // `Warning` findings are advisory (do not downgrade status).
+            let seam_checks = run_seams_for_layer(
+                layer_name,
+                &active_set,
+                &merged_seams,
+                &seam_registry,
+                project_root,
+                &full_diff,
+                &layer_paths,
+            );
+            let first_failed = seam_checks
+                .iter()
+                .find(|c| c.status == CheckStatus::Failed)
+                .map(|c| c.name.clone());
+
+            let (layer_status, halted_by) = match first_failed {
+                Some(failed_id) => (
+                    LayerStatus::Failed,
+                    Some(format!("seam:{failed_id}")),
+                ),
+                None => (
+                    LayerStatus::Pending,
+                    Some(format!("phase-1-pending-tier-{effective_tier}")),
+                ),
+            };
+
             let layer_result = LayerResult {
                 name: layer_name.clone(),
-                status: LayerStatus::Pending,
+                status: layer_status,
                 passes: vec![PassResult {
                     index: 0,
                     model: "phase-1-pending".to_string(),
@@ -248,8 +328,8 @@ pub async fn run_stack_loops(
                         filtered_diff.len()
                     )],
                 }],
-                seam_checks: Vec::new(),
-                halted_by: Some(format!("phase-1-pending-tier-{effective_tier}")),
+                seam_checks,
+                halted_by,
                 final_confidence: None,
                 total_cost_usd: None,
             };
@@ -650,5 +730,94 @@ mod tests {
         let content = load_layer_contract(dir.path(), "api", &def);
         assert!(content.contains("response_format"));
         assert!(content.contains("JSON"));
+    }
+
+    /// Seam-fail fixture: changes touch backend + infrastructure with
+    /// declared-but-unused env var. The `backend↔infrastructure` boundary
+    /// runs `config_mismatch`, produces Failed, and the layer transitions
+    /// from Pending → Failed with `halted_by = "seam:config_mismatch"`.
+    #[tokio::test]
+    async fn seam_failure_downgrades_layer_to_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        // Git repo with one commit and then staged changes so the diff is non-empty.
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Backend changes — reads no env vars.
+        std::fs::create_dir_all(dir.path().join("src/server")).unwrap();
+        std::fs::write(dir.path().join("src/server/main.rs"), "fn main() {}\n").unwrap();
+        // Infrastructure declares FOO that backend never reads.
+        std::fs::create_dir_all(dir.path().join("terraform")).unwrap();
+        std::fs::write(
+            dir.path().join("terraform/env.tf"),
+            "# unused tf file\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("Dockerfile"), "FROM alpine\nENV FOO=1\n").unwrap();
+
+        // Build layers + workflow with a seam boundary declaring config_mismatch.
+        let mut layers = test_layers_config();
+        layers.layers.defs.get_mut("infrastructure").unwrap().paths =
+            vec!["terraform/**".into(), "Dockerfile".into()];
+        let mut seams = BTreeMap::new();
+        seams.insert(
+            "backend↔infrastructure".to_string(),
+            vec!["config_mismatch".to_string()],
+        );
+        let mut workflow = test_workflow();
+        workflow.seams = Some(seams);
+
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Plan").unwrap();
+        let pice_config = PiceConfig::default();
+        let cfg = StackLoopsConfig {
+            layers: &layers,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test",
+            primary_model: "test",
+            pice_config: &pice_config,
+            workflow: &workflow,
+        };
+
+        let manifest = run_stack_loops(&cfg, &NullSink, true).await.unwrap();
+        let backend = manifest
+            .layers
+            .iter()
+            .find(|l| l.name == "backend")
+            .expect("backend result present");
+        assert_eq!(
+            backend.status,
+            LayerStatus::Failed,
+            "seam failure should downgrade layer to Failed, got {:?}",
+            backend.status
+        );
+        assert_eq!(
+            backend.halted_by.as_deref(),
+            Some("seam:config_mismatch"),
+            "halted_by should reference the failed check id"
+        );
+        assert!(
+            backend.seam_checks.iter().any(|c| c.name == "config_mismatch"
+                && c.status == CheckStatus::Failed),
+            "seam_checks should include the Failed config_mismatch entry"
+        );
     }
 }

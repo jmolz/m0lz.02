@@ -59,10 +59,18 @@ pub struct PassResult {
 }
 
 /// Result of a seam check between layer boundaries.
+///
+/// `boundary` is the canonical `"A↔B"` key of the boundary the check ran
+/// against. `category` is the PRDv2 failure category (1..=12) declared by
+/// the check; it is `None` for plugin checks that do not self-identify with
+/// the default taxonomy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeamCheckResult {
     pub name: String,
     pub status: CheckStatus,
+    pub boundary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
 }
@@ -106,6 +114,7 @@ pub enum LayerStatus {
 #[serde(rename_all = "kebab-case")]
 pub enum CheckStatus {
     Passed,
+    Warning,
     Failed,
     Skipped,
 }
@@ -337,6 +346,8 @@ mod tests {
             seam_checks: vec![SeamCheckResult {
                 name: "schema_match".to_string(),
                 status: CheckStatus::Passed,
+                boundary: "backend↔database".to_string(),
+                category: Some(9),
                 details: None,
             }],
             halted_by: None,
@@ -366,6 +377,8 @@ mod tests {
         assert_eq!(loaded.layers[0].passes[0].findings.len(), 1);
         assert_eq!(loaded.layers[0].seam_checks.len(), 1);
         assert_eq!(loaded.layers[0].seam_checks[0].status, CheckStatus::Passed);
+        assert_eq!(loaded.layers[0].seam_checks[0].boundary, "backend↔database");
+        assert_eq!(loaded.layers[0].seam_checks[0].category, Some(9));
         assert_eq!(loaded.layers[0].final_confidence, Some(0.95));
         assert_eq!(loaded.gates.len(), 1);
         assert_eq!(loaded.gates[0].status, GateStatus::Approved);
@@ -484,6 +497,47 @@ mod tests {
         assert_eq!(hash_a, hash_b);
         // SHA-256 hex is 64 chars.
         assert_eq!(hash_a.len(), 64);
+    }
+
+    #[test]
+    fn seam_check_result_roundtrip_with_boundary_and_category() {
+        let original = SeamCheckResult {
+            name: "config_mismatch".to_string(),
+            status: CheckStatus::Failed,
+            boundary: "backend↔infrastructure".to_string(),
+            category: Some(1),
+            details: Some("env var 'FOO' missing".to_string()),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains("\"category\":1"));
+        assert!(json.contains("\"boundary\":\"backend↔infrastructure\""));
+        let back: SeamCheckResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, original.name);
+        assert_eq!(back.status, CheckStatus::Failed);
+        assert_eq!(back.boundary, original.boundary);
+        assert_eq!(back.category, Some(1));
+        assert_eq!(back.details, original.details);
+    }
+
+    #[test]
+    fn seam_check_result_omits_none_category() {
+        let result = SeamCheckResult {
+            name: "plugin_check".to_string(),
+            status: CheckStatus::Passed,
+            boundary: "a↔b".to_string(),
+            category: None,
+            details: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("category"), "None category should be skipped: {json}");
+    }
+
+    #[test]
+    fn check_status_warning_kebab_case() {
+        let json = serde_json::to_string(&CheckStatus::Warning).unwrap();
+        assert_eq!(json, "\"warning\"");
+        let back: CheckStatus = serde_json::from_str("\"warning\"").unwrap();
+        assert_eq!(back, CheckStatus::Warning);
     }
 
     #[test]

@@ -19,9 +19,11 @@
 //! `pice_daemon::orchestrator::core::ProviderOrchestrator` path.
 
 pub mod core;
+pub mod seam_runner;
 pub mod session;
 pub mod stack_loops;
 pub mod stream;
 
 pub use core::ProviderOrchestrator;
+pub use seam_runner::run_seams_for_layer;
 pub use stream::{NoticeLevel, NullSink, SharedSink, StreamEvent, StreamSink};
