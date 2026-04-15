@@ -47,6 +47,17 @@ Violations are reported at workflow load time with a clear error showing the spe
 
 The validator implementation lives in `pice-core::workflow::merge`. Every merge operation passes through a `check_floor()` guard.
 
+### Floor merge implementation invariants
+
+These are learned from Phase 2 adversarial review — each one closed a concrete bypass.
+
+- **Snapshot project state BEFORE mutation.** `merge_with_floor` clones `base.defaults`, `base.review`, and `base.layer_overrides` at entry. Per-layer floors derive from those snapshots, not from `out.*` mid-mutation — otherwise a user who raises defaults can then be checked against their own raised value in the layer step. The snapshot pattern also makes intent unambiguous: the floor is what the PROJECT said, not the partially-merged result.
+- **Layer floors fall back to defaults, not `LayerOverride::default()`.** When the project has no explicit `layer_overrides.<layer>.tier`, the floor for user-overridden `tier` on that layer is `project_defaults.tier`, not `0` (from a fresh `LayerOverride`). Same pattern applies to `min_confidence`, `max_passes`, `budget_usd`, `require_review`. A fresh per-layer user override is still floor-checked.
+- **`require_review` per-layer floor is `project_layer.require_review.unwrap_or(project_review.enabled)`.** Do NOT OR the global gate onto the layer floor — that would prevent a project-committed `require_review: false` exemption from being carried forward when the user also leaves it `false`.
+- **Trigger floors use byte-equality FIRST, then AST equivalence.** `triggers_equivalent(project, user)` returns true iff `project == user` OR `trigger::parse(project) == trigger::parse(user)`. The byte-equality fast path is load-bearing: if the user restates the same (possibly invalid) trigger text, we must NOT collapse that into a "rewrite" violation — the real parse error is separately surfaced by `validate_triggers` on the resolved config. Without byte-equality, identical-but-invalid triggers would be masked by a misleading floor violation.
+- **Trigger equivalence is structural, not logical.** AST equality tolerates `always` ↔ `true` aliasing and whitespace differences but rejects `always` vs `tier >= 3` even when the user trigger is semantically stricter. Full AST-implication checking is deferred to v0.3 — see `triggers_equivalent` docs for the upgrade path (truth-table enumeration over the finite context domain).
+- **Collect ALL violations before returning.** Never short-circuit on the first floor violation. Adversarial bypass tests explicitly relax every floored field at once and assert each violation surfaces.
+
 ### Trigger expression grammar
 
 Used by `review.trigger` and conditional layer overrides. Grammar:
@@ -70,6 +81,8 @@ Examples:
 
 Parser lives in `pice-core::workflow::trigger`. Parsing errors surface with line + column. Test every grammar production with a failing fixture.
 
+The recursive-descent parser enforces a `MAX_PARSE_DEPTH = 128` guard in `parse_not` and `parse_primary`'s `LParen` branch. Untrusted YAML input must not be able to stack-overflow the daemon — deeply nested `(((…)))` or `NOT NOT NOT …` must return a parse error, not crash. When adding new recursive productions, increment/decrement the same `depth` field on the parser struct.
+
 ### Validation
 
 `pice validate` checks:
@@ -82,6 +95,13 @@ Parser lives in `pice-core::workflow::trigger`. Parsing errors surface with line
 - `seam_checks` references exist in the seam check registry
 
 Invalid workflows block evaluation with specific errors — no silent defaults.
+
+### Schema hardening and cross-reference invariants
+
+- **Every workflow struct MUST carry `#[serde(deny_unknown_fields)]`.** Renamed or removed fields (e.g. the ex-`phases.review` block) must fail parsing, not be silently dropped. `WorkflowConfig`, `Defaults`, `Phases`, `PhaseConfig`, `ExecutePhase`, `RetryConfig`, `EvaluatePhase`, `LayerOverride`, `ReviewConfig` all carry the attribute — any new struct in `pice-core::workflow::schema` must too.
+- **Cross-reference uses `order ∩ defs`, not just `defs`.** Runtime only executes layers that appear in both `layers.order` AND `layers.defs`. `validate_all` must catch BOTH `order`-only and `defs`-only ghost layers — the intersection is the "known layers" set. A layer in only one side is a config bug and must surface as a cross-reference error, not a warning.
+- **`pice validate --json` on failure returns `CommandResponse::ExitJson { code: 1, value }` — never `Exit { message: <stringified json> }`.** See `.claude/rules/daemon.md` → "Structured JSON failure responses" for the rationale. The `evaluate` handler fails closed on the same validation errors at execution time (mirrors `validate_all` against the resolved workflow before spawning Stack Loops).
+- **Contract criterion #6 requires integration tests via the real `pice` binary.** `crates/pice-cli/tests/validate_integration.rs` exercises the adapter stack with `assert_cmd` + `PICE_DAEMON_INLINE=1`. Unit tests in the daemon handler are necessary but not sufficient — CLI-layer routing (stdout vs stderr, exit code propagation, JSON shape) must be covered end-to-end.
 
 ## Adaptive Evaluation — the ~96.6% ceiling
 

@@ -72,4 +72,11 @@ paths:
 - Use `clap` derive macros for arg parsing.
 - Every command has a `--json` flag for machine-readable output. When `--json` is active, suppress `println!` messages and emit a single JSON object to stdout. In JSON mode, capture/suppress subprocess stdout (use `output()` not `status()`) to keep stdout as valid JSON.
 - Exit codes: 0 = success, 1 = failure, 2 = evaluation failed (contract criteria not met).
+- JSON-mode failure responses use `CommandResponse::ExitJson { code, value }`, not `Exit { message: <stringified json> }`. See `.claude/rules/daemon.md` → "Structured JSON failure responses".
 - Phase-N scaffolding uses `#[allow(dead_code)]` with a `///` doc comment explaining which phase uses the code.
+
+## Schema Hardening
+
+- **Every serde-derived config struct that represents a user-editable file MUST carry `#[serde(deny_unknown_fields)]`.** TOML and YAML readers silently drop unknown keys by default — a renamed or deprecated field in a stale config will then be silently ignored at runtime. This class of bug is invisible from the user's perspective: the workflow "runs" but respects no override. `deny_unknown_fields` converts that into a parse error with the bad key name.
+- The rule applies to: `pice-core::config::PiceConfig`, `pice-core::layers::LayersConfig`, all of `pice-core::workflow::schema::*`, and any future `.pice/*.{toml,yaml}` schema types. It does NOT apply to internal-only types (JSON-RPC wire types, manifest records that may be forward-extended) where unknown fields are expected during version drift.
+- Add a test that asserts a stale/misspelled top-level field produces a parse error whose message names the bad field. See `crates/pice-core/src/workflow/loader.rs::load_project_rejects_unknown_top_level_fields` for the pattern.

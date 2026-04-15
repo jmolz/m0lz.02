@@ -122,3 +122,16 @@ All of these go through the daemon. The CLI is an adapter, not a participant.
 - In socket mode, `NullSink` is used (temporary — socket-side stream relay is Phase 2 work).
 - **Streaming handlers MUST gate on `!req.json`**: never install `streaming_handler()` or use `to_shared_sink()` when JSON mode is active. Stream chunks on stdout corrupt the JSON response.
 - Capture handlers (commit, handoff) that use `run_session_and_capture()` should use `NullSink` as the shared sink in JSON mode.
+
+## Structured JSON failure responses
+
+`CommandResponse` has two exit variants. They are NOT interchangeable:
+
+- `Exit { code, message }` — human-readable failure. Renderer writes `message` to **stderr** and exits nonzero.
+- `ExitJson { code, value }` — structured `--json`-mode failure. Renderer writes `serde_json::to_string_pretty(&value)` to **stdout** and exits nonzero. Used by `pice validate --json` so CI pipelines like `pice validate --json && deploy` fail closed while the machine caller still gets a parseable report on the expected channel.
+
+**Rules:**
+- Never return `Exit { message: <stringified JSON> }`. String-sniffing to route JSON to stdout is ambiguous (a plain-text error that happens to parse as JSON would be misrouted) and was removed.
+- A JSON-mode success emits `Json { value }` (stdout, exit 0). A JSON-mode failure emits `ExitJson { code: 1|2, value }` (stdout, exit 1 or 2). Text-mode failures use `Exit` (stderr).
+- The renderer is in `crates/pice-cli/src/commands/mod.rs::render_response`. Every `CommandResponse` variant must have a dedicated arm — no catch-all string heuristics.
+- Daemon RPC roundtrip: `ExitJson` serializes as `{"type":"exit-json","code":N,"value":...}` (kebab-case internally-tagged enum). Both pice-cli and pice-daemon depend on the enum in `pice-core::cli`; divergence is a bug.
