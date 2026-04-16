@@ -31,6 +31,7 @@ The Rust `pice-protocol` crate and the TS `@pice/provider-protocol` package defi
 - Every message type change requires updating BOTH packages
 - CI must include a roundtrip test: serialize in Rust → deserialize in TS, and vice versa
 - Version numbers of both packages must match
+- **(Phase 3+) Seam types are mirrored on both sides.** Rust has `SeamCheckSpec` in `pice-protocol`, and `SeamCheckResult`, `SeamFinding`, `CheckStatus` in `pice-core::layers::manifest`. TS mirrors all four in `@pice/provider-protocol/src/messages.ts` (`SeamCheckSpec`, `SeamCheckResult`, `SeamFinding`, `SeamCheckStatus`). Roundtrip tests exist for each in `packages/provider-base/src/__tests__/roundtrip.test.ts`. **Wire shape caveat**: Rust uses `#[serde(skip_serializing_if = "Option::is_none")]` on `SeamCheckResult.category`, so `None` → key omitted (not `null`). The TS type uses `category?: number | null` to accept both. When parsing Rust-emitted JSON in TS, `category` will be `undefined` (key absent), not `null`.
 
 ## Adding a New Method
 
