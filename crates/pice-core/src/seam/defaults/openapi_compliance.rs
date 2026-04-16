@@ -400,8 +400,13 @@ fn parse_handler_returns(content: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     // Object literal — `return { foo: "x", bar: 1 }`.
     if let Some(start) = content.find("return {") {
-        if let Some(len) = find_matching(&content[start + 7..], '{', '}') {
-            let inner = &content[start + 8..start + 7 + len];
+        // Skip past the opening `{` (at start+7) before calling
+        // find_matching. The function starts with depth=1 and scans for
+        // the matching `}`. If we include the `{` in the sub-slice,
+        // depth increments to 2 and a simple `return { id: 1 }` never
+        // matches (needs two close-braces). Phase 3 code review fix.
+        if let Some(len) = find_matching(&content[start + 8..], '{', '}') {
+            let inner = &content[start + 8..start + 8 + len];
             for part in inner.split(',') {
                 if let Some(colon) = part.find(':') {
                     let name = part[..colon]
@@ -419,11 +424,14 @@ fn parse_handler_returns(content: &str) -> Vec<(String, String)> {
         }
     }
     // JSON-like response: `res.json({ ... })`, `c.json({ ... })`.
+    // Use `find_matching` to handle nested objects like `.json({ user: { id: 1 }, name: "a" })`
+    // instead of stopping at the first `}` (which would silently truncate).
     for marker in [".json({", ".json({ "].iter() {
         let mut rest = content;
         while let Some(idx) = rest.find(marker) {
+            // `marker` ends AFTER the `{`, so `after` starts inside the object.
             let after = &rest[idx + marker.len()..];
-            if let Some(close) = after.find('}') {
+            if let Some(close) = find_matching(after, '{', '}') {
                 let body = &after[..close];
                 for part in body.split(',') {
                     if let Some(colon) = part.find(':') {

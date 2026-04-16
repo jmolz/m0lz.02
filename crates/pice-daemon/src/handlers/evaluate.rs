@@ -612,12 +612,22 @@ pub async fn run(
         if overall_passed {
             Ok(CommandResponse::Json { value: result })
         } else {
-            // Exit code 2 when evaluation fails (contract criteria not met)
-            Ok(CommandResponse::Exit {
-                code: 2,
-                message: serde_json::to_string_pretty(&result)
-                    .unwrap_or_else(|_| "evaluation failed".to_string()),
-            })
+            // Exit code 2 when evaluation fails (contract criteria not met).
+            // Per .claude/rules/daemon.md: JSON-mode failure MUST use ExitJson
+            // (stdout), never Exit with stringified JSON (stderr). The v0.1
+            // path previously violated this — fixed in Phase 3 code review.
+            if req.json {
+                Ok(CommandResponse::ExitJson {
+                    code: 2,
+                    value: result,
+                })
+            } else {
+                Ok(CommandResponse::Exit {
+                    code: 2,
+                    message: serde_json::to_string_pretty(&result)
+                        .unwrap_or_else(|_| "evaluation failed".to_string()),
+                })
+            }
         }
     } else {
         let mut output = String::new();
