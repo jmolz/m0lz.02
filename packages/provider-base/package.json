@@ -1,6 +1,6 @@
 {
   "name": "@pice/provider-base",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "Shared provider infrastructure for PICE — StdioTransport and BaseProvider",
   "main": "./dist/index.js",
