@@ -288,8 +288,9 @@ pub async fn run(
                     // picture). But persisting both as separate rows would
                     // double-count category analytics. Dedupe here on
                     // (boundary, check_id) and attribute the canonical row
-                    // to the alphabetically-first layer the check appeared
-                    // on (deterministic across runs).
+                    // to the first layer encountered in `manifest.layers`
+                    // iteration order (layers.toml declaration order, which
+                    // is deterministic across runs).
                     let mut seen: std::collections::HashSet<(String, String)> =
                         std::collections::HashSet::new();
                     for layer in &manifest.layers {
