@@ -22,7 +22,10 @@ phases:
   evaluate:
     parallel: true
     seam_checks: true
-    adaptive_algorithm: adts
+    # Phase 4 Pass-5 Codex Critical #3: standalone `adts` is temporarily
+    # rejected at validation (no success path). Overlay design is tracked as
+    # a follow-up; brownfield teams keep `bayesian_sprt` in the interim.
+    adaptive_algorithm: bayesian_sprt
 
 layer_overrides: {}
 

@@ -34,7 +34,7 @@ phases:
     description: "Evaluate per layer with seam checks"
     parallel: true
     seam_checks: true
-    adaptive_algorithm: bayesian_sprt   # bayesian_sprt | adts | vec | none
+    adaptive_algorithm: bayesian_sprt   # bayesian_sprt | vec | none  (standalone `adts` is temporarily rejected — Phase 4 Pass-5 Codex Critical #3)
     # model_override: {}               # map of layer name -> model name
     #
     # Adaptive algorithm tuning (Phase 4) — uncomment to override defaults.

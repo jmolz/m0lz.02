@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::layers::LayersConfig;
 use crate::seam::types::{LayerBoundary, ParseBoundaryError};
 use crate::seam::Registry;
-use crate::workflow::schema::WorkflowConfig;
+use crate::workflow::schema::{AdaptiveAlgo, WorkflowConfig};
 use crate::workflow::trigger;
 use crate::workflow::SCHEMA_VERSION;
 
@@ -191,6 +191,47 @@ fn validate_adaptive_into(cfg: &WorkflowConfig, report: &mut ValidationReport) {
             line: None,
             column: None,
         });
+    }
+
+    // Phase 4 Pass-5 Codex Critical #3 + High #5: standalone ADTS has no
+    // success path. `decide_halt(AdaptiveAlgo::Adts, ...)` returns halt=false
+    // from the algorithm-specific branch; `build_adaptive_layer_result` only
+    // marks `Passed` for `sprt_confidence_reached` or `vec_entropy`. Result:
+    // `adaptive_algorithm: adts` can only end Failed (escalation exhausted)
+    // or Pending (budget/max_passes) — never Passed. Additionally, ADTS
+    // silently degrades to a primary-only no-op when adversarial evaluation
+    // is disabled (High #5), because `paired_scores` stays empty and
+    // `run_adts` returns Continue forever.
+    //
+    // Overlay redesign (ADTS mutates next-pass params while SPRT/VEC drives
+    // halt) is tracked as follow-up. Until then, reject standalone ADTS at
+    // validation time with a clear upgrade path.
+    if matches!(eval.adaptive_algorithm, AdaptiveAlgo::Adts) {
+        report.errors.push(ValidationError {
+            field: "phases.evaluate.adaptive_algorithm".into(),
+            message: "standalone `adts` is not supported — it has no success path \
+                     (can only halt Failed on escalation exhaustion or Pending on \
+                     budget/max_passes). Use `bayesian_sprt` or `vec` as the base \
+                     completion rule; divergence-triggered escalation will be \
+                     re-enabled as an overlay in a follow-up release. See Phase 4 \
+                     Pass-5 Codex Critical #3 for details."
+                .into(),
+            line: None,
+            column: None,
+        });
+    }
+    for (layer, o) in &cfg.layer_overrides {
+        if matches!(o.adaptive_algorithm, Some(AdaptiveAlgo::Adts)) {
+            report.errors.push(ValidationError {
+                field: format!("layer_overrides.{layer}.adaptive_algorithm"),
+                message: "standalone `adts` is not supported (no success path). \
+                         Use `bayesian_sprt` or `vec`; see Phase 4 Pass-5 \
+                         Codex Critical #3."
+                    .into(),
+                line: None,
+                column: None,
+            });
+        }
     }
 
     // VEC: entropy_floor > 0
@@ -828,6 +869,74 @@ mod tests {
         cfg.defaults.tier = 9;
         let report = validate_schema_only(&cfg);
         assert!(report.errors.len() >= 3);
+    }
+
+    // ─── Phase 4 Pass-5 Codex Critical #3 + High #5 ────────────────────────
+    //
+    // Standalone `adaptive_algorithm: adts` has no success path (can only halt
+    // Failed on escalation exhaustion or Pending on budget/max_passes). It
+    // also silently degrades to a primary-only no-op when adversarial
+    // evaluation is disabled. Until the overlay redesign lands, reject it at
+    // validation.
+
+    #[test]
+    fn adts_rejected_at_defaults() {
+        let mut cfg = embedded_defaults();
+        cfg.phases.evaluate.adaptive_algorithm = AdaptiveAlgo::Adts;
+        let report = validate_schema_only(&cfg);
+        assert!(!report.is_ok(), "ADTS at defaults must fail validation");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.field == "phases.evaluate.adaptive_algorithm"
+                    && e.message.contains("standalone `adts` is not supported")),
+            "expected standalone-ADTS rejection error; got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn adts_rejected_at_layer_override() {
+        let mut cfg = embedded_defaults();
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            "backend".into(),
+            LayerOverride {
+                adaptive_algorithm: Some(AdaptiveAlgo::Adts),
+                ..LayerOverride::default()
+            },
+        );
+        cfg.layer_overrides = overrides;
+        let report = validate_schema_only(&cfg);
+        assert!(!report.is_ok(), "ADTS at layer override must fail");
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.field == "layer_overrides.backend.adaptive_algorithm"),
+            "expected layer-level ADTS rejection; got {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn bayesian_sprt_and_vec_and_none_remain_accepted() {
+        for algo in [
+            AdaptiveAlgo::BayesianSprt,
+            AdaptiveAlgo::Vec,
+            AdaptiveAlgo::None,
+        ] {
+            let mut cfg = embedded_defaults();
+            cfg.phases.evaluate.adaptive_algorithm = algo;
+            let report = validate_schema_only(&cfg);
+            assert!(
+                report.errors.is_empty(),
+                "algo {:?} must remain valid; got errors {:?}",
+                algo,
+                report.errors
+            );
+        }
     }
 
     // ─── Seam validation tests ──────────────────────────────────────────

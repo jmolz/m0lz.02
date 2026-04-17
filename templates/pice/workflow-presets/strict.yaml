@@ -28,7 +28,12 @@ phases:
   evaluate:
     parallel: true
     seam_checks: true
-    adaptive_algorithm: adts
+    # Phase 4 Pass-5 Codex Critical #3: standalone `adts` is temporarily
+    # rejected at validation — it has no success path. Strict teams who want
+    # divergence-triggered escalation will get it as an overlay on top of
+    # `bayesian_sprt` in a follow-up release. Until then, `bayesian_sprt`
+    # with a tight `min_confidence` is the closest substitute.
+    adaptive_algorithm: bayesian_sprt
 
 layer_overrides:
   infrastructure:
