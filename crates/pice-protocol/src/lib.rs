@@ -311,7 +311,15 @@ pub struct ResponseCompleteParams {
 }
 
 /// Parameters for the `evaluate/create` method.
+///
+/// # Schema hardening
+///
+/// `deny_unknown_fields` rejects typos in the wire params — critical because
+/// the adaptive loop's ADTS signals (`freshContext`, `effortOverride`) are
+/// load-bearing and a silently-dropped field would disable escalation without
+/// warning. Phase 4 contract criterion #9.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct EvaluateCreateParams {
     pub contract: serde_json::Value,
     pub diff: String,
@@ -332,8 +340,28 @@ pub struct EvaluateCreateParams {
     pub seam_checks: Option<Vec<SeamCheckSpec>>,
     /// 0-indexed pass number within an adaptive evaluation loop. Absent
     /// for single-pass (v0.1) evaluations. Advisory — providers may ignore.
+    /// The stub provider uses this to index `PICE_STUB_SCORES`.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "passIndex")]
     pub pass_index: Option<u32>,
+    /// ADTS Level 1+ signal: recreate the provider session instead of
+    /// reusing prior-pass context. Set on the pass immediately following a
+    /// divergent-score detection. Absent for SPRT/VEC/None or when ADTS is
+    /// in the `Continue` state. Phase 4 contract criterion #5.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "freshContext"
+    )]
+    pub fresh_context: Option<bool>,
+    /// ADTS Level 2 signal: override the base `effort` for this pass only.
+    /// Typically `"xhigh"` on a Level 2 escalation; absent otherwise. Takes
+    /// precedence over `effort` when both are set.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "effortOverride"
+    )]
+    pub effort_override: Option<String>,
 }
 
 /// Wire-form seam check specification, mirrored from `pice-core::seam::types`
@@ -686,6 +714,8 @@ mod tests {
             effort: None,
             seam_checks: None,
             pass_index: None,
+            fresh_context: None,
+            effort_override: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("\"claudeMd\""));
@@ -713,6 +743,8 @@ mod tests {
             effort: Some("high".to_string()),
             seam_checks: None,
             pass_index: None,
+            fresh_context: None,
+            effort_override: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("\"model\""));
@@ -747,6 +779,8 @@ mod tests {
                 },
             ]),
             pass_index: None,
+            fresh_context: None,
+            effort_override: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(json.contains("seamChecks"));
@@ -774,6 +808,8 @@ mod tests {
             effort: None,
             seam_checks: None,
             pass_index: Some(3),
+            fresh_context: None,
+            effort_override: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(
@@ -794,6 +830,8 @@ mod tests {
             effort: None,
             seam_checks: None,
             pass_index: None,
+            fresh_context: None,
+            effort_override: None,
         };
         let json = serde_json::to_string(&params).unwrap();
         assert!(
@@ -817,6 +855,96 @@ mod tests {
         );
         let parsed: EvaluateCreateResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, result);
+    }
+
+    // ─── Phase 4 criterion #9: schema hardening + ADTS escalation fields ──
+
+    #[test]
+    fn evaluate_create_params_rejects_unknown_field() {
+        // A typoed `passIndexx` would silently drop without deny_unknown_fields.
+        // ADTS escalation signals are load-bearing; a dropped field is a
+        // silent correctness bug.
+        let bad = r#"{
+            "contract":{},
+            "diff":"",
+            "claudeMd":"",
+            "passIndexx":3
+        }"#;
+        let res: Result<EvaluateCreateParams, _> = serde_json::from_str(bad);
+        assert!(res.is_err(), "unknown field must be rejected");
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("passIndexx") || err.contains("unknown field"),
+            "error should name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn evaluate_create_params_with_fresh_context_roundtrips() {
+        let params = EvaluateCreateParams {
+            contract: json!({}),
+            diff: String::new(),
+            claude_md: String::new(),
+            model: None,
+            effort: None,
+            seam_checks: None,
+            pass_index: Some(1),
+            fresh_context: Some(true),
+            effort_override: None,
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(
+            json.contains("\"freshContext\":true"),
+            "camelCase wire key: {json}"
+        );
+        let parsed: EvaluateCreateParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.fresh_context, Some(true));
+    }
+
+    #[test]
+    fn evaluate_create_params_with_effort_override_roundtrips() {
+        let params = EvaluateCreateParams {
+            contract: json!({}),
+            diff: String::new(),
+            claude_md: String::new(),
+            model: None,
+            effort: Some("high".into()),
+            seam_checks: None,
+            pass_index: Some(2),
+            fresh_context: Some(true),
+            effort_override: Some("xhigh".into()),
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(
+            json.contains("\"effortOverride\":\"xhigh\""),
+            "camelCase wire key + xhigh value: {json}"
+        );
+        let parsed: EvaluateCreateParams = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.effort_override.as_deref(), Some("xhigh"));
+    }
+
+    #[test]
+    fn evaluate_create_params_omits_fresh_context_and_effort_override_when_none() {
+        let params = EvaluateCreateParams {
+            contract: json!({}),
+            diff: String::new(),
+            claude_md: String::new(),
+            model: None,
+            effort: None,
+            seam_checks: None,
+            pass_index: None,
+            fresh_context: None,
+            effort_override: None,
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(
+            !json.contains("freshContext"),
+            "None fresh_context must be omitted: {json}"
+        );
+        assert!(
+            !json.contains("effortOverride"),
+            "None effort_override must be omitted: {json}"
+        );
     }
 
     #[test]

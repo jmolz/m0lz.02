@@ -120,6 +120,8 @@ impl ProviderOrchestrator {
             effort,
             seam_checks: None,
             pass_index: None,
+            fresh_context: None,
+            effort_override: None,
         })?;
         let create_result = self.request("evaluate/create", Some(create_params)).await?;
         let session_id = create_result
@@ -161,6 +163,7 @@ impl ProviderOrchestrator {
     ///
     /// The adaptive loop invokes this once per pass; the old `evaluate` path
     /// stays in place for legacy Tier 1/2 non-adaptive callers.
+    #[allow(clippy::too_many_arguments)]
     pub async fn evaluate_one_pass(
         &mut self,
         contract: Value,
@@ -169,6 +172,11 @@ impl ProviderOrchestrator {
         model: Option<String>,
         effort: Option<String>,
         pass_index: Option<u32>,
+        // Phase 4 ADTS signals — set by the adaptive loop on Level 1+ / Level 2
+        // escalations only. Providers unaware of these fields tolerate their
+        // absence; the stub provider records them for isolation-test capture.
+        fresh_context: Option<bool>,
+        effort_override: Option<String>,
     ) -> Result<PerPassOutcome> {
         let (tx, rx) = tokio::sync::oneshot::channel::<EvaluateResultParams>();
         let tx = std::sync::Mutex::new(Some(tx));
@@ -195,6 +203,8 @@ impl ProviderOrchestrator {
             effort,
             seam_checks: None,
             pass_index,
+            fresh_context,
+            effort_override,
         })?;
         let raw = self.request("evaluate/create", Some(create_params)).await?;
         let create_res: EvaluateCreateResult = serde_json::from_value(raw)

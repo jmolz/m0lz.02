@@ -165,9 +165,9 @@ Create an evaluation session. Evaluation sessions are context-isolated -- they r
 | `model` | `string` | No | Model override |
 | `effort` | `string` | No | Effort level (e.g., `"high"`, `"xhigh"`) |
 | `seamChecks` | `SeamCheckSpec[]` | No | Seam checks to run for this layer's boundaries (v0.2+) |
-| `passIndex` | `number` | No | 1-indexed pass number within the adaptive loop (v0.4+) |
+| `passIndex` | `number` | No | 0-indexed pass number within the adaptive loop (v0.4+). The stub provider uses this to index `PICE_STUB_SCORES`. Loop iterates passes 1..=N internally but wires 0..=N-1 for array compatibility. |
 | `freshContext` | `boolean` | No | Recreate provider session, drop prior conversation (ADTS Level 1+, v0.4+) |
-| `effortOverride` | `string` | No | Per-pass effort override (e.g. `"xhigh"` for ADTS Level 2, v0.4+) |
+| `effortOverride` | `string` | No | Per-pass effort override (e.g. `"xhigh"` for ADTS Level 2, v0.4+). Takes precedence over `effort` when both are set. |
 
 Each `SeamCheckSpec` is `{ id: string, boundary?: string, args?: object }`.
 Providers that don't declare `seamChecks` capability should ignore this

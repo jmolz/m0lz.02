@@ -177,9 +177,14 @@ pub async fn run_adaptive_passes(
     let mut accumulated_cost = 0.0_f64;
     let mut adts_escalations_used: u32 = 0;
 
-    // ADTS re-arms these each pass. `next_effort` seeds with `base_effort`
-    // so the first pass and every Continue-branch pass use the baseline.
-    let mut next_effort: Option<String> = ctx.base_effort.clone();
+    // ADTS re-arms these each pass. `next_effort_override` is `Some("xhigh")`
+    // only for the pass immediately following a Level 2 escalation; baseline
+    // `effort` lives separately in `ctx.base_effort`. `next_fresh_context` is
+    // `Some(true)` only for the pass immediately following a Level 1+
+    // escalation. Both roll back to `None` after consumption — Phase 4
+    // invariant "next_* reset after non-ADTS verdicts" in stack-loops.md.
+    let mut next_effort_override: Option<String> = None;
+    let mut next_fresh_context: Option<bool> = None;
 
     let mut halted_by: Option<HaltReason> = None;
     let mut adts_halt_str: Option<String> = None;
@@ -208,14 +213,21 @@ pub async fn run_adaptive_passes(
         }
 
         // ── Primary provider ─────────────────────────────────────────
+        // Wire `pass_index` 0-indexed per `pice-protocol::EvaluateCreateParams`
+        // docstring — the loop iterates 1..=max_passes but the wire form
+        // matches the stub's `PICE_STUB_SCORES` array indexing (0-based).
+        // Manifest `PassResult.index` stays 1-indexed (user-facing audit trail).
+        let wire_pass_index = pass_index.saturating_sub(1);
         let primary_out = primary
             .evaluate_one_pass(
                 ctx.contract.clone(),
                 ctx.diff.clone(),
                 ctx.claude_md.clone(),
                 Some(ctx.primary_model.clone()),
-                next_effort.clone(),
-                Some(pass_index),
+                ctx.base_effort.clone(),
+                Some(wire_pass_index),
+                next_fresh_context,
+                next_effort_override.clone(),
             )
             .await?;
         let primary_score = scalar_score(&primary_out);
@@ -270,8 +282,10 @@ pub async fn run_adaptive_passes(
                         ctx.diff.clone(),
                         ctx.claude_md.clone(),
                         Some(adv_model),
-                        next_effort.clone(),
-                        Some(pass_index),
+                        ctx.base_effort.clone(),
+                        Some(wire_pass_index),
+                        next_fresh_context,
+                        next_effort_override.clone(),
                     )
                     .await?;
                 let adv_score = scalar_score(&adv_out);
@@ -324,14 +338,19 @@ pub async fn run_adaptive_passes(
             let verdict = run_adts(&paired_scores, adts_escalations_used, &ctx.adts)?;
             match verdict {
                 AdtsVerdict::Continue => {
-                    // Converged on this pass — reset next-pass overrides.
-                    next_effort = ctx.base_effort.clone();
+                    // Converged on this pass — reset next-pass overrides so a
+                    // Level 1/2 flag from earlier does not bleed into a
+                    // later Continue pass. Phase 4 invariant: "next_* reset
+                    // after non-ADTS verdicts" (stack-loops.md).
+                    next_effort_override = None;
+                    next_fresh_context = None;
                 }
                 AdtsVerdict::ScheduleExtraPassFreshContext => {
-                    // Level 1: fresh context is the default for each pass
-                    // (session is recreated per `evaluate_one_pass` call).
-                    // Effort stays at baseline.
-                    next_effort = ctx.base_effort.clone();
+                    // Level 1: ask the provider to drop prior-pass context on
+                    // the NEXT pass via `freshContext=true`. Effort stays at
+                    // baseline (orchestrator's `ctx.base_effort`).
+                    next_fresh_context = Some(true);
+                    next_effort_override = None;
                     adts_escalations_used += 1;
                     escalation_events.push(EscalationEvent::Level1FreshContext {
                         at_pass: pass_index,
@@ -339,8 +358,12 @@ pub async fn run_adaptive_passes(
                     continue; // skip post-pass halt; force next pass
                 }
                 AdtsVerdict::ScheduleExtraPassElevatedEffort => {
-                    // Level 2: elevate compute for the next pass only.
-                    next_effort = Some("xhigh".to_string());
+                    // Level 2: elevate compute for the NEXT pass only via
+                    // `effortOverride="xhigh"`. Keep fresh context too — the
+                    // post-L1 session reuse should not be restored just
+                    // because we're escalating further.
+                    next_fresh_context = Some(true);
+                    next_effort_override = Some("xhigh".to_string());
                     adts_escalations_used += 1;
                     escalation_events.push(EscalationEvent::Level2ElevatedEffort {
                         at_pass: pass_index,

@@ -1,6 +1,7 @@
 import type { ProviderCapabilities, EvaluateCreateParams } from '@pice/provider-protocol';
 import { BaseProvider, StdioTransport } from '@pice/provider-base';
 import { parseStubScores, getStubEntry, type StubScoreEntry } from './deterministic.js';
+import { appendFileSync } from 'node:fs';
 
 let nextSessionId = 1;
 
@@ -31,11 +32,31 @@ interface StubEvalState {
 export class StubProvider extends BaseProvider {
   private evalContracts = new Map<string, StubEvalState>();
   private stubScores: StubScoreEntry[];
+  /**
+   * Phase 4 ADTS test harness: when set, the stub returns scores from this
+   * list for models whose name contains `"adversarial"` (case-insensitive).
+   * Primary providers keep using `PICE_STUB_SCORES`. This lets ADTS
+   * integration tests drive divergent primary/adversarial score sequences
+   * through one stub binary — the alternative of two separate stub binaries
+   * with per-process env vars would need provider-host plumbing changes.
+   */
+  private adversarialScores: StubScoreEntry[];
+  /**
+   * Phase 4 context-isolation test harness: when `PICE_STUB_REQUEST_LOG`
+   * points at a file path, every `evaluate/create` request's payload
+   * (contract, diff, claudeMd, passIndex, freshContext, effortOverride,
+   * model) is appended as one JSON line. Callers parse the file to verify
+   * byte-identical prompts across passes.
+   */
+  private requestLogPath: string | undefined;
 
   constructor(version: string) {
     super(version);
     const raw = process.env['PICE_STUB_SCORES'];
     this.stubScores = raw ? parseStubScores(raw) : [];
+    const advRaw = process.env['PICE_STUB_ADVERSARIAL_SCORES'];
+    this.adversarialScores = advRaw ? parseStubScores(advRaw) : [];
+    this.requestLogPath = process.env['PICE_STUB_REQUEST_LOG'] || undefined;
   }
 
   getCapabilities(): ProviderCapabilities {
@@ -83,8 +104,43 @@ export class StubProvider extends BaseProvider {
       const sessionId = `stub-eval-${nextSessionId++}`;
       const p = params as EvaluateCreateParams;
 
+      // Role selection for ADTS: if the model string contains "adversarial"
+      // (case-insensitive) AND PICE_STUB_ADVERSARIAL_SCORES is set, use that
+      // list. Otherwise fall back to PICE_STUB_SCORES. Kept opt-in so legacy
+      // tests that don't set the adversarial list behave identically.
+      const isAdversarial =
+        typeof p.model === 'string' && p.model.toLowerCase().includes('adversarial');
+      const scoreList =
+        isAdversarial && this.adversarialScores.length > 0
+          ? this.adversarialScores
+          : this.stubScores;
+
       const passIndex = p.passIndex ?? 0;
-      const entry = getStubEntry(this.stubScores, passIndex);
+      const entry = getStubEntry(scoreList, passIndex);
+
+      // Request log: one JSON line per call, for context-isolation tests.
+      // Failures are logged to stderr but never propagated — telemetry writes
+      // must never crash the provider (mirrors the daemon's metrics pattern).
+      if (this.requestLogPath) {
+        try {
+          appendFileSync(
+            this.requestLogPath,
+            JSON.stringify({
+              sessionId,
+              model: p.model ?? null,
+              effort: p.effort ?? null,
+              effortOverride: p.effortOverride ?? null,
+              freshContext: p.freshContext ?? null,
+              passIndex,
+              contract: p.contract,
+              diff: p.diff,
+              claudeMd: p.claudeMd,
+            }) + '\n',
+          );
+        } catch (err) {
+          console.error(`[stub] request log append failed: ${String(err)}`);
+        }
+      }
 
       this.evalContracts.set(sessionId, {
         contract: p.contract,

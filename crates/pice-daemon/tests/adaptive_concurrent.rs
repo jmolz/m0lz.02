@@ -80,29 +80,6 @@ fn write_file(dir: &Path, rel: &str, content: &str) {
     std::fs::write(&full, content).unwrap();
 }
 
-/// Set up a project root with src/main.rs, .pice/config.toml, and a plan
-/// file. Returns the `(plan_path, db)` pair.
-fn setup_project(dir: &Path, feature_id: &str) -> (std::path::PathBuf, MetricsDb) {
-    git_init(dir);
-    write_file(dir, "src/main.rs", "fn main() {}");
-
-    // Empty .pice/config.toml + a fresh SQLite DB at the configured path.
-    let pice_dir = dir.join(".pice");
-    std::fs::create_dir_all(&pice_dir).unwrap();
-    let db_path = pice_dir.join("metrics.db");
-    let db = MetricsDb::open(&db_path).unwrap();
-
-    let plan_dir = dir.join(".claude/plans");
-    std::fs::create_dir_all(&plan_dir).unwrap();
-    let plan_path = plan_dir.join(format!("{feature_id}.md"));
-    std::fs::write(
-        &plan_path,
-        "# Plan\n\n## Contract\n\n```json\n{\"feature\":\"x\",\"tier\":2,\"pass_threshold\":7,\"criteria\":[]}\n```\n",
-    )
-    .unwrap();
-    (plan_path, db)
-}
-
 fn single_layer_config() -> LayersConfig {
     let mut defs = BTreeMap::new();
     defs.insert(
@@ -171,16 +148,52 @@ fn workflow() -> WorkflowConfig {
 }
 
 #[tokio::test]
-async fn concurrent_evaluations_have_disjoint_pass_events() {
-    // Stub returns 9.5 / pass with cost 0.01. SPRT halts after 3 passes.
+async fn concurrent_evaluations_on_shared_db_have_disjoint_pass_events() {
+    // Phase 4 post-adversarial-review fix (Codex High #5): the earlier
+    // version of this test gave each evaluation its own SQLite file, making
+    // cross-evaluation contamination impossible by construction. The real
+    // contention risk is TWO writers racing on the SAME DB file — that's
+    // what `busy_timeout` in `MetricsDb::open` plus WAL's single-writer
+    // serialization has to tolerate. This test exercises the shared-DB
+    // path end-to-end: both evaluations write to one `metrics.db`, enter
+    // the pass loop simultaneously via a `Barrier`, and the assertions
+    // verify (a) disjoint evaluation_id groups with (b) no lost rows.
+
     let _stub = StubScoresGuard::new(
         "9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01",
     );
 
+    // Shared SQLite file: the projects live in separate temp dirs, but a
+    // single `metrics.db` on disk is opened by two independent `MetricsDb`
+    // handles — one per evaluation. This is the real daemon shape.
+    let db_dir = tempfile::tempdir().unwrap();
+    let shared_db_path = db_dir.path().join("metrics.db");
+
     let dir_a = tempfile::tempdir().unwrap();
     let dir_b = tempfile::tempdir().unwrap();
-    let (plan_a, db_a) = setup_project(dir_a.path(), "feat-a");
-    let (plan_b, db_b) = setup_project(dir_b.path(), "feat-b");
+    git_init(dir_a.path());
+    git_init(dir_b.path());
+    write_file(dir_a.path(), "src/main.rs", "fn main() {}");
+    write_file(dir_b.path(), "src/main.rs", "fn main() {}");
+    let plan_a = dir_a.path().join(".claude/plans/feat-a.md");
+    let plan_b = dir_b.path().join(".claude/plans/feat-b.md");
+    std::fs::create_dir_all(plan_a.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(plan_b.parent().unwrap()).unwrap();
+    std::fs::write(
+        &plan_a,
+        "# Plan\n\n## Contract\n\n```json\n{\"feature\":\"x\",\"tier\":2,\"pass_threshold\":7,\"criteria\":[]}\n```\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &plan_b,
+        "# Plan\n\n## Contract\n\n```json\n{\"feature\":\"x\",\"tier\":2,\"pass_threshold\":7,\"criteria\":[]}\n```\n",
+    )
+    .unwrap();
+
+    // Two handles to the SAME SQLite file. Each writer serializes through
+    // WAL; `busy_timeout` prevents SQLITE_BUSY on contention.
+    let db_handle_a = MetricsDb::open(&shared_db_path).unwrap();
+    let db_handle_b = MetricsDb::open(&shared_db_path).unwrap();
 
     let pice_a = stub_pice_config();
     let pice_b = stub_pice_config();
@@ -190,8 +203,9 @@ async fn concurrent_evaluations_have_disjoint_pass_events() {
     let layers_b = single_layer_config();
 
     // Insert evaluation headers so the sinks have valid evaluation_ids.
+    // Both writes hit the SAME DB — the auto-increment assigns 1 then 2.
     let eval_id_a = store::insert_evaluation_header(
-        &db_a,
+        &db_handle_a,
         plan_a.to_str().unwrap(),
         "feat-a",
         2,
@@ -202,7 +216,7 @@ async fn concurrent_evaluations_have_disjoint_pass_events() {
     )
     .unwrap();
     let eval_id_b = store::insert_evaluation_header(
-        &db_b,
+        &db_handle_b,
         plan_b.to_str().unwrap(),
         "feat-b",
         2,
@@ -212,12 +226,15 @@ async fn concurrent_evaluations_have_disjoint_pass_events() {
         None,
     )
     .unwrap();
+    assert_ne!(
+        eval_id_a, eval_id_b,
+        "shared DB must assign distinct evaluation_ids"
+    );
 
-    let db_arc_a = Arc::new(Mutex::new(db_a));
-    let db_arc_b = Arc::new(Mutex::new(db_b));
+    let db_arc_a = Arc::new(Mutex::new(db_handle_a));
+    let db_arc_b = Arc::new(Mutex::new(db_handle_b));
     let barrier = Arc::new(Barrier::new(2));
 
-    // Take everything by-move into spawned tasks.
     let pa = plan_a.clone();
     let pb = plan_b.clone();
     let dap = dir_a.path().to_path_buf();
@@ -274,30 +291,42 @@ async fn concurrent_evaluations_have_disjoint_pass_events() {
     let manifest_a = handle_a.await.unwrap();
     let manifest_b = handle_b.await.unwrap();
 
+    // Open a third handle to the shared DB for read-side assertions (avoids
+    // having to release the sinks' locks). Same file, same WAL view.
+    let reader = MetricsDb::open(&shared_db_path).unwrap();
+
     // ── Assertion 1: each manifest binds to its own feature_id ────────────
     assert_eq!(manifest_a.feature_id, "feat-a");
     assert_eq!(manifest_b.feature_id, "feat-b");
 
-    // ── Assertion 2: pass_events per evaluation_id grouping ───────────────
-    // Each DB is independent, so each holds its own pass_events rows. The
-    // contract criterion's intent is that no cross-evaluation contamination
-    // exists; we enforce that by querying each DB separately for its eval
-    // and asserting the row count matches the manifest's per-layer pass
-    // count.
-    fn count_pass_events(db: &MetricsDb, eval_id: i64) -> i64 {
-        let conn = db.conn();
-        conn.query_row(
-            "SELECT COUNT(*) FROM pass_events WHERE evaluation_id = ?1",
-            rusqlite::params![eval_id],
+    // ── Assertion 2: the shared DB holds EXACTLY TWO distinct evaluation_id
+    //    groups in pass_events. A lost row on either side would leave only 1
+    //    group with extra rows; contamination would show as a cross-ref. ───
+    let distinct_groups: i64 = reader
+        .conn()
+        .query_row(
+            "SELECT COUNT(DISTINCT evaluation_id) FROM pass_events",
+            [],
             |row| row.get(0),
         )
-        .unwrap()
-    }
+        .unwrap();
+    assert_eq!(
+        distinct_groups, 2,
+        "shared DB must hold 2 evaluation groups (one per concurrent run)"
+    );
 
-    let db_a_locked = db_arc_a.lock().unwrap();
-    let db_b_locked = db_arc_b.lock().unwrap();
-    let count_a = count_pass_events(&db_a_locked, eval_id_a);
-    let count_b = count_pass_events(&db_b_locked, eval_id_b);
+    // ── Assertion 3: per-evaluation row count matches manifest pass count ─
+    fn count_pass_events_for(db: &MetricsDb, eval_id: i64) -> i64 {
+        db.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pass_events WHERE evaluation_id = ?1",
+                rusqlite::params![eval_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+    let count_a = count_pass_events_for(&reader, eval_id_a);
+    let count_b = count_pass_events_for(&reader, eval_id_b);
     let manifest_passes_a: i64 = manifest_a
         .layers
         .iter()
@@ -310,50 +339,25 @@ async fn concurrent_evaluations_have_disjoint_pass_events() {
         .sum();
     assert_eq!(
         count_a, manifest_passes_a,
-        "DB-A pass_events != manifest-A passes"
+        "eval_id_a pass_events count != manifest-A passes (lost row under contention?)"
     );
     assert_eq!(
         count_b, manifest_passes_b,
-        "DB-B pass_events != manifest-B passes"
+        "eval_id_b pass_events count != manifest-B passes (lost row under contention?)"
     );
 
-    // ── Assertion 3: each DB holds exactly ONE distinct evaluation_id ─────
-    // Cross-DB ID collisions are intrinsic (SQLite auto-increment restarts
-    // per file), so we verify isolation by counting distinct evaluation_id
-    // groups in each DB. A leaked row from concurrent evaluation would
-    // surface as a 2nd group.
-    fn distinct_eval_groups(db: &MetricsDb) -> i64 {
-        let conn = db.conn();
-        conn.query_row(
-            "SELECT COUNT(DISTINCT evaluation_id) FROM pass_events",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap()
+    // ── Assertion 4: per-evaluation cost reconciliation on the SHARED DB ──
+    fn sum_pass_costs_for(db: &MetricsDb, eval_id: i64) -> f64 {
+        db.conn()
+            .query_row(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM pass_events WHERE evaluation_id = ?1",
+                rusqlite::params![eval_id],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
-    assert_eq!(
-        distinct_eval_groups(&db_a_locked),
-        1,
-        "DB-A holds rows for >1 evaluation — concurrent run leaked"
-    );
-    assert_eq!(
-        distinct_eval_groups(&db_b_locked),
-        1,
-        "DB-B holds rows for >1 evaluation — concurrent run leaked"
-    );
-
-    // ── Assertion 4: per-evaluation cost reconciliation ───────────────────
-    fn sum_pass_costs(db: &MetricsDb, eval_id: i64) -> f64 {
-        let conn = db.conn();
-        conn.query_row(
-            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM pass_events WHERE evaluation_id = ?1",
-            rusqlite::params![eval_id],
-            |row| row.get(0),
-        )
-        .unwrap()
-    }
-    let cost_a = sum_pass_costs(&db_a_locked, eval_id_a);
-    let cost_b = sum_pass_costs(&db_b_locked, eval_id_b);
+    let cost_a = sum_pass_costs_for(&reader, eval_id_a);
+    let cost_b = sum_pass_costs_for(&reader, eval_id_b);
     let manifest_cost_a: f64 = manifest_a
         .layers
         .iter()
@@ -366,10 +370,39 @@ async fn concurrent_evaluations_have_disjoint_pass_events() {
         .sum();
     assert!(
         (cost_a - manifest_cost_a).abs() < 1e-9,
-        "DB-A cost reconciliation: db={cost_a} vs manifest={manifest_cost_a}"
+        "eval_id_a cost reconciliation: db={cost_a} vs manifest={manifest_cost_a}"
     );
     assert!(
         (cost_b - manifest_cost_b).abs() < 1e-9,
-        "DB-B cost reconciliation: db={cost_b} vs manifest={manifest_cost_b}"
+        "eval_id_b cost reconciliation: db={cost_b} vs manifest={manifest_cost_b}"
     );
+
+    // ── Assertion 5: no cross-contamination — no row under eval_id_a has a
+    //    `model` string that came from eval_id_b's run and vice versa. With
+    //    both runs using the same `stub-model`, this is a tautology for the
+    //    model column, so instead we assert the disjoint pass_index ranges
+    //    belong to the right eval (pass indices are 1-indexed in manifest). ─
+    let rows_under_a: Vec<i64> = reader
+        .conn()
+        .prepare("SELECT pass_index FROM pass_events WHERE evaluation_id = ?1 ORDER BY pass_index")
+        .unwrap()
+        .query_map(rusqlite::params![eval_id_a], |row| row.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    let rows_under_b: Vec<i64> = reader
+        .conn()
+        .prepare("SELECT pass_index FROM pass_events WHERE evaluation_id = ?1 ORDER BY pass_index")
+        .unwrap()
+        .query_map(rusqlite::params![eval_id_b], |row| row.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    // Each evaluation's pass_index sequence must start at 1 and be contiguous.
+    for (i, pi) in rows_under_a.iter().enumerate() {
+        assert_eq!(*pi, (i + 1) as i64, "eval-A pass_index not contiguous");
+    }
+    for (i, pi) in rows_under_b.iter().enumerate() {
+        assert_eq!(*pi, (i + 1) as i64, "eval-B pass_index not contiguous");
+    }
 }

@@ -335,8 +335,7 @@ pub async fn run(
                 .layers
                 .iter()
                 .all(|l| l.status == LayerStatus::Passed || l.status == LayerStatus::Skipped);
-            let stack_passed =
-                all_layers_passed && !any_failed_layer && failed_seam_checks == 0;
+            let stack_passed = all_layers_passed && !any_failed_layer && failed_seam_checks == 0;
 
             // Finalize `passed` + `summary`.
             if let Err(e) = metrics::store::finalize_evaluation(

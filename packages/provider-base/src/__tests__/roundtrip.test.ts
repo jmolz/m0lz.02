@@ -521,6 +521,50 @@ describe('JSON-RPC roundtrip (matches Rust wire format)', () => {
     expect(parsed.confidence).toBeUndefined();
   });
 
+  // Phase 4 criterion #9: ADTS escalation fields roundtrip
+  it('EvaluateCreateParams with freshContext roundtrips', () => {
+    const params: EvaluateCreateParams = {
+      contract: {},
+      diff: '',
+      claudeMd: '',
+      passIndex: 1,
+      freshContext: true,
+    };
+    const json = JSON.stringify(params);
+    expect(json).toContain('"freshContext":true');
+    const parsed: EvaluateCreateParams = JSON.parse(json);
+    expect(parsed.freshContext).toBe(true);
+  });
+
+  it('EvaluateCreateParams with effortOverride roundtrips', () => {
+    const params: EvaluateCreateParams = {
+      contract: {},
+      diff: '',
+      claudeMd: '',
+      passIndex: 2,
+      freshContext: true,
+      effortOverride: 'xhigh',
+    };
+    const json = JSON.stringify(params);
+    expect(json).toContain('"effortOverride":"xhigh"');
+    const parsed: EvaluateCreateParams = JSON.parse(json);
+    expect(parsed.effortOverride).toBe('xhigh');
+  });
+
+  it('EvaluateCreateParams without freshContext/effortOverride omits fields', () => {
+    const params: EvaluateCreateParams = {
+      contract: {},
+      diff: '',
+      claudeMd: '',
+    };
+    const json = JSON.stringify(params);
+    expect(json).not.toContain('freshContext');
+    expect(json).not.toContain('effortOverride');
+    const parsed: EvaluateCreateParams = JSON.parse(json);
+    expect(parsed.freshContext).toBeUndefined();
+    expect(parsed.effortOverride).toBeUndefined();
+  });
+
   it('full request/response wire format matches Rust', () => {
     // This is the exact JSON that the Rust side produces/expects
     const rustReq =

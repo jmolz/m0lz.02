@@ -46,6 +46,16 @@ impl MetricsDb {
             .pragma_update(None, "journal_mode", "WAL")
             .context("failed to set WAL mode")?;
 
+        // Phase 4 post-adversarial-review fix (Codex High #5): concurrent
+        // evaluations against the SAME project open separate `MetricsDb`
+        // handles to the same SQLite file. Without `busy_timeout` set,
+        // writer contention on `pass_events` would surface as an immediate
+        // `SQLITE_BUSY` error, losing rows. 5s gives ample headroom for the
+        // sub-ms-per-write workload and WAL's single-writer serialization.
+        self.conn
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .context("failed to set busy_timeout")?;
+
         // Enable foreign-key enforcement. SQLite defaults to OFF for
         // backwards compatibility — without this, `ON DELETE CASCADE` on
         // `seam_findings` (v2) would silently not cascade. Must be set on

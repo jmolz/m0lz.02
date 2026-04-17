@@ -106,8 +106,24 @@ export interface EvaluateCreateParams {
    * the daemon tolerates absence and defaults to no seam verification.
    */
   seamChecks?: SeamCheckSpec[];
-  /** 0-indexed pass number within an adaptive evaluation loop. Advisory. */
+  /**
+   * 0-indexed pass number within an adaptive evaluation loop. Advisory.
+   * The stub provider uses this to index `PICE_STUB_SCORES`.
+   */
   passIndex?: number;
+  /**
+   * ADTS Level 1+ signal: drop prior-pass context on this pass. Set on the
+   * pass following a divergent-score detection so the evaluator re-examines
+   * the contract from scratch rather than anchoring on the previous reply.
+   * Phase 4 ADTS three-level escalation.
+   */
+  freshContext?: boolean;
+  /**
+   * ADTS Level 2 signal: override `effort` for this pass only (typically
+   * `"xhigh"`). Takes precedence over the session-level `effort` when both
+   * are set.
+   */
+  effortOverride?: string;
 }
 
 /**

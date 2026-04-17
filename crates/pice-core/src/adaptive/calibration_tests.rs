@@ -131,3 +131,87 @@ fn ceiling_holds_at_one_thousand_passes() {
     let out = run_sprt(&passes, &cfg, 0.99).unwrap();
     assert!(out.confidence <= CONFIDENCE_CEILING);
 }
+
+// ─── Phase 4 post-adversarial-review: empirical SPRT calibration ──────────
+//
+// The Codex adversarial review flagged that `calibration_matches_convergence_analysis`
+// pins the closed-form convergence FORMULA but does not exercise SPRT's own
+// reported confidence against the `p = 0.88` assumption. Criterion #4 asks
+// for both, not one or the other. The test below synthesizes a deterministic
+// observation stream at marginal success rate `p = 0.88` and asserts that
+// `run_sprt`'s reported Beta-posterior-mean converges toward `p` as `N` grows,
+// matching the well-known Beta(1+s, 1+f) expected-value formula.
+//
+// Why this is the right empirical check: SPRT's `confidence` field is the
+// `Beta(1+s, 1+f)` posterior mean capped at `CONFIDENCE_CEILING`. With
+// marginal `p = 0.88` inputs, the EXPECTED value of the posterior mean after
+// N passes is `(1 + p·N) / (2 + N)`, which approaches `p` from below. This
+// is NOT the same quantity as the convergence-table's "decision correctness"
+// probability (`C_max·(1 − exp(−λ·N_eff))`), but it IS the quantity SPRT
+// reports and must behave predictably on realistic inputs.
+
+/// Deterministic p=0.88 observation stream: success on every pass except
+/// those at positions `⌊k / 0.12⌋` for `k = 1, 2, ...` (roughly 12% failure
+/// rate). Not a random draw — determinism is a first-class Phase 4 invariant.
+fn deterministic_p088_stream(n: u32) -> Vec<PassObservation> {
+    // For exactly matching p=0.88, generate failures at positions that make
+    // the failure-rate closest to 12% for any N. Using integer arithmetic:
+    // failure if `(i * 100 / n)` crosses each 12% boundary.
+    let n_i = n as i64;
+    let mut out = Vec::with_capacity(n as usize);
+    let mut failures = 0i64;
+    for i in 1..=n_i {
+        // Cumulative ideal failure count at position i for 12% rate.
+        let ideal = (i * 12) / 100;
+        if ideal > failures {
+            out.push(PassObservation::Failure);
+            failures += 1;
+        } else {
+            out.push(PassObservation::Success);
+        }
+    }
+    out
+}
+
+#[test]
+fn sprt_reported_confidence_converges_to_p_on_synthetic_stream() {
+    // After N passes with marginal p=0.88, the Beta(1+s, 1+f) posterior
+    // mean equals `(1 + s) / (2 + N)`. For the deterministic stream above,
+    // `s ≈ 0.88·N` (within ±1 due to rounding). So the expected posterior
+    // mean is `(1 + 0.88·N) / (2 + N)`. For N ≥ 5 the difference from 0.88
+    // should be < 0.08 (and shrinking).
+    let cfg = SprtConfig::default();
+    for &n in &[5u32, 10, 20, 50] {
+        let stream = deterministic_p088_stream(n);
+        let out = run_sprt(&stream, &cfg, 0.88).unwrap();
+        // Compute expected posterior mean directly from the stream.
+        let s = stream
+            .iter()
+            .filter(|o| matches!(o, PassObservation::Success))
+            .count() as f64;
+        let expected = (1.0 + s) / (2.0 + n as f64);
+        let capped_expected = expected.min(CONFIDENCE_CEILING);
+        assert!(
+            (out.confidence - capped_expected).abs() < 1e-9,
+            "SPRT confidence at N={n} = {} must equal Beta posterior mean {} (|Δ|={:.2e})",
+            out.confidence,
+            capped_expected,
+            (out.confidence - capped_expected).abs()
+        );
+    }
+}
+
+#[test]
+fn sprt_reported_confidence_within_tolerance_of_p_large_n() {
+    // At N=50 with 12% failure rate, posterior mean is within 0.05 of p=0.88.
+    // This is the weaker but more intuitive version of the criterion:
+    // SPRT-reported confidence is in the right neighborhood of p for large N.
+    let cfg = SprtConfig::default();
+    let stream = deterministic_p088_stream(50);
+    let out = run_sprt(&stream, &cfg, 0.88).unwrap();
+    assert!(
+        (out.confidence - 0.88).abs() < 0.05,
+        "SPRT confidence {} should be within 0.05 of p=0.88 at N=50",
+        out.confidence
+    );
+}

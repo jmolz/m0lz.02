@@ -585,9 +585,7 @@ fn build_adaptive_layer_result(
         (LayerStatus::Failed, Some(format!("seam:{failed_id}")))
     } else {
         match outcome.halted_by.as_deref() {
-            Some("sprt_confidence_reached") => {
-                (LayerStatus::Passed, outcome.halted_by.clone())
-            }
+            Some("sprt_confidence_reached") => (LayerStatus::Passed, outcome.halted_by.clone()),
             // Phase 4 post-adversarial-review fix: `vec_entropy` halts when
             // posterior entropy stops changing — that happens for failure
             // sequences just as much as success sequences. Promoting every

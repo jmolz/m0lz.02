@@ -66,6 +66,35 @@ impl Drop for StubScoresGuard {
     }
 }
 
+/// Extends `StubScoresGuard` with the Phase 4 ADTS-adversarial-score
+/// and request-log env vars. Shares the same global env mutex so parallel
+/// tests can't race on `PICE_STUB_*` vars.
+struct StubAdtsGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl StubAdtsGuard {
+    fn new(primary_scores: &str, adversarial_scores: &str, request_log: Option<&Path>) -> Self {
+        let guard = stub_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("PICE_STUB_SCORES", primary_scores);
+        std::env::set_var("PICE_STUB_ADVERSARIAL_SCORES", adversarial_scores);
+        if let Some(path) = request_log {
+            std::env::set_var("PICE_STUB_REQUEST_LOG", path);
+        } else {
+            std::env::remove_var("PICE_STUB_REQUEST_LOG");
+        }
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for StubAdtsGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("PICE_STUB_SCORES");
+        std::env::remove_var("PICE_STUB_ADVERSARIAL_SCORES");
+        std::env::remove_var("PICE_STUB_REQUEST_LOG");
+    }
+}
+
 // ─── Shared helpers ─────────────────────────────────────────────────────────
 
 fn git_init(dir: &Path) {
@@ -432,18 +461,30 @@ async fn max_passes_halts_uncertain_layer() {
 
 // ─── Test 6: ADTS three-level escalation exhausts ──────────────────────────
 
+/// Pice config for ADTS tests: primary model `"stub-primary"`, adversarial
+/// model `"stub-adversarial"`. The stub uses the `"adversarial"` substring
+/// in the model name to switch to `PICE_STUB_ADVERSARIAL_SCORES`.
+fn stub_pice_config_adts() -> PiceConfig {
+    let mut cfg = stub_pice_config(true);
+    cfg.evaluation.adversarial.model = "stub-adversarial".to_string();
+    cfg
+}
+
 #[tokio::test]
 async fn adts_three_level_escalation_exhausts() {
     let dir = tempfile::tempdir().unwrap();
     let plan_path = setup_minimal_repo(dir.path());
     let layers = single_layer_config();
-    let pice_config = stub_pice_config(true);
+    let pice_config = stub_pice_config_adts();
     // ADTS with max_divergence_escalations=2 → Level1, Level2, Level3 sequence.
     let adts = AdtsConfig {
         divergence_threshold: 2.0,
         max_divergence_escalations: 2,
     };
-    let workflow = workflow_with_adaptive(AdaptiveAlgo::Adts, 0.90, 10, 10.0, Some(adts));
+    // max_passes=4 so the ADTS loop gets: pass1 (Level1) → pass2 (Level2) →
+    // pass3 (Level3 exhaust). 4 gives a cushion if the implementation ever
+    // consumes an extra pass between escalations.
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::Adts, 0.90, 4, 10.0, Some(adts));
     let seams = BTreeMap::new();
     let cfg = make_cfg(
         &layers,
@@ -454,19 +495,15 @@ async fn adts_three_level_escalation_exhausts() {
         &seams,
     );
 
-    // The stub honors PICE_STUB_SCORES per-passIndex; both providers see the
-    // same env var, so they return the same score on each pass. ADTS computes
-    // divergence as |primary - adversarial|; with both at 9.0, divergence=0
-    // and we'd see Continue, NOT escalation. We need divergence > 2.0 EVERY
-    // pass to drive Level1→Level2→Level3.
-    //
-    // Workaround: because we cannot give different scores to primary vs
-    // adversarial via a single env var, this test relies on a separate
-    // env var the stub recognizes: PICE_STUB_ADVERSARIAL_OFFSET. If the
-    // stub does not honor it, both providers return the same score and the
-    // assertion below pivots to checking that ADTS at least halts properly.
-    let _stub = StubScoresGuard::new(
-        "9.0,0.001;9.0,0.001;9.0,0.001;9.0,0.001;9.0,0.001;9.0,0.001;9.0,0.001;9.0,0.001",
+    // Primary scores 9.0 every pass; adversarial scores 3.0 every pass →
+    // divergence = |9 − 3| = 6.0 > threshold (2.0) EVERY pass. With
+    // max_divergence_escalations=2, ADTS fires Level 1 on pass 1, Level 2
+    // on pass 2, Level 3 (Exhausted) on pass 3.
+    let log_path = dir.path().join("stub-adts.log");
+    let _stub = StubAdtsGuard::new(
+        "9.0,0.001;9.0,0.001;9.0,0.001;9.0,0.001",
+        "3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001",
+        Some(&log_path),
     );
 
     let mut sink = NullPassSink;
@@ -478,15 +515,97 @@ async fn adts_three_level_escalation_exhausts() {
         .iter()
         .find(|l| l.name == "backend")
         .unwrap();
-    // With identical primary/adversarial scores divergence=0 every pass;
-    // ADTS Continues on every pass and the loop falls through to SPRT-like
-    // halt or max_passes. This documents the current ADTS test limitation;
-    // a follow-up enhancement to the stub (per-role scoring) will let us
-    // fully verify the Level1→Level2→Level3 sequence. For now we assert
-    // the loop completed and produced a non-pending halt reason.
+
+    // ── 1. Halt reason and layer status ────────────────────────────────────
+    assert_eq!(
+        backend.halted_by.as_deref(),
+        Some("adts_escalation_exhausted"),
+        "expected ADTS exhaustion; got {:?}",
+        backend.halted_by
+    );
+    assert_eq!(backend.status, LayerStatus::Failed);
+
+    // ── 2. Escalation event audit trail (full Level1→2→3 sequence) ────────
+    use pice_core::adaptive::EscalationEvent;
+    let events = backend
+        .escalation_events
+        .as_ref()
+        .expect("ADTS must populate escalation_events");
+    assert_eq!(
+        events.len(),
+        3,
+        "expected exactly 3 escalation events; got {:?}",
+        events
+    );
     assert!(
-        backend.halted_by.is_some(),
-        "ADTS run should produce halted_by; got None"
+        matches!(
+            events[0],
+            EscalationEvent::Level1FreshContext { at_pass: 1 }
+        ),
+        "events[0] must be Level1FreshContext at_pass=1; got {:?}",
+        events[0]
+    );
+    assert!(
+        matches!(
+            events[1],
+            EscalationEvent::Level2ElevatedEffort { at_pass: 2 }
+        ),
+        "events[1] must be Level2ElevatedEffort at_pass=2; got {:?}",
+        events[1]
+    );
+    assert!(
+        matches!(events[2], EscalationEvent::Level3Exhausted { at_pass: 3 }),
+        "events[2] must be Level3Exhausted at_pass=3; got {:?}",
+        events[2]
+    );
+
+    // ── 3. Provider-side verification: fresh_context + effort_override ────
+    // Inspect the stub's request log: pass 2 must carry freshContext=true
+    // (Level 1 effect takes effect on the NEXT pass), pass 3 must carry
+    // effortOverride=xhigh (Level 2's effect also on next pass).
+    let log_content = std::fs::read_to_string(&log_path).expect("stub request log present");
+    let entries: Vec<serde_json::Value> = log_content
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    // Per ADTS pass: 1 primary + 1 adversarial = 2 entries. We expect 3 pass
+    // cycles before exhaustion = 6 entries minimum.
+    assert!(
+        entries.len() >= 6,
+        "expected ≥6 request entries (3 passes × 2 providers); got {}",
+        entries.len()
+    );
+
+    // Collect primary-role entries grouped by passIndex (wire form: 0-indexed).
+    let primary_entries: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|e| {
+            e["model"]
+                .as_str()
+                .map(|m| !m.to_lowercase().contains("adversarial"))
+                .unwrap_or(true)
+        })
+        .collect();
+    // passIndex=1 (second pass, 0-indexed) must carry freshContext=true.
+    let pass2_primary = primary_entries
+        .iter()
+        .find(|e| e["passIndex"] == 1)
+        .expect("primary request for pass 2 (wire index 1) present");
+    assert_eq!(
+        pass2_primary["freshContext"],
+        serde_json::json!(true),
+        "Level 1 effect: pass 2 must carry freshContext=true"
+    );
+    // passIndex=2 (third pass, 0-indexed) must carry effortOverride="xhigh".
+    let pass3_primary = primary_entries
+        .iter()
+        .find(|e| e["passIndex"] == 2)
+        .expect("primary request for pass 3 (wire index 2) present");
+    assert_eq!(
+        pass3_primary["effortOverride"],
+        serde_json::json!("xhigh"),
+        "Level 2 effect: pass 3 must carry effortOverride=xhigh"
     );
 }
 
@@ -498,6 +617,111 @@ async fn adts_three_level_escalation_exhausts() {
 // e2e test requires the stub provider's per-role offset feature, deferred
 // to a follow-up. The current contract criterion #5 evaluator should consult
 // the unit tests for the escalation event sequence.
+
+// ─── Test 6c: Context isolation — byte-identical prompts across passes ────
+//
+// Phase 4 contract criterion #11 locks "each pass sees only contract +
+// current diff + CLAUDE.md". The `evaluate/create` payload the adaptive
+// loop sends must be byte-identical across `pass_index = 0..N-1` for a
+// given layer except for fields that MUST vary (passIndex and the ADTS
+// signals). Prior-pass data must never leak into subsequent passes.
+//
+// Covered here at the orchestrator level via the stub's request log —
+// the stub captures every `evaluate/create` params payload as one JSON
+// line, and the test asserts the four stable fields (contract, diff,
+// claudeMd, model) are string-equal across every captured pass.
+
+#[tokio::test]
+async fn prompt_identical_across_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    // Use AdaptiveAlgo::None with max_passes=3 so no SPRT/VEC halt intervenes
+    // — the loop runs every pass up to max_passes, giving us 3 request
+    // captures to compare against each other.
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::None, 0.90, 3, 10.0, None);
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+
+    let log_path = dir.path().join("stub-requests.log");
+    let _stub = StubAdtsGuard::new(
+        "9.5,0.001;9.5,0.001;9.5,0.001",
+        // Adversarial list is unused (adversarial disabled) — set to match
+        // primary to avoid confusing a future reader.
+        "9.5,0.001;9.5,0.001;9.5,0.001",
+        Some(&log_path),
+    );
+
+    let mut sink = NullPassSink;
+    let _manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+
+    let log_content = std::fs::read_to_string(&log_path).expect("stub request log present");
+    let entries: Vec<serde_json::Value> = log_content
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        entries.len(),
+        3,
+        "expected exactly 3 primary requests for AdaptiveAlgo::None + max_passes=3; got {}",
+        entries.len()
+    );
+
+    // ── The stable fields MUST match byte-for-byte across all passes. ────
+    // `contract`, `diff`, `claudeMd`, `model` carry no prior-pass data; their
+    // values come straight from the AdaptiveContext built ONCE before the
+    // loop starts. Any divergence here means state leaked between passes.
+    let baseline = &entries[0];
+    for (i, entry) in entries.iter().enumerate().skip(1) {
+        for field in ["contract", "diff", "claudeMd", "model"] {
+            assert_eq!(
+                baseline[field], entry[field],
+                "pass {i} diverged from pass 0 on field {field}: \
+                 baseline={} vs pass={}",
+                baseline[field], entry[field],
+            );
+        }
+    }
+
+    // ── passIndex MUST vary (0, 1, 2). This is the only field allowed to
+    //    differ across passes in the non-ADTS case. ─────────────────────────
+    let indices: Vec<i64> = entries
+        .iter()
+        .map(|e| e["passIndex"].as_i64().unwrap())
+        .collect();
+    assert_eq!(
+        indices,
+        vec![0, 1, 2],
+        "passIndex must iterate 0..N-1; got {:?}",
+        indices
+    );
+
+    // ── No prior-pass findings, scores, or summaries appear anywhere in
+    //    subsequent passes' diff/claudeMd/contract. The stub's evaluate/result
+    //    summary is "Stub evaluation complete" — grep for that string in
+    //    later passes' text fields must miss. ────────────────────────────────
+    for (i, entry) in entries.iter().enumerate().skip(1) {
+        let combined = format!(
+            "{} {} {}",
+            entry["contract"], entry["diff"], entry["claudeMd"]
+        );
+        assert!(
+            !combined.contains("Stub evaluation complete"),
+            "pass {i}: prior-pass summary leaked into this pass's payload"
+        );
+    }
+}
 
 // ─── Test 7: VEC halts when entropy stabilizes ──────────────────────────────
 
