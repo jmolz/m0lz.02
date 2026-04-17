@@ -19,8 +19,15 @@ const FRAMEWORK_WORKFLOW_YAML: &str = include_str!("../../../../templates/pice/w
 /// `embedded_defaults_parses` unit test. This is the sole exception to the
 /// no-unwrap rule in pice-core: the embedded string is build-time data.
 pub fn embedded_defaults() -> WorkflowConfig {
-    serde_yaml::from_str(FRAMEWORK_WORKFLOW_YAML)
-        .expect("embedded framework workflow.yaml must parse (build-time asserted)")
+    // Phase 4.1 Pass-6 C13: the embedded YAML is static build-time data;
+    // `embedded_defaults_parses` asserts it parses. A panic here would be
+    // a deterministic build failure, not a runtime surprise.
+    // Grandfathered under `-D clippy::expect_used`.
+    #[allow(clippy::expect_used)]
+    {
+        serde_yaml::from_str(FRAMEWORK_WORKFLOW_YAML)
+            .expect("embedded framework workflow.yaml must parse (build-time asserted)")
+    }
 }
 
 /// Load `<project_root>/.pice/workflow.yaml`. Returns `Ok(None)` if absent.

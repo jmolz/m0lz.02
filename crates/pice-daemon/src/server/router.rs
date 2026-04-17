@@ -21,18 +21,35 @@
 //! T19 (handlers), T20 (inline mode), and T21 (lifecycle) extend it with
 //! orchestrator, metrics DB, config, and provider host references.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use pice_core::cli::CommandRequest;
 use pice_core::config::PiceConfig;
 use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
 use serde_json::json;
+use tokio::sync::Mutex as TokioMutex;
 
 use super::auth;
 use crate::handlers;
 use crate::orchestrator::NullSink;
+
+/// Phase 4.1 Pass-6 Codex High #2: per-manifest single-writer lock map.
+///
+/// Keyed by `(project_hash, feature_id)` so two `pice evaluate` calls on
+/// DIFFERENT features can still run concurrently, while two calls on the
+/// SAME feature serialize. The inner lock is a `tokio::sync::Mutex` so it
+/// can be held across `.await` points for the duration of the evaluation.
+/// The outer `StdMutex<HashMap<..>>` is held only for the brief
+/// insert-or-get operation — it never crosses an await point.
+///
+/// `Arc<TokioMutex<()>>` rather than `TokioMutex<()>` directly so a clone
+/// of the Arc can live in both the map (for future acquirers) and the
+/// current holder (so it stays alive for the evaluation's lifetime).
+pub type ManifestLockMap = Arc<StdMutex<HashMap<(String, String), Arc<TokioMutex<()>>>>>;
 
 /// JSON-RPC error code for "method not found" (standard JSON-RPC 2.0).
 const METHOD_NOT_FOUND_CODE: i32 = -32601;
@@ -81,6 +98,14 @@ pub struct DaemonContext {
     /// Parsed `.pice/config.toml`. Falls back to `PiceConfig::default()` when
     /// the config file doesn't exist (uninitialized project).
     config: PiceConfig,
+
+    /// Phase 4.1 Pass-6 Codex High #2: single-writer-per-manifest lock map.
+    /// See [`ManifestLockMap`] for the keying scheme. Shared across all
+    /// handler invocations in the daemon process — two concurrent
+    /// `pice evaluate` calls on the same `{project_hash, feature_id}` pair
+    /// serialize on the inner mutex, preventing the atomic-rename race at
+    /// `VerificationManifest::save()` + `~/.pice/state/.../manifest.json`.
+    manifest_locks: ManifestLockMap,
 }
 
 impl DaemonContext {
@@ -97,6 +122,7 @@ impl DaemonContext {
             shutdown_requested: AtomicBool::new(false),
             project_root,
             config,
+            manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -116,6 +142,7 @@ impl DaemonContext {
             shutdown_requested: AtomicBool::new(false),
             project_root,
             config,
+            manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -150,6 +177,7 @@ impl DaemonContext {
             shutdown_requested: AtomicBool::new(false),
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config: PiceConfig::default(),
+            manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -167,7 +195,33 @@ impl DaemonContext {
             shutdown_requested: AtomicBool::new(false),
             project_root,
             config,
+            manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
         }
+    }
+
+    /// Phase 4.1 Pass-6: acquire the per-manifest single-writer lock for the
+    /// given `{project_hash, feature_id}` pair. Returns a clone of the
+    /// `Arc<tokio::sync::Mutex<()>>` so the caller can `.lock().await` to
+    /// serialize the full evaluation. Different features return distinct
+    /// mutex Arcs; repeat calls for the SAME feature return the SAME Arc,
+    /// guaranteeing only one evaluation per manifest runs at a time.
+    ///
+    /// The outer `StdMutex<HashMap>` is held only for the brief
+    /// insert-or-get — it NEVER crosses an await point (caller drops this
+    /// function's scope before awaiting on the inner mutex).
+    ///
+    /// Recovers from a poisoned outer mutex by taking the inner map — the
+    /// map state itself is still consistent; poisoning is an artifact of a
+    /// panic in an unrelated code path.
+    pub fn manifest_lock_for(&self, project_hash: &str, feature_id: &str) -> Arc<TokioMutex<()>> {
+        let mut map = self
+            .manifest_locks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let key = (project_hash.to_string(), feature_id.to_string());
+        map.entry(key)
+            .or_insert_with(|| Arc::new(TokioMutex::new(())))
+            .clone()
     }
 }
 
@@ -269,6 +323,102 @@ mod tests {
     /// Helper: create a DaemonContext with a known token.
     fn test_ctx(token: &str) -> DaemonContext {
         DaemonContext::new_for_test(token)
+    }
+
+    // ── Phase 4.1 Pass-6 per-manifest lock map ─────────────────────────────
+
+    /// Same `{project_hash, feature_id}` must resolve to the SAME
+    /// `Arc<Mutex<()>>` (pointer equality). Without this identity, two
+    /// concurrent runs on the same feature would hold distinct mutexes
+    /// and serialize on nothing — the C17 race reopens.
+    #[test]
+    fn manifest_lock_for_is_shared_per_feature() {
+        let ctx = test_ctx("t");
+        let a = ctx.manifest_lock_for("abc123", "feat-x");
+        let b = ctx.manifest_lock_for("abc123", "feat-x");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "same (project_hash, feature_id) must share one mutex Arc",
+        );
+    }
+
+    /// Distinct feature ids must resolve to DISTINCT mutex Arcs — otherwise
+    /// different features would serialize on each other, eliminating the
+    /// intended cross-feature parallelism.
+    #[test]
+    fn manifest_lock_for_different_features_are_distinct() {
+        let ctx = test_ctx("t");
+        let a = ctx.manifest_lock_for("abc123", "feat-a");
+        let b = ctx.manifest_lock_for("abc123", "feat-b");
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "different features must get distinct mutexes",
+        );
+    }
+
+    /// Distinct project hashes must resolve to DISTINCT mutex Arcs — two
+    /// repos that happen to use the same feature name must not serialize
+    /// against each other.
+    #[test]
+    fn manifest_lock_for_different_projects_are_distinct() {
+        let ctx = test_ctx("t");
+        let a = ctx.manifest_lock_for("project-a", "feat-x");
+        let b = ctx.manifest_lock_for("project-b", "feat-x");
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "different project hashes must get distinct mutexes",
+        );
+    }
+
+    /// The acquired mutex actually serializes holders. Spawns two tasks on
+    /// the SAME key; task A holds the lock across a short sleep, task B
+    /// tries to acquire. Assert that B's acquire completes AFTER A releases
+    /// (observable via order of timestamps). Without the shared mutex Arc
+    /// (the previous two tests) or without the mutex's `.lock().await`
+    /// semantics, B would proceed concurrently and the test's ordering
+    /// assertion would fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn manifest_lock_serializes_concurrent_holders_on_same_key() {
+        let ctx = Arc::new(test_ctx("t"));
+        let lock_a = ctx.manifest_lock_for("proj", "feat");
+        let lock_b = ctx.manifest_lock_for("proj", "feat");
+
+        // Sanity: same Arc.
+        assert!(Arc::ptr_eq(&lock_a, &lock_b));
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<std::time::Instant>();
+        let started = Arc::new(tokio::sync::Notify::new());
+
+        // Task A: acquire first, signal started, hold for 50ms, release.
+        let started_clone = started.clone();
+        let task_a = tokio::spawn(async move {
+            let _g = lock_a.lock().await;
+            started_clone.notify_one();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let released = std::time::Instant::now();
+            let _ = done_tx.send(released);
+        });
+
+        // Wait until A is holding the lock before starting B — otherwise
+        // B might race A and acquire first on the thread-pool scheduler.
+        started.notified().await;
+
+        // Task B: acquire second, timestamp the successful acquire.
+        let task_b = tokio::spawn(async move {
+            let _g = lock_b.lock().await;
+            std::time::Instant::now()
+        });
+
+        let a_released = done_rx.await.unwrap();
+        let b_acquired = task_b.await.unwrap();
+        task_a.await.unwrap();
+
+        assert!(
+            b_acquired >= a_released,
+            "B must acquire AFTER A releases (b_acquired={:?}, a_released={:?})",
+            b_acquired,
+            a_released,
+        );
     }
 
     /// Helper: create a DaemonRequest with the given method and token.

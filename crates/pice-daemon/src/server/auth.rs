@@ -162,7 +162,14 @@ pub fn default_token_path() -> std::path::PathBuf {
 fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
-        write!(s, "{b:02x}").expect("write to String is infallible");
+        // Phase 4.1 Pass-6 C13: `fmt::Write` on `String` is provably
+        // infallible (no allocation failure path; the impl is
+        // `Result::Ok` unconditionally). Grandfathered under
+        // `-D clippy::expect_used`.
+        #[allow(clippy::expect_used)]
+        {
+            write!(s, "{b:02x}").expect("write to String is infallible");
+        }
     }
     s
 }

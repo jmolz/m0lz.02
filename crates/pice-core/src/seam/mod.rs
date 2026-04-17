@@ -39,6 +39,12 @@ pub use types::{
 /// — two calls in the same process always return the same `ids_in_order()`.
 pub fn default_registry() -> Registry {
     let mut reg = Registry::new();
+    // Phase 4.1 Pass-6 C13: this `expect` is a build-time invariant — the
+    // defaults list is hand-curated and `register_defaults` only returns
+    // Err on duplicate ids, which is checked by a unit test. A panic here
+    // would be a deterministic build failure, not a runtime surprise.
+    // Grandfathered under `-D clippy::expect_used`.
+    #[allow(clippy::expect_used)]
     defaults::register_defaults(&mut reg)
         .expect("default registry construction must not produce duplicate ids");
     reg

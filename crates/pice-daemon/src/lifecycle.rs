@@ -230,8 +230,17 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
+        // Phase 4.1 Pass-6 C13: signal-handler registration only fails on
+        // invalid signal numbers (SIGTERM/SIGINT are always valid) or EINTR
+        // from the kernel (retry-safe at tokio layer). A panic here means
+        // the process cannot accept graceful shutdown — which is the
+        // correct response: better to exit loudly at startup than to run
+        // without shutdown handling. Grandfathered under
+        // `-D clippy::expect_used`.
+        #[allow(clippy::expect_used)]
         let mut sigterm =
             signal(SignalKind::terminate()).expect("failed to register SIGTERM handler");
+        #[allow(clippy::expect_used)]
         let mut sigint =
             signal(SignalKind::interrupt()).expect("failed to register SIGINT handler");
         tokio::select! {

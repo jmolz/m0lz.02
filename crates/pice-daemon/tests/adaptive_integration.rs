@@ -1192,6 +1192,116 @@ async fn determinism_across_two_identical_runs() {
     }
 }
 
+// ─── Test 9b: Determinism under ADTS ─────────────────────────────────────
+
+/// Phase 4.1 Pass-6 Claude Evaluator C M1 regression: the original
+/// `determinism_across_two_identical_runs` covers SPRT only. ADTS has an
+/// extra axis of determinism risk — paired primary/adversarial scores,
+/// escalation event sequencing, and the `next_*_params` reset discipline.
+/// Although the current implementation calls providers sequentially (not
+/// via `tokio::join!`), that is not locked by any test. A future refactor
+/// introducing parallelism would silently break reproducibility and
+/// contract criterion #15 would go green via the SPRT-only test. This
+/// test exercises the ADTS path end-to-end and asserts byte-identity on
+/// everything the plan calls out (scores, costs, halted_by,
+/// final_confidence, escalation_events).
+#[tokio::test]
+async fn adts_determinism_across_two_identical_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config_adts();
+    // Exactly the configuration from `adts_three_level_escalation_exhausts`
+    // so ADTS fires Level1 → Level2 → Level3 in 3 passes. Determinism must
+    // hold for that full escalation sequence.
+    let adts = pice_core::adaptive::AdtsConfig {
+        divergence_threshold: 2.0,
+        max_divergence_escalations: 2,
+    };
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::Adts, 0.90, 4, 10.0, Some(adts));
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+
+    let _stub = StubAdtsGuard::new(
+        "9.0,0.001;9.0,0.001;9.0,0.001;9.0,0.001",
+        "3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001",
+        None,
+    );
+
+    let mut sink_a = NullPassSink;
+    let manifest_a = run_stack_loops(&cfg, &NullSink, true, &mut sink_a)
+        .await
+        .unwrap();
+    let backend_a = manifest_a
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap()
+        .clone();
+
+    let mut sink_b = NullPassSink;
+    let manifest_b = run_stack_loops(&cfg, &NullSink, true, &mut sink_b)
+        .await
+        .unwrap();
+    let backend_b = manifest_b
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap()
+        .clone();
+
+    // Halt-path invariants (contract criterion #15).
+    assert_eq!(
+        backend_a.halted_by, backend_b.halted_by,
+        "halt reason must be byte-identical; got {:?} vs {:?}",
+        backend_a.halted_by, backend_b.halted_by,
+    );
+    assert_eq!(backend_a.status, backend_b.status);
+    assert_eq!(backend_a.passes.len(), backend_b.passes.len());
+    assert_eq!(backend_a.final_confidence, backend_b.final_confidence);
+    assert_eq!(backend_a.total_cost_usd, backend_b.total_cost_usd);
+
+    // ADTS-specific: the full escalation event sequence. Without this the
+    // SPRT-only test lets a reordering regression (e.g. parallel-join
+    // ordering flipping events[1] and events[0]) ride. With this the
+    // reproduction contract covers primary+adversarial+escalation paths.
+    assert_eq!(
+        backend_a.escalation_events, backend_b.escalation_events,
+        "escalation_events must be byte-identical across back-to-back runs",
+    );
+    // Sanity: this test actually ran ADTS (not the SPRT path) and exercised
+    // escalation — otherwise the escalation equality above is vacuous.
+    let events = backend_a
+        .escalation_events
+        .as_ref()
+        .expect("ADTS must populate escalation_events");
+    assert!(
+        !events.is_empty(),
+        "test must exercise at least one escalation event; got empty list",
+    );
+
+    // Per-pass byte identity (excluding timestamp per the plan). ADTS
+    // records two rows per pass cycle (primary + adversarial) so this
+    // exercises paired-row ordering determinism too.
+    for (a, b) in backend_a.passes.iter().zip(backend_b.passes.iter()) {
+        assert_eq!(a.index, b.index, "pass index drift at {:?}", a);
+        assert_eq!(
+            a.model, b.model,
+            "model name drift: {} vs {}",
+            a.model, b.model
+        );
+        assert_eq!(a.score, b.score, "score drift at pass {}", a.index);
+        assert_eq!(a.cost_usd, b.cost_usd, "cost drift at pass {}", a.index);
+    }
+}
+
 // ─── Test 10: Cost reconciliation within tolerance ─────────────────────────
 
 #[tokio::test]

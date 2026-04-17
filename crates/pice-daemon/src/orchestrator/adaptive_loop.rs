@@ -108,7 +108,13 @@ pub trait PassMetricsSink: Send {
 pub struct NullPassSink;
 
 impl PassMetricsSink for NullPassSink {
-    fn record_pass(&mut self, _: u32, _: &str, _: Option<f64>, _: Option<f64>) -> anyhow::Result<()> {
+    fn record_pass(
+        &mut self,
+        _: u32,
+        _: &str,
+        _: Option<f64>,
+        _: Option<f64>,
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 }

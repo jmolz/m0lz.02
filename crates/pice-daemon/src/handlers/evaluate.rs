@@ -237,6 +237,23 @@ pub async fn run(
             merged_seams: &merged_seams,
         };
 
+        // Phase 4.1 Pass-6 Codex High #2: acquire the per-manifest
+        // single-writer lock BEFORE touching any state. The lock serializes
+        // two concurrent `pice evaluate` calls on the SAME
+        // {project_hash, feature_id} pair so they don't race on the
+        // atomic-rename dance at `~/.pice/state/.../manifest.json` +
+        // `metrics.db` writes. Distinct features still run in parallel —
+        // the lock key includes feature_id, so different contracts get
+        // distinct mutexes.
+        //
+        // The lock is held for the full evaluation (manifest writes,
+        // run_stack_loops, finalize). `tokio::sync::Mutex` so it survives
+        // the `.await` on `run_stack_loops`.
+        let project_namespace =
+            pice_core::layers::manifest::manifest_project_namespace(project_root);
+        let _manifest_lock = ctx.manifest_lock_for(&project_namespace, &contract.feature);
+        let _manifest_guard = _manifest_lock.lock().await;
+
         // Phase 4: create the evaluation header BEFORE running stack loops.
         // This gives the adaptive loop a valid `evaluation_id` to FK-attach
         // `pass_events` to, persisted BEFORE each halt-decision check. The
@@ -485,10 +502,8 @@ pub async fn run(
                                 check = %sc.name,
                                 "failed to insert seam finding: {e}"
                             );
-                            metrics_errors.push(format!(
-                                "seam_finding[{}/{}]: {e}",
-                                layer.name, sc.name
-                            ));
+                            metrics_errors
+                                .push(format!("seam_finding[{}/{}]: {e}", layer.name, sc.name));
                         }
                     }
                 }

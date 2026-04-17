@@ -147,6 +147,16 @@ fn hash_project_root(project_root: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Phase 4.1 Pass-6: the 12-character project namespace used in manifest
+/// paths under `~/.pice/state/{namespace}/`. Exposed so the daemon's
+/// per-manifest lock map (`DaemonContext::manifest_lock_for`) can key on
+/// the SAME namespace the manifest IO writes to — otherwise the lock and
+/// the writer would disagree on identity and the race window would reopen.
+pub fn manifest_project_namespace(project_root: &Path) -> String {
+    let full = hash_project_root(project_root);
+    full[..12.min(full.len())].to_string()
+}
+
 /// Return the user's home directory via environment variables.
 /// Uses `HOME` on Unix, `USERPROFILE` on Windows, with cross-fallback.
 fn home_dir() -> Result<PathBuf> {

@@ -39,6 +39,11 @@ pub fn extract_templates(target_dir: &Path, prefix: &str, force: bool) -> Result
 
         // Strip the prefix to get the relative path under target_dir.
         // The starts_with check above guarantees this succeeds.
+        // Phase 4.1 Pass-6 C13: the `expect` is preceded by an explicit
+        // `starts_with(prefix)` guard 6 lines above, making the strip
+        // provably infallible. Grandfathered under
+        // `-D clippy::expect_used`.
+        #[allow(clippy::expect_used)]
         let relative = file_path_str
             .strip_prefix(prefix)
             .expect("prefix was verified by starts_with above");

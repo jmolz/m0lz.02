@@ -216,6 +216,11 @@ impl LayersConfig {
             for node in &cohort {
                 if let Some(dependents) = adj.get(node.as_str()) {
                     for &dependent in dependents {
+                        // Phase 4.1 Pass-6 C13: this `expect` is safe by DAG
+                        // invariant — `dependent` came from `adj[node]` which
+                        // was built from the same key set as `in_degree`.
+                        // Grandfathered under `-D clippy::expect_used`.
+                        #[allow(clippy::expect_used)]
                         let deg = in_degree.get_mut(dependent).expect("node in graph");
                         *deg -= 1;
                         if *deg == 0 {
