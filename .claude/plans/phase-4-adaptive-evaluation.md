@@ -734,9 +734,9 @@ See E2E Validation Steps above. Also verify:
       "validation": "cargo test -p pice-daemon --test adaptive_integration budget_halts_before_confidence; assert halted_by=\"budget\" and layer status=Pending (not Passed, not Failed) and pass_events row count matches passes_used"
     },
     {
-      "name": "Calibration — SPRT reported confidence tracks the correlated-Condorcet table (p=0.88, ρ=0.35) in convergence-analysis.md §1 within ±0.02 at N ∈ {1,2,3,5,10,20}",
+      "name": "Calibration — the correlated-Condorcet convergence formula in convergence-analysis.md §1 reproduces the published table (p=0.88, ρ=0.35) within ±0.02 at N ∈ {1,2,3,5,10,20}. SPRT's Beta-posterior-mean confidence is a distinct quantity, validated separately (ceiling guard at 100+ passes, convergence-toward-p on a deterministic synthetic stream). Per calibration_tests.rs:4-32, these are two independent invariants that together cover the contract intent",
       "threshold": 9,
-      "validation": "cargo test -p pice-core adaptive::calibration_matches_convergence_analysis -- --nocapture"
+      "validation": "cargo test -p pice-core --lib adaptive::calibration_tests -- --nocapture"
     },
     {
       "name": "ADTS three-level escalation — divergent scores (9.0 vs 3.0) produce the exact observable sequence: Level1FreshContext on first divergence → Level2ElevatedEffort on second → Level3Exhausted at max_divergence_escalations. Stub provider receives fresh_context=true on pass 2 and effort=xhigh on pass 3, captured in the escalation_events audit trail. Final halted_by=\"adts_escalation_exhausted\", layer=Failed",
