@@ -305,13 +305,15 @@ pub fn insert_pass_event(
 /// but `final_total_cost_usd = NULL` — defeating the Criterion 16 cost-
 /// reconciliation invariant:
 ///
-///     SELECT evaluation_id,
-///            (SUM(cost_usd) - (SELECT final_total_cost_usd
-///                              FROM evaluations
-///                              WHERE id = evaluation_id)) AS diff
-///     FROM pass_events
-///     GROUP BY evaluation_id
-///     HAVING ABS(diff) > 1e-9
+/// ```text
+/// SELECT evaluation_id,
+///        (SUM(cost_usd) - (SELECT final_total_cost_usd
+///                          FROM evaluations
+///                          WHERE id = evaluation_id)) AS diff
+/// FROM pass_events
+/// GROUP BY evaluation_id
+/// HAVING ABS(diff) > 1e-9
+/// ```
 ///
 /// With a NULL `final_total_cost_usd`, `ABS(NULL - SUM) > 1e-9` evaluates
 /// to NULL (not TRUE), so the row is silently dropped from the HAVING
