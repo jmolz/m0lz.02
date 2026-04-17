@@ -234,11 +234,60 @@ pub async fn run_adaptive_passes(
         let primary_cost = primary_out.cost_usd;
         let primary_model_name = primary.provider_name().to_string();
         let timestamp = chrono::Utc::now().to_rfc3339();
+
+        // Phase 4 Pass-3 fix (Codex Critical #1): derive the SPRT/VEC
+        // observation from the provider's VERDICT (and per-criterion
+        // `passed` flags), NOT from the numeric score average. Averaging
+        // masks single-criterion failures — e.g. nine criteria at 10/10
+        // + one at 0/10 yields mean 9.0, which a naive `score >= threshold`
+        // check classified as Success even though `result.passed = false`
+        // and one criterion literally failed its own threshold. SPRT/VEC
+        // then halted early with false confidence on a layer whose
+        // contract explicitly failed. Compute here, BEFORE the PassResult
+        // construction below consumes `primary_out.result.summary`.
+        //
+        // `scalar_score` continues to drive numeric reporting (manifest
+        // `PassResult.score`) and ADTS `paired_scores` divergence math.
+        let primary_observation = observation_from(&primary_out);
+
+        // Phase 4 post-adversarial-review fix (Codex High #3): when the
+        // provider omits or mis-reports cost_usd (None, NaN, ∞, negative),
+        // the naive "ignore it" path was fail-OPEN — a provider without
+        // cost telemetry could run unbounded past the configured budget.
+        // Fail-closed by debiting the conservative cold-start seed so the
+        // budget gate in `decide_halt` still binds on the next pre-pass check.
+        //
+        // Phase 4 Pass-3 fix (Codex High #3, round 2): the debited value is
+        // now the single source of truth — it flows into manifest
+        // `PassResult.cost_usd`, `cost_stats`, `accumulated_cost`, AND the
+        // sink (pass_events). Earlier code wrote the RAW provider value to
+        // the manifest/sink while debiting the seed to `accumulated_cost`,
+        // so `SUM(passes[].cost_usd)` drifted from `total_cost_usd` whenever
+        // the provider's cost was missing/invalid. This breaks the
+        // reconciliation invariant (Phase 4 contract criterion #16). Now
+        // all four locations agree — and when the provider reported a
+        // valid cost, the debited value IS `primary_cost`, so legacy
+        // behavior is unchanged.
+        let fallback_seed = ctx.budget_usd / ctx.max_passes as f64;
+        let primary_debited_cost: Option<f64> = match primary_cost {
+            Some(c) if CostStats::validate_nonnegative(c).is_ok() => {
+                cost_stats.observe(c);
+                accumulated_cost += c;
+                Some(c)
+            }
+            _ => {
+                // Unknown/invalid cost — debit the seed so budget stays honored.
+                cost_stats.observe(fallback_seed);
+                accumulated_cost += fallback_seed;
+                Some(fallback_seed)
+            }
+        };
+
         let primary_pr = PassResult {
             index: pass_index,
             model: primary_model_name.clone(),
             score: primary_score,
-            cost_usd: primary_cost,
+            cost_usd: primary_debited_cost,
             timestamp: timestamp.clone(),
             findings: primary_out
                 .result
@@ -247,26 +296,17 @@ pub async fn run_adaptive_passes(
                 .unwrap_or_default(),
         };
         passes.push(primary_pr.clone());
-        // Phase 4 post-adversarial-review fix (Codex High #3): when the
-        // provider omits or mis-reports cost_usd (None, NaN, ∞, negative),
-        // the naive "ignore it" path was fail-OPEN — a provider without
-        // cost telemetry could run unbounded past the configured budget.
-        // Fail-closed by debiting the conservative cold-start seed so the
-        // budget gate in `decide_halt` still binds on the next pre-pass check.
-        let fallback_seed = ctx.budget_usd / ctx.max_passes as f64;
-        match primary_cost {
-            Some(c) if CostStats::validate_nonnegative(c).is_ok() => {
-                cost_stats.observe(c);
-                accumulated_cost += c;
-            }
-            _ => {
-                // Unknown/invalid cost — debit the seed so budget stays honored.
-                cost_stats.observe(fallback_seed);
-                accumulated_cost += fallback_seed;
-            }
-        }
+
         // Sink BEFORE halt decision — crash-safety invariant.
-        sink.record_pass(pass_index, &primary_model_name, primary_score, primary_cost);
+        // Write the DEBITED value so SUM(pass_events.cost_usd) matches
+        // evaluations.final_total_cost_usd even when the provider's reported
+        // cost was missing/invalid and we fell back to the seed.
+        sink.record_pass(
+            pass_index,
+            &primary_model_name,
+            primary_score,
+            primary_debited_cost,
+        );
 
         // ── Adversarial provider (ADTS only) ─────────────────────────
         let mut adversarial_score: Option<f64> = None;
@@ -292,41 +332,42 @@ pub async fn run_adaptive_passes(
                 adversarial_score = adv_score;
                 let adv_cost = adv_out.cost_usd;
                 let adv_model_name = adv.provider_name().to_string();
-                passes.push(PassResult {
-                    index: pass_index,
-                    model: adv_model_name.clone(),
-                    score: adv_score,
-                    cost_usd: adv_cost,
-                    timestamp: chrono::Utc::now().to_rfc3339(),
-                    findings: adv_out.result.summary.map(|s| vec![s]).unwrap_or_default(),
-                });
+
                 // Same fail-closed fallback as the primary: debit the seed
                 // when the adversarial provider omits or mis-reports cost.
-                match adv_cost {
+                // The debited value is the single source of truth that
+                // flows into BOTH the manifest `PassResult.cost_usd` AND
+                // the sink (pass_events), keeping reconciliation intact
+                // (Pass-3 Codex High #3 fix).
+                let adv_debited_cost: Option<f64> = match adv_cost {
                     Some(c) if CostStats::validate_nonnegative(c).is_ok() => {
                         cost_stats.observe(c);
                         accumulated_cost += c;
+                        Some(c)
                     }
                     _ => {
                         cost_stats.observe(fallback_seed);
                         accumulated_cost += fallback_seed;
+                        Some(fallback_seed)
                     }
-                }
-                sink.record_pass(pass_index, &adv_model_name, adv_score, adv_cost);
+                };
+
+                passes.push(PassResult {
+                    index: pass_index,
+                    model: adv_model_name.clone(),
+                    score: adv_score,
+                    cost_usd: adv_debited_cost,
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    findings: adv_out.result.summary.map(|s| vec![s]).unwrap_or_default(),
+                });
+                sink.record_pass(pass_index, &adv_model_name, adv_score, adv_debited_cost);
             }
         }
 
-        // ── Classify primary score into a Success/Failure observation ──
-        // Threshold is `min_confidence * 10` because the SPRT observation
-        // feed is on the 0–10 scale (see `PassObservation` docs).
-        if let Some(score) = primary_score {
-            let threshold = ctx.min_confidence * 10.0;
-            observations.push(if score >= threshold {
-                PassObservation::Success
-            } else {
-                PassObservation::Failure
-            });
-        }
+        // ── Classify primary outcome into a Success/Failure observation ──
+        // (Derived above before `primary_out` was consumed into the
+        // PassResult construction.)
+        observations.push(primary_observation);
 
         // ── ADTS three-level escalation ──────────────────────────────
         // Only touches state for `algo == Adts`. Other algorithms fall
@@ -435,6 +476,35 @@ pub async fn run_adaptive_passes(
     })
 }
 
+/// Derive a `PassObservation` (Success/Failure) from a provider's
+/// `PerPassOutcome` for SPRT / VEC consumption.
+///
+/// **Uses the boolean verdict, not the numeric score average.** Averaging
+/// hides single-criterion failures: nine criteria at 10/10 + one at 0/10
+/// yields mean 9.0, which a naive threshold check would classify as a
+/// Success observation — even though the provider explicitly reports
+/// `passed = false` and one criterion's own threshold was not met. The
+/// adaptive algorithms would then halt early with false confidence on a
+/// layer whose contract semantically failed.
+///
+/// Rule: `Success ⇔ result.passed && scores.iter().all(|s| s.passed)`.
+/// When `scores` is empty, only `result.passed` contributes (legacy
+/// providers without per-criterion telemetry).
+///
+/// This helper is intentionally separate from [`scalar_score`]:
+/// - `scalar_score` drives numeric reporting and ADTS `paired_scores`
+///   divergence math — divergence between two providers is a different
+///   axis from the boolean pass/fail verdict.
+/// - `observation_from` drives SPRT / VEC halt decisions — those want the
+///   verdict, not the mean.
+fn observation_from(out: &PerPassOutcome) -> PassObservation {
+    if out.result.passed && out.result.scores.iter().all(|s| s.passed) {
+        PassObservation::Success
+    } else {
+        PassObservation::Failure
+    }
+}
+
 /// Derive a scalar pass score (0–10 scale) from a provider's `PerPassOutcome`.
 ///
 /// Preference order:
@@ -445,6 +515,10 @@ pub async fn run_adaptive_passes(
 ///
 /// Returns `None` only if the provider emitted neither scores nor a
 /// `passed` verdict, which the adaptive loop treats as a missing observation.
+///
+/// **Not used for SPRT/VEC observations** — see [`observation_from`].
+/// This helper is retained for reporting (manifest `PassResult.score`) and
+/// ADTS `paired_scores` divergence (numeric agreement between providers).
 fn scalar_score(out: &PerPassOutcome) -> Option<f64> {
     if !out.result.scores.is_empty() {
         let sum: i64 = out.result.scores.iter().map(|s| s.score as i64).sum();
@@ -548,5 +622,107 @@ mod tests {
         // helper must be total).
         let conf = posterior_mean_capped(&[]);
         assert!((conf - 0.5).abs() < 1e-12);
+    }
+
+    /// Phase 4 Pass-3 regression for Codex Critical #1.
+    ///
+    /// A single failing criterion must produce `Failure`, even when the
+    /// other criteria pull the score average above the user's reporting
+    /// threshold. The previous logic classified this as `Success` by
+    /// comparing the AVERAGE of criterion scores to `min_confidence * 10`
+    /// — a provider emitting `passed = false` with mean 9.0 would be fed
+    /// to SPRT as a win, halting early with false confidence on a layer
+    /// whose contract explicitly failed.
+    #[test]
+    fn observation_from_derives_from_verdict_not_average() {
+        use pice_protocol::{CriterionScore, EvaluateResultParams};
+        // Nine passing criteria at 10/10 + one failing criterion at 0/10.
+        // Mean = 9.0. Provider's verdict = false (contract explicitly failed).
+        let mut scores: Vec<CriterionScore> = (0..9)
+            .map(|i| CriterionScore {
+                name: format!("c{i}"),
+                score: 10,
+                threshold: 7,
+                passed: true,
+                findings: None,
+            })
+            .collect();
+        scores.push(CriterionScore {
+            name: "failing".into(),
+            score: 0,
+            threshold: 7,
+            passed: false,
+            findings: Some("failed".into()),
+        });
+        let out = PerPassOutcome {
+            result: EvaluateResultParams {
+                session_id: "s".into(),
+                scores,
+                passed: false,
+                summary: None,
+            },
+            cost_usd: Some(0.01),
+            confidence: None,
+        };
+
+        // Average-based reporting still yields 9.0 — used for paired-score
+        // divergence math and for manifest `PassResult.score`.
+        let mean = scalar_score(&out).unwrap();
+        assert!((mean - 9.0).abs() < 1e-9);
+
+        // But the SPRT observation must respect the provider's verdict.
+        assert_eq!(observation_from(&out), PassObservation::Failure);
+    }
+
+    #[test]
+    fn observation_from_success_requires_all_criteria_and_verdict() {
+        use pice_protocol::{CriterionScore, EvaluateResultParams};
+        let scores = (0..3)
+            .map(|i| CriterionScore {
+                name: format!("c{i}"),
+                score: 9,
+                threshold: 7,
+                passed: true,
+                findings: None,
+            })
+            .collect();
+        let out = PerPassOutcome {
+            result: EvaluateResultParams {
+                session_id: "s".into(),
+                scores,
+                passed: true,
+                summary: None,
+            },
+            cost_usd: Some(0.01),
+            confidence: None,
+        };
+        assert_eq!(observation_from(&out), PassObservation::Success);
+    }
+
+    #[test]
+    fn observation_from_verdict_false_is_failure_even_when_all_criteria_pass() {
+        // Defence-in-depth: a provider reporting `passed=false` with every
+        // criterion `passed=true` is internally inconsistent, but we honor
+        // the top-level verdict (conservative — the provider saw something
+        // we did not).
+        use pice_protocol::{CriterionScore, EvaluateResultParams};
+        let scores = vec![CriterionScore {
+            name: "c0".into(),
+            score: 10,
+            threshold: 7,
+            passed: true,
+            findings: None,
+        }];
+        let out = PerPassOutcome {
+            result: EvaluateResultParams {
+                session_id: "s".into(),
+                scores,
+                passed: false,
+                summary: None,
+            },
+            cost_usd: Some(0.01),
+            confidence: None,
+        };
+        assert_eq!(observation_from(&out), PassObservation::Failure);
     }
 }

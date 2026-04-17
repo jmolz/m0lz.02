@@ -95,6 +95,30 @@ impl Drop for StubAdtsGuard {
     }
 }
 
+/// Phase 4 Pass-3 regression helper: sets `PICE_STUB_EVALUATE_ERROR` so the
+/// stub's `evaluate/create` throws a JSON-RPC error *after* spawning &
+/// initializing successfully. Shares the global `PICE_STUB_*` env mutex so
+/// it can't race with other tests. The error message round-trips in the
+/// stub's thrown Error, letting tests assert on the layer's `halted_by`
+/// string (it carries the provider's error message for operator debugging).
+struct StubEvaluateErrorGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl StubEvaluateErrorGuard {
+    fn new(message: &str) -> Self {
+        let guard = stub_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("PICE_STUB_EVALUATE_ERROR", message);
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for StubEvaluateErrorGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("PICE_STUB_EVALUATE_ERROR");
+    }
+}
+
 // ─── Shared helpers ─────────────────────────────────────────────────────────
 
 fn git_init(dir: &Path) {
@@ -961,4 +985,319 @@ async fn cost_reconciliation_within_tolerance() {
         (sum_passes - total).abs() < 1e-9,
         "cost reconciliation: sum(passes.cost_usd)={sum_passes} vs total_cost_usd={total}",
     );
+}
+
+// ─── Pass-3 regression: fallback_seed cost syncs into manifest & sink ──────
+
+/// Phase 4 Pass-3 regression for Codex High #3.
+///
+/// When the provider reports an invalid cost (here, a negative number that
+/// the stub will faithfully round-trip but `CostStats::validate_nonnegative`
+/// rejects), the loop debits the cold-start seed (`budget_usd / max_passes`)
+/// to `accumulated_cost` as a fail-closed safety measure. Earlier Pass-2
+/// code wrote the raw invalid value to manifest `PassResult.cost_usd` AND
+/// to the sink (`pass_events.cost_usd`) while the evaluation total reflected
+/// the seed — so `SUM(passes[].cost_usd) != total_cost_usd`, and
+/// `SUM(pass_events.cost_usd) != evaluations.final_total_cost_usd`. The
+/// reconciliation invariant (Phase 4 contract criterion #16) was broken.
+///
+/// With the Pass-3 fix, the debited value is the single source of truth:
+/// it flows into BOTH `PassResult.cost_usd` AND the sink, so all three
+/// accumulators agree. The legacy "cost reconciliation within tolerance"
+/// test above covers the valid-cost path (where debited == provider value).
+#[tokio::test]
+async fn cost_reconciliation_holds_when_provider_cost_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    // Tight budget → seed is meaningful; BayesianSprt with a wide band so
+    // we run multiple passes and exercise the fallback on each one.
+    let budget_usd = 1.0_f64;
+    let max_passes = 5_u32;
+    let workflow = workflow_with_adaptive(
+        AdaptiveAlgo::BayesianSprt,
+        0.90,
+        max_passes,
+        budget_usd,
+        None,
+    );
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+
+    // Every pass reports a negative cost. The stub parser accepts finite
+    // numbers, so this round-trips to `primary_cost = Some(-0.01)`. In the
+    // loop, `CostStats::validate_nonnegative(-0.01).is_err()` triggers the
+    // fallback branch — debiting `fallback_seed = 1.0 / 5 = 0.2` per pass.
+    let _stub = StubScoresGuard::new("9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01");
+
+    let mut sink = NullPassSink;
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap();
+
+    // Every pass MUST record the fallback seed (not the raw negative value).
+    let expected_seed = budget_usd / max_passes as f64;
+    assert!(
+        !backend.passes.is_empty(),
+        "expected at least one pass to have run",
+    );
+    for p in &backend.passes {
+        let got = p.cost_usd.unwrap_or(f64::NAN);
+        assert!(
+            (got - expected_seed).abs() < 1e-9,
+            "pass {}: expected debited seed {expected_seed}, got {got}",
+            p.index,
+        );
+    }
+
+    // Manifest reconciliation: sum of per-pass debited costs must equal
+    // the layer's `total_cost_usd` (what goes to `evaluations.final_total_cost_usd`).
+    let sum_passes: f64 = backend
+        .passes
+        .iter()
+        .map(|p| p.cost_usd.unwrap_or(0.0))
+        .sum();
+    let total = backend.total_cost_usd.unwrap_or(0.0);
+    assert!(
+        (sum_passes - total).abs() < 1e-9,
+        "reconciliation with invalid provider cost: sum(passes.cost_usd)={sum_passes} vs total_cost_usd={total}",
+    );
+}
+
+/// Phase 4 Pass-3 regression for Codex High #3 (sink-side mirror).
+///
+/// The manifest-side reconciliation is checked above. This test asserts
+/// the SAME invariant on the sink path that writes to `pass_events`: a
+/// `RecordingPassSink` captures exactly the values that the daemon would
+/// insert into SQLite, and their sum must equal the layer's
+/// `total_cost_usd`. Without the Pass-3 fix, the sink row for a
+/// fallback-triggering pass would carry the raw invalid cost while the
+/// total carried the seed — breaking `SUM(pass_events.cost_usd) =
+/// evaluations.final_total_cost_usd`.
+#[tokio::test]
+async fn pass_events_sink_mirrors_debited_cost_on_fallback() {
+    use pice_daemon::orchestrator::RecordingPassSink;
+
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    let budget_usd = 1.0_f64;
+    let max_passes = 5_u32;
+    let workflow = workflow_with_adaptive(
+        AdaptiveAlgo::BayesianSprt,
+        0.90,
+        max_passes,
+        budget_usd,
+        None,
+    );
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+
+    let _stub = StubScoresGuard::new("9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01");
+
+    let mut sink = RecordingPassSink::default();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap();
+
+    // Sink must have recorded every pass; each row MUST carry the
+    // debited seed (what `pass_events.cost_usd` would persist).
+    let expected_seed = budget_usd / max_passes as f64;
+    assert!(
+        !sink.rows.is_empty(),
+        "expected at least one sink row to have been recorded",
+    );
+    for row in &sink.rows {
+        let got = row.cost_usd.unwrap_or(f64::NAN);
+        assert!(
+            (got - expected_seed).abs() < 1e-9,
+            "sink row (pass {}, model {}): expected debited seed {expected_seed}, got {got}",
+            row.pass_index,
+            row.model,
+        );
+    }
+
+    // The ultimate cost-reconciliation contract: SUM(sink rows) equals the
+    // manifest's `total_cost_usd`. This is what downstream SQL queries
+    // (`SELECT SUM(cost_usd) FROM pass_events WHERE evaluation_id = ?`
+    // vs `SELECT final_total_cost_usd FROM evaluations WHERE id = ?`)
+    // would observe.
+    let sum_sink: f64 = sink.rows.iter().map(|r| r.cost_usd.unwrap_or(0.0)).sum();
+    let total = backend.total_cost_usd.unwrap_or(0.0);
+    assert!(
+        (sum_sink - total).abs() < 1e-9,
+        "sink reconciliation: sum(sink.cost_usd)={sum_sink} vs total_cost_usd={total}",
+    );
+}
+
+// ─── Pass-3 regression: runtime errors fail the layer, not Pending ─────────
+
+/// Phase 4 Pass-3 regression for Codex Critical #2.
+///
+/// Earlier code mapped ANY `Err` from `run_adaptive_passes` — including
+/// runtime RPC failures, provider timeouts, and provider crashes mid-loop —
+/// to `None`, and then to the phase-1-pending placeholder. The manifest
+/// overall status stayed "no failed layers", which routed the daemon to
+/// exit 0. A CI pipeline gating on `pice evaluate` would PASS through a
+/// broken evaluation, silently masking a real correctness problem.
+///
+/// With the Pass-3 fix, the return is split: `NotStarted` still routes to
+/// `phase1_pending_layer_result` (test fixtures, missing providers), but
+/// `RuntimeError` now builds a `LayerStatus::Failed` result via
+/// `runtime_failed_layer_result`. The `halted_by` string is
+/// `runtime_error:{message}` so operators see why the layer failed.
+///
+/// This test wires the stub to throw a JSON-RPC error on `evaluate/create`
+/// via `PICE_STUB_EVALUATE_ERROR`, which exercises the exact code path:
+/// the provider spawns successfully, the daemon initializes the session,
+/// and then the first evaluation call errors. The layer must end up
+/// `Failed`, NOT `Pending`.
+#[tokio::test]
+async fn runtime_error_fails_layer_not_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    // Any reasonable SPRT config works; the loop exits on the first pass
+    // via the RPC error before the halt-decision path matters.
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::BayesianSprt, 0.90, 3, 1.0, None);
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+
+    let _stub = StubEvaluateErrorGuard::new("simulated provider timeout");
+
+    let mut sink = NullPassSink;
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap();
+
+    // Core contract: runtime errors MUST NOT be silently downgraded to
+    // Pending. The layer has to land on `Failed` so `any_failed_layer`
+    // in `handlers/evaluate.rs` fires and the daemon exits non-zero.
+    assert_eq!(
+        backend.status,
+        LayerStatus::Failed,
+        "expected runtime error to fail the layer (not Pending); halted_by={:?}",
+        backend.halted_by,
+    );
+
+    // The halt reason preserves the provider's error message so
+    // operators can diagnose why the evaluation died. The exact
+    // wrapping ("runtime_error:…") is a stable contract with
+    // `runtime_failed_layer_result`.
+    let halted = backend.halted_by.clone().unwrap_or_default();
+    assert!(
+        halted.starts_with("runtime_error:"),
+        "expected halted_by to be runtime_error:* , got {halted:?}",
+    );
+    assert!(
+        halted.contains("simulated provider timeout"),
+        "halted_by should carry the provider's error message; got {halted:?}",
+    );
+
+    // The placeholder pass row uses a distinct model name so operators
+    // can filter runtime-error layers apart from phase-1-pending ones.
+    assert_eq!(backend.passes.len(), 1);
+    assert_eq!(backend.passes[0].model, "runtime-error");
+    assert_eq!(backend.passes[0].score, None);
+    assert_eq!(backend.passes[0].cost_usd, None);
+}
+
+/// Complementary to `runtime_error_fails_layer_not_pending`: verify that
+/// an UNRESOLVABLE provider (the loop never starts) still routes to
+/// `Pending` via `phase1_pending_layer_result`. This guards against the
+/// Pass-3 fix over-correcting — test fixtures that lack a provider
+/// binary must continue to degrade gracefully rather than being
+/// treated as runtime errors.
+///
+/// Note: this test builds `StackLoopsConfig` inline rather than via
+/// `make_cfg` because the shared helper hardcodes `primary_provider:
+/// "stub"`. The primary-provider name is passed separately from the
+/// `PiceConfig` (which only names the adversarial provider), so to
+/// trigger the `NotStarted` branch we must override `primary_provider`
+/// to a name that `registry::resolve` does not know.
+#[tokio::test]
+async fn unresolvable_provider_remains_phase1_pending_not_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::BayesianSprt, 0.90, 3, 1.0, None);
+    let seams = BTreeMap::new();
+    // Inline construction so we can inject a bogus primary provider name.
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: dir.path(),
+        primary_provider: "not-a-real-provider-kjsdfhgsd",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &workflow,
+        merged_seams: &seams,
+    };
+
+    let mut sink = NullPassSink;
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap();
+
+    // Pending, not Failed — the graceful-degrade path is preserved.
+    assert_eq!(
+        backend.status,
+        LayerStatus::Pending,
+        "unresolvable provider must degrade to Pending; halted_by={:?}",
+        backend.halted_by,
+    );
+    let halted = backend.halted_by.clone().unwrap_or_default();
+    assert!(
+        halted.starts_with("phase-1-pending-tier-"),
+        "expected phase-1-pending halt reason; got {halted:?}",
+    );
+    assert_eq!(backend.passes.len(), 1);
+    assert_eq!(backend.passes[0].model, "phase-1-pending");
 }

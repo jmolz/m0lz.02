@@ -49,6 +49,16 @@ export class StubProvider extends BaseProvider {
    * byte-identical prompts across passes.
    */
   private requestLogPath: string | undefined;
+  /**
+   * Phase 4 Pass-3 Codex Critical #2 regression harness: when set, the stub
+   * responds to `evaluate/create` with a JSON-RPC error whose message is
+   * this value. The provider's `initialize`/`session/*` methods still work
+   * normally, so the daemon sees a successful spawn + successful init, then
+   * a runtime error on the first evaluation — exactly the shape that
+   * distinguishes `LayerAdaptiveResult::RuntimeError` from
+   * `::NotStarted`. Used only by `runtime_error_fails_layer_not_pending`.
+   */
+  private evaluateError: string | undefined;
 
   constructor(version: string) {
     super(version);
@@ -57,6 +67,7 @@ export class StubProvider extends BaseProvider {
     const advRaw = process.env['PICE_STUB_ADVERSARIAL_SCORES'];
     this.adversarialScores = advRaw ? parseStubScores(advRaw) : [];
     this.requestLogPath = process.env['PICE_STUB_REQUEST_LOG'] || undefined;
+    this.evaluateError = process.env['PICE_STUB_EVALUATE_ERROR'] || undefined;
   }
 
   getCapabilities(): ProviderCapabilities {
@@ -101,6 +112,17 @@ export class StubProvider extends BaseProvider {
 
     transport.registerMethod('evaluate/create', async (params: unknown) => {
       this.requireInitialized();
+
+      // Pass-3 regression harness: simulate a runtime RPC failure *after*
+      // initialize/session succeeded. The daemon's `run_adaptive_passes`
+      // propagates this to `try_run_layer_adaptive` which must route it to
+      // `LayerAdaptiveResult::RuntimeError` → `LayerStatus::Failed` (exit 2),
+      // NOT `NotStarted` (exit 0). Kept opt-in; production providers never
+      // read this env var.
+      if (this.evaluateError) {
+        throw Object.assign(new Error(this.evaluateError), { code: -32000 });
+      }
+
       const sessionId = `stub-eval-${nextSessionId++}`;
       const p = params as EvaluateCreateParams;
 

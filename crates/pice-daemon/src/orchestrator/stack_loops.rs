@@ -369,17 +369,27 @@ pub async fn run_stack_loops(
 
             let min_confidence = effective_min_confidence_for(cfg.workflow, layer_name);
             let layer_result = match adaptive_outcome {
-                Some(outcome) => build_adaptive_layer_result(
+                LayerAdaptiveResult::Completed(outcome) => build_adaptive_layer_result(
                     layer_name.clone(),
                     outcome,
                     seam_checks,
                     first_failed_seam,
                     min_confidence,
                 ),
-                None => phase1_pending_layer_result(
+                LayerAdaptiveResult::NotStarted => phase1_pending_layer_result(
                     layer_name.clone(),
                     effective_tier,
                     filtered_diff.len(),
+                    seam_checks,
+                    first_failed_seam,
+                ),
+                // Pass-3 Codex Critical #2: runtime errors fail-close to
+                // `LayerStatus::Failed` (exit 2), NOT to the phase-1-pending
+                // placeholder (exit 0). Seam failures still take priority
+                // via `first_failed_seam` inside the helper.
+                LayerAdaptiveResult::RuntimeError(msg) => runtime_failed_layer_result(
+                    layer_name.clone(),
+                    msg,
                     seam_checks,
                     first_failed_seam,
                 ),
@@ -461,13 +471,47 @@ pub async fn run_stack_loops(
     Ok(manifest)
 }
 
+/// Outcome of `try_run_layer_adaptive`.
+///
+/// Phase 4 Pass-3 fix for Codex Critical #2: the earlier `Option<AdaptiveOutcome>`
+/// return conflated two very different states —
+///
+/// - **Provider never started** (binary unresolvable, config invalid, or test
+///   fixture lacks a provider wired up). The loop literally did not execute,
+///   so the conservative behavior is to record the layer as `Pending` with
+///   the phase-1-pending placeholder. This preserves the graceful-degrade
+///   path existing tests rely on.
+/// - **Runtime error mid-loop** (provider spawn succeeded but then an RPC
+///   call timed out, the provider crashed, or the protocol returned an error
+///   that the loop could not recover from). This IS a failure: evaluation
+///   was attempted and broke. Silently downgrading it to `Pending` makes the
+///   overall exit code stay 0, which hides a real correctness problem from
+///   CI pipelines that rely on `pice evaluate` as a fail-closed gate.
+///
+/// Splitting the return lets the caller fail-close on runtime errors
+/// (→ `LayerStatus::Failed` → exit 2) while still tolerating missing
+/// providers in test fixtures.
+enum LayerAdaptiveResult {
+    /// Provider never started — conservative `Pending` placeholder.
+    NotStarted,
+    /// Loop completed (including natural halts like budget / max_passes).
+    Completed(AdaptiveOutcome),
+    /// Provider started but the loop or an RPC errored out. The message
+    /// is surfaced on the manifest's `halted_by` so operators can see
+    /// *why* the layer failed at the orchestrator level.
+    RuntimeError(String),
+}
+
 /// Attempt to run the per-layer adaptive pass loop.
 ///
 /// Starts primary (and adversarial when ADTS is active) providers, invokes
-/// [`run_adaptive_passes`], and shuts them down. Returns `None` if any
-/// provider fails to start — the caller falls back to the Phase-1-pending
-/// placeholder. This graceful-degrade path preserves existing test fixtures
-/// where the provider binary isn't resolvable.
+/// [`run_adaptive_passes`], and shuts them down. Returns
+/// [`LayerAdaptiveResult::NotStarted`] if any provider fails to start — the
+/// caller falls back to the Phase-1-pending placeholder to preserve the
+/// graceful-degrade path test fixtures depend on. Returns
+/// [`LayerAdaptiveResult::RuntimeError`] if the providers started but the
+/// loop or an RPC surfaced an unrecoverable error — the caller fails the
+/// layer so the overall evaluation exits non-zero (Pass-3 Codex fix).
 async fn try_run_layer_adaptive(
     cfg: &StackLoopsConfig<'_>,
     layer_name: &str,
@@ -475,7 +519,7 @@ async fn try_run_layer_adaptive(
     filtered_diff: &str,
     claude_md: &str,
     pass_sink: &mut dyn PassMetricsSink,
-) -> Option<AdaptiveOutcome> {
+) -> LayerAdaptiveResult {
     let workflow = cfg.workflow;
     let algo = effective_adaptive_algo_for(workflow, layer_name);
     let min_confidence = effective_min_confidence_for(workflow, layer_name);
@@ -496,7 +540,7 @@ async fn try_run_layer_adaptive(
         Ok(p) => p,
         Err(e) => {
             warn!(layer = %layer_name, "failed to start primary provider, falling back to phase-1-pending: {e}");
-            return None;
+            return LayerAdaptiveResult::NotStarted;
         }
     };
 
@@ -516,7 +560,7 @@ async fn try_run_layer_adaptive(
                 warn!(layer = %layer_name, "failed to start adversarial provider for ADTS: {e}");
                 // ADTS without adversarial is degenerate — shut down primary and fall back.
                 let _ = primary.shutdown().await;
-                return None;
+                return LayerAdaptiveResult::NotStarted;
             }
         }
     } else {
@@ -552,10 +596,14 @@ async fn try_run_layer_adaptive(
     }
 
     match result {
-        Ok(outcome) => Some(outcome),
+        Ok(outcome) => LayerAdaptiveResult::Completed(outcome),
         Err(e) => {
-            warn!(layer = %layer_name, "adaptive pass loop failed: {e}");
-            None
+            // Pass-3 Codex Critical #2: providers DID start, so this is a
+            // real runtime error — NOT a "provider never started" state.
+            // Surface the message so the caller can fail-close the layer.
+            let msg = format!("{e}");
+            warn!(layer = %layer_name, "adaptive pass loop failed: {msg}");
+            LayerAdaptiveResult::RuntimeError(msg)
         }
     }
 }
@@ -652,6 +700,57 @@ fn phase1_pending_layer_result(
             findings: vec![format!(
                 "Awaiting provider evaluation — {filtered_diff_bytes} bytes of filtered diff prepared"
             )],
+        }],
+        seam_checks,
+        halted_by,
+        final_confidence: None,
+        total_cost_usd: None,
+        escalation_events: None,
+    }
+}
+
+/// Pass-3 Codex Critical #2: Build a fail-closed `LayerResult` for the case
+/// where the adaptive loop started but a runtime error (timeout, RPC failure,
+/// provider crash mid-loop) prevented completion.
+///
+/// The layer status is `Failed`, which flows to `any_failed_layer = true` in
+/// `handlers/evaluate.rs`, which in turn emits `ExitJsonStatus::EvaluationFailed`
+/// and exit code 2. This is the critical difference from
+/// `phase1_pending_layer_result`: Pending evaluations exit 0 (evaluation was
+/// never attempted), but runtime errors exit non-zero (evaluation was
+/// attempted and broke — a CI pipeline depending on `pice evaluate` as a
+/// gate must fail the build, not pass it).
+///
+/// Seam failures still take priority: if a seam check failed, the layer's
+/// `halted_by` is `seam:{id}`; otherwise it's `runtime_error:{message}`.
+fn runtime_failed_layer_result(
+    layer_name: String,
+    error_message: String,
+    seam_checks: Vec<SeamCheckResult>,
+    first_failed_seam: Option<String>,
+) -> LayerResult {
+    let (status, halted_by) = match first_failed_seam {
+        // Seam failures win per stack-loops.md §"Fail-closed rollup".
+        Some(failed_id) => (LayerStatus::Failed, Some(format!("seam:{failed_id}"))),
+        None => (
+            LayerStatus::Failed,
+            Some(format!("runtime_error:{error_message}")),
+        ),
+    };
+    LayerResult {
+        name: layer_name,
+        status,
+        // Placeholder pass row preserves manifest shape for downstream tools
+        // that assume every layer has at least one pass. Distinct model name
+        // (`runtime-error`) lets operators filter these apart from
+        // `phase-1-pending` rows.
+        passes: vec![PassResult {
+            index: 0,
+            model: "runtime-error".to_string(),
+            score: None,
+            cost_usd: None,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            findings: vec![format!("Adaptive loop errored: {error_message}")],
         }],
         seam_checks,
         halted_by,

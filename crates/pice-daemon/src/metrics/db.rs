@@ -2,6 +2,19 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 
+/// Pass-3 Codex Medium #4 helper: classify a rusqlite error as "duplicate
+/// column name" so [`MetricsDb::migrate_v3`] can swallow it idempotently.
+/// SQLite returns this as `SqliteFailure(code, Some(msg))` with the message
+/// literally starting with "duplicate column name:" — we match
+/// case-insensitively to guard against minor version drift.
+fn is_duplicate_column_error(err: &rusqlite::Error) -> bool {
+    if let rusqlite::Error::SqliteFailure(_, Some(msg)) = err {
+        msg.to_lowercase().contains("duplicate column name")
+    } else {
+        false
+    }
+}
+
 /// Wrapper around a SQLite connection for the PICE metrics database.
 /// Opens with WAL mode and runs schema migrations on startup.
 pub struct MetricsDb {
@@ -148,12 +161,65 @@ impl MetricsDb {
     }
 
     /// Phase 4 — add adaptive-evaluation columns to `evaluations` and create
-    /// the `pass_events` table for per-pass audit trails. Idempotent:
-    /// column adds check `PRAGMA table_info` first; the table is created with
-    /// `IF NOT EXISTS`. `ON DELETE CASCADE` on `evaluation_id` deletes a
-    /// pass's events when its evaluation row is deleted (matches the
-    /// `seam_findings` cascade contract).
+    /// the `pass_events` table for per-pass audit trails.
+    ///
+    /// Concurrent-first-open safe (Pass-3 Codex Medium #4 fix): the
+    /// introspect-then-ALTER sequence is wrapped in `BEGIN IMMEDIATE`, which
+    /// acquires a RESERVED lock before any writes and blocks a racing
+    /// migrator until commit. Combined with the 5s `busy_timeout` set in
+    /// `init()`, this serializes concurrent openers at the file level. The
+    /// loser re-reads `current_schema_version` under the lock and no-ops if
+    /// version 3 is already present.
+    ///
+    /// Belt-and-suspenders: ALTER errors whose message contains "duplicate
+    /// column name" are tolerated idempotently. This covers the edge case
+    /// where a process crashed mid-migration (committing one column, missing
+    /// the version row) and a follow-up open tries to re-run.
+    ///
+    /// Idempotent otherwise: column adds check `PRAGMA table_info` first;
+    /// the table is created with `IF NOT EXISTS`. `ON DELETE CASCADE` on
+    /// `evaluation_id` deletes a pass's events when its evaluation row is
+    /// deleted (matches the `seam_findings` cascade contract).
     fn migrate_v3(&self) -> Result<()> {
+        // Acquire a RESERVED lock before any writes. Any concurrent opener
+        // blocks here until this migrator commits, thanks to the busy_timeout
+        // set in init(). Without this, two openers can both read "no columns,
+        // version=2" from PRAGMA, both try ALTER, and the loser hits the
+        // duplicate-column error reported in Codex Pass-2 Medium #4.
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .context("failed to begin migrate_v3 transaction")?;
+
+        let result = self.migrate_v3_body();
+
+        match result {
+            Ok(()) => {
+                self.conn
+                    .execute_batch("COMMIT")
+                    .context("failed to commit migrate_v3 transaction")?;
+                Ok(())
+            }
+            Err(e) => {
+                // Best-effort rollback — failure to rollback is logged but
+                // the original migration error is what the caller needs to see.
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
+    /// Body of the v3 migration, executed inside the `BEGIN IMMEDIATE`
+    /// transaction opened by `migrate_v3`. Split for readability and so the
+    /// transaction wrapper can see a single `Result` to commit / rollback on.
+    fn migrate_v3_body(&self) -> Result<()> {
+        // Re-read version UNDER the write lock. If another process already
+        // completed v3 migration between our initial `run_migrations` check
+        // and this transaction, no-op.
+        let current = self.current_schema_version()?;
+        if current >= 3 {
+            return Ok(());
+        }
+
         // Check which adaptive columns already exist on `evaluations`
         // (needed for idempotent re-run and for migrating v1→v3 or v2→v3
         // on databases older than current).
@@ -191,10 +257,23 @@ impl MetricsDb {
             ),
         ];
         for (col, sql) in adaptive_cols {
-            if !existing_cols.contains(*col) {
-                self.conn
-                    .execute_batch(sql)
-                    .with_context(|| format!("failed to add evaluations.{col}"))?;
+            if existing_cols.contains(*col) {
+                continue;
+            }
+            match self.conn.execute_batch(sql) {
+                Ok(()) => {}
+                Err(e) if is_duplicate_column_error(&e) => {
+                    // A concurrent migrator added this column between our
+                    // PRAGMA read and ALTER. The transaction wrapper should
+                    // prevent this in practice (BEGIN IMMEDIATE serializes
+                    // migrators), but belt-and-suspenders: tolerate it
+                    // idempotently so a crashed partial migration does not
+                    // leave the DB unrecoverable.
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e))
+                        .with_context(|| format!("failed to add evaluations.{col}"));
+                }
             }
         }
 
@@ -671,5 +750,212 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM seam_findings", [], |r| r.get(0))
             .unwrap();
         assert_eq!(after, 0, "FK cascade should have deleted the seam finding");
+    }
+
+    // ─── Pass-3 regression: concurrent first-open on pre-v3 DB ────────────
+
+    /// Phase 4 Pass-3 regression for Codex Medium #4.
+    ///
+    /// Earlier `migrate_v3` read `PRAGMA table_info` and then issued
+    /// `ALTER TABLE ... ADD COLUMN` statements OUTSIDE a transaction. Two
+    /// processes opening the same pre-v3 DB simultaneously could both
+    /// observe "no columns, version=2", both attempt to ALTER, and the
+    /// loser would hit a `duplicate column name` error. Since metrics-open
+    /// failures are non-fatal per CLAUDE.md, this surfaced as a silent
+    /// metrics drop — the losing process's evaluation never got recorded.
+    ///
+    /// With the Pass-3 fix, `BEGIN IMMEDIATE` acquires a RESERVED lock
+    /// that serializes migrators at the file level. The loser blocks
+    /// (thanks to `busy_timeout`), then re-reads schema_version under
+    /// the lock and no-ops when it sees version=3. Belt-and-suspenders:
+    /// `is_duplicate_column_error` tolerates duplicate-column errors in
+    /// case a prior process crashed between ALTER and version insert.
+    ///
+    /// This test stages a v2 DB on disk, spawns two threads that both
+    /// call `MetricsDb::open(&path)` on a barrier, and asserts BOTH
+    /// succeed. Without the fix, one of the two would fail with
+    /// `failed to add evaluations.passes_used: duplicate column name`.
+    #[test]
+    fn migrate_v3_survives_concurrent_first_open() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("pre_v3.db");
+
+        // Stage a pre-v3 (v2) database: run v1 and v2 migrations, then stop.
+        // Using a raw connection lets us sidestep `init()` which auto-runs v3.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute_batch(
+                "
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+
+                CREATE TABLE evaluations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plan_path TEXT NOT NULL,
+                    feature_name TEXT NOT NULL,
+                    tier INTEGER NOT NULL,
+                    passed INTEGER NOT NULL,
+                    primary_provider TEXT NOT NULL,
+                    primary_model TEXT NOT NULL,
+                    adversarial_provider TEXT,
+                    adversarial_model TEXT,
+                    summary TEXT,
+                    timestamp TEXT NOT NULL
+                );
+
+                CREATE TABLE criteria_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    evaluation_id INTEGER NOT NULL REFERENCES evaluations(id),
+                    name TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    threshold INTEGER NOT NULL,
+                    passed INTEGER NOT NULL,
+                    findings TEXT
+                );
+
+                CREATE TABLE loop_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    plan_path TEXT,
+                    timestamp TEXT NOT NULL,
+                    data_json TEXT
+                );
+
+                CREATE TABLE telemetry_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    sent INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE seam_findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    evaluation_id INTEGER NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,
+                    layer TEXT NOT NULL,
+                    boundary TEXT NOT NULL,
+                    check_id TEXT NOT NULL,
+                    category INTEGER NOT NULL CHECK(category BETWEEN 1 AND 12),
+                    status TEXT NOT NULL CHECK(status IN ('passed','warning','failed')),
+                    details TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX idx_seam_findings_evaluation ON seam_findings(evaluation_id);
+                CREATE INDEX idx_seam_findings_category ON seam_findings(category);
+
+                INSERT INTO schema_version (version) VALUES (1);
+                INSERT INTO schema_version (version) VALUES (2);
+                ",
+            )
+            .unwrap();
+        }
+
+        // Race two MetricsDb::open calls against the staged v2 DB. Both
+        // must succeed — the BEGIN IMMEDIATE wrapper in `migrate_v3`
+        // serializes them, and the loser re-reads version and no-ops.
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let b = barrier.clone();
+                let p = db_path.clone();
+                thread::spawn(move || {
+                    b.wait();
+                    MetricsDb::open(&p)
+                })
+            })
+            .collect();
+
+        for (i, h) in handles.into_iter().enumerate() {
+            let r = h.join().unwrap();
+            assert!(
+                r.is_ok(),
+                "concurrent opener {i} failed: {:?}",
+                r.as_ref().err(),
+            );
+        }
+
+        // Post-race invariants: schema is at v3, all adaptive columns
+        // are present exactly once, and `pass_events` table exists.
+        let db = MetricsDb::open(&db_path).unwrap();
+        assert_eq!(db.current_schema_version().unwrap(), 3);
+
+        let cols: Vec<String> = db
+            .conn()
+            .prepare("PRAGMA table_info(evaluations)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        for required in [
+            "passes_used",
+            "halted_by",
+            "adaptive_algorithm",
+            "final_confidence",
+            "final_total_cost_usd",
+        ] {
+            let occurrences = cols.iter().filter(|c| *c == required).count();
+            assert_eq!(
+                occurrences, 1,
+                "column {required} should appear exactly once; got {occurrences} in {cols:?}",
+            );
+        }
+
+        let tables: Vec<String> = db
+            .conn()
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(tables.contains(&"pass_events".to_string()));
+
+        // Version rows should be 1, 2, 3 — at most one v3 row. (The
+        // transaction wrapper prevents duplicates; if it regressed, we'd
+        // see a row per migrator attempt.)
+        let v3_rows: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM schema_version WHERE version = 3",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            v3_rows, 1,
+            "concurrent migrators must not duplicate schema_version rows",
+        );
+    }
+
+    /// Isolated check that the `is_duplicate_column_error` classifier
+    /// matches SQLite's actual error shape. Locks the helper so a
+    /// rusqlite upgrade that changes the error message can't silently
+    /// break idempotency in `migrate_v3`.
+    #[test]
+    fn is_duplicate_column_error_matches_sqlite_message() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE t (a INTEGER); ALTER TABLE t ADD COLUMN b INTEGER;")
+            .unwrap();
+        // Re-add the same column — must produce a "duplicate column name" error.
+        let err = conn
+            .execute_batch("ALTER TABLE t ADD COLUMN b INTEGER")
+            .unwrap_err();
+        assert!(
+            is_duplicate_column_error(&err),
+            "expected duplicate-column detection on err = {err:?}",
+        );
+
+        // Unrelated error should NOT match.
+        let err = conn
+            .execute_batch("ALTER TABLE nonexistent ADD COLUMN x INTEGER")
+            .unwrap_err();
+        assert!(
+            !is_duplicate_column_error(&err),
+            "no-such-table error must not be classified as duplicate-column; got {err:?}",
+        );
     }
 }
