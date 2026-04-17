@@ -338,12 +338,13 @@ fn cli_evaluate_max_passes_halt_exits_zero() {
 fn cli_evaluate_vec_entropy_halt_exits_zero() {
     let dir = tempfile::tempdir().unwrap();
     let plan = setup(dir.path());
-    // VEC entropy floor at 0.5 in workflow.yaml — but the framework default
-    // is 0.01. Override via the workflow YAML directly.
+    // VEC entropy floor at 0.5 bits halts at pass 2. min_confidence=0.70
+    // clears the gate (VEC → Passed requires `final_confidence >= min_confidence`;
+    // Beta(3,1) posterior mean at pass 2 is 0.75).
     let yaml = r#"schema_version: "0.2"
 defaults:
   tier: 2
-  min_confidence: 0.80
+  min_confidence: 0.70
   max_passes: 6
   model: stub-model
   budget_usd: 10.0

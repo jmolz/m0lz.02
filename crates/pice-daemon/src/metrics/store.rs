@@ -243,7 +243,9 @@ impl crate::orchestrator::PassMetricsSink for DbBackedPassSink {
             score,
             cost_usd,
         };
-        let guard = self.db.lock().expect("metrics DB mutex poisoned");
+        // Mutex poisoning is recoverable — a prior panic elsewhere left the
+        // mutex poisoned but the DB state is still valid for writes.
+        let guard = self.db.lock().unwrap_or_else(|p| p.into_inner());
         if let Err(e) = insert_pass_event(&guard, self.evaluation_id, &row) {
             tracing::warn!(
                 evaluation_id = self.evaluation_id,

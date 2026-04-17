@@ -256,7 +256,9 @@ pub async fn run(
                 .map(|db| Arc::new(Mutex::new(db)));
         let eval_id = match db_arc.as_ref() {
             Some(db) => {
-                let guard = db.lock().expect("metrics DB mutex poisoned");
+                // Mutex poisoning must not crash the daemon (CLAUDE.md
+                // rust-core rule: no unwrap/expect in library code).
+                let guard = db.lock().unwrap_or_else(|p| p.into_inner());
                 match metrics::store::insert_evaluation_header(
                     &guard,
                     &normalized_path,
@@ -319,8 +321,22 @@ pub async fn run(
         // going out of scope at the end of `run_stack_loops`; we re-lock
         // `db_arc` here for the summary + seam writes. No contention.
         if let (Some(db_arc), Some(eval_id)) = (db_arc.as_ref(), eval_id) {
-            let db = db_arc.lock().expect("metrics DB mutex poisoned");
-            let stack_passed = !any_failed_layer && failed_seam_checks == 0;
+            // Mutex poisoning on a long-lived daemon must not crash the
+            // handler. Recover the inner guard per CLAUDE.md "Never
+            // unwrap()/expect() in library code" rule.
+            let db = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+            // Phase 4 post-adversarial-review fix (Codex Critical #2): only
+            // mark an evaluation `passed=1` when every layer actually
+            // reached `Passed`. `Pending` layers (budget, max_passes, or the
+            // phase-1-pending provider-fallback) indicate the loop DID NOT
+            // grade the layer — persisting `passed=1` for such a run would
+            // green-light unfinished work downstream in `pice status`.
+            let all_layers_passed = manifest
+                .layers
+                .iter()
+                .all(|l| l.status == LayerStatus::Passed || l.status == LayerStatus::Skipped);
+            let stack_passed =
+                all_layers_passed && !any_failed_layer && failed_seam_checks == 0;
 
             // Finalize `passed` + `summary`.
             if let Err(e) = metrics::store::finalize_evaluation(

@@ -367,12 +367,14 @@ pub async fn run_stack_loops(
                 .find(|c| c.status == CheckStatus::Failed)
                 .map(|c| c.name.clone());
 
+            let min_confidence = effective_min_confidence_for(cfg.workflow, layer_name);
             let layer_result = match adaptive_outcome {
                 Some(outcome) => build_adaptive_layer_result(
                     layer_name.clone(),
                     outcome,
                     seam_checks,
                     first_failed_seam,
+                    min_confidence,
                 ),
                 None => phase1_pending_layer_result(
                     layer_name.clone(),
@@ -576,15 +578,31 @@ fn build_adaptive_layer_result(
     outcome: AdaptiveOutcome,
     seam_checks: Vec<SeamCheckResult>,
     first_failed_seam: Option<String>,
+    min_confidence: f64,
 ) -> LayerResult {
     let (status, halted_by) = if let Some(failed_id) = first_failed_seam {
         // Seam failure always wins — per stack-loops.md §"Fail-closed rollup".
         (LayerStatus::Failed, Some(format!("seam:{failed_id}")))
     } else {
         match outcome.halted_by.as_deref() {
-            Some("sprt_confidence_reached") | Some("vec_entropy") => {
+            Some("sprt_confidence_reached") => {
                 (LayerStatus::Passed, outcome.halted_by.clone())
             }
+            // Phase 4 post-adversarial-review fix: `vec_entropy` halts when
+            // posterior entropy stops changing — that happens for failure
+            // sequences just as much as success sequences. Promoting every
+            // VEC halt to `Passed` is a correctness bug (false positive on
+            // failure-converged layers). Gate on `final_confidence >=
+            // min_confidence` before promoting; otherwise the layer enters
+            // `Failed` (posterior says fail) or `Pending` (no confidence
+            // reported — conservative).
+            Some("vec_entropy") => match outcome.final_confidence {
+                Some(conf) if conf >= min_confidence => {
+                    (LayerStatus::Passed, outcome.halted_by.clone())
+                }
+                Some(_) => (LayerStatus::Failed, outcome.halted_by.clone()),
+                None => (LayerStatus::Pending, outcome.halted_by.clone()),
+            },
             Some("sprt_rejected") | Some("adts_escalation_exhausted") => {
                 (LayerStatus::Failed, outcome.halted_by.clone())
             }

@@ -507,9 +507,12 @@ async fn vec_halts_when_entropy_stabilizes() {
     let plan_path = setup_minimal_repo(dir.path());
     let layers = single_layer_config();
     let pice_config = stub_pice_config(false);
-    // VEC entropy floor at 0.5 bits halts quickly after a few consistent
-    // observations (default 0.01 would need many more passes).
-    let mut workflow = workflow_with_adaptive(AdaptiveAlgo::Vec, 0.80, 6, 10.0, None);
+    // VEC entropy floor at 0.5 bits halts at pass 2 (delta H ≈ 0.346 bits).
+    // min_confidence=0.70 provides headroom above the gate: Beta(3,1) posterior
+    // mean is 0.75, which clears 0.70 so VEC can promote to Passed. This is
+    // the success-convergence case; the failure-convergence case is exercised
+    // by `vec_halt_on_failure_sequence_does_not_pass` below.
+    let mut workflow = workflow_with_adaptive(AdaptiveAlgo::Vec, 0.70, 6, 10.0, None);
     workflow.phases.evaluate.vec.entropy_floor = 0.5;
     let seams = BTreeMap::new();
     let cfg = make_cfg(
@@ -534,6 +537,56 @@ async fn vec_halts_when_entropy_stabilizes() {
         .unwrap();
     assert_eq!(backend.halted_by.as_deref(), Some("vec_entropy"));
     assert_eq!(backend.status, LayerStatus::Passed);
+}
+
+// ─── Test 7b: VEC halt on FAILURE convergence must not promote to Passed ──
+// Codex adversarial-review fix: a failure-heavy observation sequence
+// converges in entropy too. Without the `final_confidence >= min_confidence`
+// gate, `build_adaptive_layer_result` would silently mark such a layer
+// `Passed` — a correctness bug that green-lights broken code.
+
+#[tokio::test]
+async fn vec_halt_on_failure_sequence_does_not_pass() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    // Scores of 3.0 against threshold 8.0 (min_confidence=0.80) are all
+    // Failure observations. Posterior mean collapses toward 1/(1+N) — far
+    // below 0.80. VEC halts on entropy convergence but the gate must
+    // downgrade to `Failed`, not promote to `Passed`.
+    let mut workflow = workflow_with_adaptive(AdaptiveAlgo::Vec, 0.80, 6, 10.0, None);
+    workflow.phases.evaluate.vec.entropy_floor = 0.5;
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+
+    let _stub = StubScoresGuard::new("3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001");
+
+    let mut sink = NullPassSink;
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap();
+    assert_eq!(backend.halted_by.as_deref(), Some("vec_entropy"));
+    assert_eq!(
+        backend.status,
+        LayerStatus::Failed,
+        "VEC halting on failure sequence MUST NOT mark layer Passed; \
+         got status={:?}, final_confidence={:?}",
+        backend.status,
+        backend.final_confidence
+    );
 }
 
 // ─── Test 8: AdaptiveAlgo::None still respects budget ──────────────────────

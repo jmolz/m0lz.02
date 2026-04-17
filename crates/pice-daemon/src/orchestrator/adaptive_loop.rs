@@ -235,10 +235,22 @@ pub async fn run_adaptive_passes(
                 .unwrap_or_default(),
         };
         passes.push(primary_pr.clone());
-        if let Some(c) = primary_cost {
-            if CostStats::validate_nonnegative(c).is_ok() {
+        // Phase 4 post-adversarial-review fix (Codex High #3): when the
+        // provider omits or mis-reports cost_usd (None, NaN, ∞, negative),
+        // the naive "ignore it" path was fail-OPEN — a provider without
+        // cost telemetry could run unbounded past the configured budget.
+        // Fail-closed by debiting the conservative cold-start seed so the
+        // budget gate in `decide_halt` still binds on the next pre-pass check.
+        let fallback_seed = ctx.budget_usd / ctx.max_passes as f64;
+        match primary_cost {
+            Some(c) if CostStats::validate_nonnegative(c).is_ok() => {
                 cost_stats.observe(c);
                 accumulated_cost += c;
+            }
+            _ => {
+                // Unknown/invalid cost — debit the seed so budget stays honored.
+                cost_stats.observe(fallback_seed);
+                accumulated_cost += fallback_seed;
             }
         }
         // Sink BEFORE halt decision — crash-safety invariant.
@@ -274,10 +286,16 @@ pub async fn run_adaptive_passes(
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     findings: adv_out.result.summary.map(|s| vec![s]).unwrap_or_default(),
                 });
-                if let Some(c) = adv_cost {
-                    if CostStats::validate_nonnegative(c).is_ok() {
+                // Same fail-closed fallback as the primary: debit the seed
+                // when the adversarial provider omits or mis-reports cost.
+                match adv_cost {
+                    Some(c) if CostStats::validate_nonnegative(c).is_ok() => {
                         cost_stats.observe(c);
                         accumulated_cost += c;
+                    }
+                    _ => {
+                        cost_stats.observe(fallback_seed);
+                        accumulated_cost += fallback_seed;
                     }
                 }
                 sink.record_pass(pass_index, &adv_model_name, adv_score, adv_cost);
