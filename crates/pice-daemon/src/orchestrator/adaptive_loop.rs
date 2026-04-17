@@ -592,18 +592,14 @@ fn scalar_score(out: &PerPassOutcome) -> Option<f64> {
     Some(if out.result.passed { 10.0 } else { 0.0 })
 }
 
-/// Same Beta(1+s, 1+f) posterior mean as `pice-core::adaptive::decide`, used
-/// here for the ADTS-exhausted and max-passes halt paths where `decide_halt`
-/// did not compute a confidence.
-fn posterior_mean_capped(obs: &[PassObservation]) -> f64 {
-    let (s, f) = obs.iter().fold((0u32, 0u32), |(s, f), o| match o {
-        PassObservation::Success => (s + 1, f),
-        PassObservation::Failure => (s, f + 1),
-    });
-    let alpha = 1.0 + s as f64;
-    let beta = 1.0 + f as f64;
-    (alpha / (alpha + beta)).min(pice_core::adaptive::CONFIDENCE_CEILING)
-}
+// Phase 4 Pass-5 Claude Evaluator C Criterion 1 fix: the daemon previously
+// carried a duplicate `posterior_mean_capped` helper alongside the one in
+// `pice-core::adaptive::decide`. Both implementations were byte-identical and
+// both capped via `CONFIDENCE_CEILING`, but the drift risk was real — a
+// future refactor that changed the cap or the prior in one file would have
+// silently broken the invariant in the other. We now call the pice-core
+// re-export so there is exactly ONE capping path in production code.
+use pice_core::adaptive::posterior_mean_capped;
 
 // ─── Tests ──────────────────────────────────────────────────────────────
 

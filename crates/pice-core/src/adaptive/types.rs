@@ -188,6 +188,24 @@ pub struct HaltDecision {
 /// the higher bound.
 pub const CONFIDENCE_CEILING: f64 = 0.966;
 
+/// Single source of truth for capping a raw confidence value at
+/// [`CONFIDENCE_CEILING`]. Phase 4 Pass-5 Claude Evaluator C Criterion 1 fix:
+/// before this helper existed, the cap was applied ad-hoc via four
+/// independent `.min(CONFIDENCE_CEILING)` call sites (`sprt.rs`, `vec.rs`,
+/// `decide.rs`, `adaptive_loop.rs`). All four used the same constant so
+/// values stayed aligned, but a future refactor that added a new derivation
+/// path could silently forget the cap. Funneling every production call site
+/// through this single function closes that drift risk and makes the
+/// ceiling invariant grep-auditable as a single function name.
+///
+/// NaN is passed through unchanged (`.min()` propagates NaN) so the caller
+/// can treat invalid inputs as a validation error rather than silently
+/// clamping to the ceiling.
+#[inline]
+pub fn cap_confidence(raw: f64) -> f64 {
+    raw.min(CONFIDENCE_CEILING)
+}
+
 // ─── ADTS verdict ─────────────────────────────────────────────────────────
 
 /// Output of `run_adts()`. The orchestrator's adaptive loop converts a

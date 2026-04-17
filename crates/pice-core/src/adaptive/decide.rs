@@ -15,8 +15,7 @@
 use crate::adaptive::cost::CostStats;
 use crate::adaptive::sprt::run_sprt;
 use crate::adaptive::types::{
-    AdaptiveError, HaltDecision, HaltReason, PassObservation, SprtConfig, VecConfig,
-    CONFIDENCE_CEILING,
+    cap_confidence, AdaptiveError, HaltDecision, HaltReason, PassObservation, SprtConfig, VecConfig,
 };
 use crate::adaptive::vec::run_vec;
 use crate::workflow::schema::AdaptiveAlgo;
@@ -96,16 +95,19 @@ pub fn decide_halt(
     }
 }
 
-/// Beta(1+s, 1+f) posterior mean, capped at [`CONFIDENCE_CEILING`]. Used for
-/// the confidence field on guard-driven halts where no algorithm computed one.
-fn posterior_mean_capped(passes: &[PassObservation]) -> f64 {
+/// Beta(1+s, 1+f) posterior mean, capped via [`cap_confidence`]. Used for
+/// the confidence field on guard-driven halts where no algorithm computed
+/// one. Made `pub` in Pass-5 so the daemon's adaptive loop uses this
+/// canonical helper instead of a hand-rolled duplicate — eliminating the
+/// drift risk Evaluator C flagged on Criterion 1.
+pub fn posterior_mean_capped(passes: &[PassObservation]) -> f64 {
     let (s, f) = passes.iter().fold((0u32, 0u32), |(s, f), o| match o {
         PassObservation::Success => (s + 1, f),
         PassObservation::Failure => (s, f + 1),
     });
     let alpha = 1.0 + s as f64;
     let beta = 1.0 + f as f64;
-    (alpha / (alpha + beta)).min(CONFIDENCE_CEILING)
+    cap_confidence(alpha / (alpha + beta))
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -113,6 +115,7 @@ fn posterior_mean_capped(passes: &[PassObservation]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adaptive::types::CONFIDENCE_CEILING;
 
     fn defaults() -> (SprtConfig, VecConfig) {
         (SprtConfig::default(), VecConfig::default())

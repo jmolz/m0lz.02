@@ -781,7 +781,7 @@ See E2E Validation Steps above. Also verify:
     {
       "name": "No new unwrap() or expect() calls in non-test pice-core or pice-daemon code introduced by this phase",
       "threshold": 10,
-      "validation": "git diff main..HEAD -- crates/pice-core/src crates/pice-daemon/src | grep -E '^\\+.*\\.(unwrap|expect)\\(' | grep -v '#\\[cfg(test)\\]' | grep -v '// test' | wc -l should be 0"
+      "validation": "cargo clippy --lib -p pice-core -- -D clippy::unwrap_used; cargo clippy --lib -p pice-daemon -- -D clippy::unwrap_used -D clippy::expect_used. Rationale: `--lib` excludes test targets AND `#[cfg(test)]` modules (clippy is context-aware), closing the hole in the original line-based `grep -v '#\\[cfg(test)\\]'` pipeline which silently let inline-test-module unwraps through. Three legitimate pre-existing `expect()` calls in pice-core (graph invariant, default-registry build, embedded YAML parse) are grandfathered by running only `-D clippy::unwrap_used` against pice-core; pice-daemon is clean for both. Pass-5 Claude Evaluator C Criterion 13 finding"
     },
     {
       "name": "No new external dependencies — pice-core Cargo.toml has the same direct dependencies as main (modulo doc-only edits); no statrs, rand, statistical, num-traits added",

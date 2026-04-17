@@ -28,7 +28,7 @@
 //! satisfy the "no new external deps" Phase 4 contract criterion (#14).
 
 use crate::adaptive::types::{
-    AdaptiveError, HaltDecision, HaltReason, PassObservation, VecConfig, CONFIDENCE_CEILING,
+    cap_confidence, AdaptiveError, HaltDecision, HaltReason, PassObservation, VecConfig,
 };
 
 /// VEC's fixed Beta(1, 1) (uniform) prior. Documented above.
@@ -49,7 +49,7 @@ pub fn run_vec(passes: &[PassObservation], cfg: &VecConfig) -> Result<HaltDecisi
     let (s_n, f_n) = count_outcomes(passes);
     let alpha_n = PRIOR_ALPHA + s_n as f64;
     let beta_n = PRIOR_BETA + f_n as f64;
-    let confidence = (alpha_n / (alpha_n + beta_n)).min(CONFIDENCE_CEILING);
+    let confidence = cap_confidence(alpha_n / (alpha_n + beta_n));
 
     if passes.len() < 2 {
         return Ok(HaltDecision {
@@ -155,6 +155,7 @@ pub(crate) fn ln_gamma(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adaptive::types::CONFIDENCE_CEILING;
 
     // ── Numerical primitives ─────────────────────────────────────────────
 

@@ -564,6 +564,16 @@ async fn max_passes_halts_uncertain_layer() {
         backend.halted_by
     );
     assert_eq!(backend.passes.len(), 4);
+    // Phase 4 Pass-5 Claude Evaluator A Criterion 2 fix: the contract requires
+    // "correct layer status" for each halt path. `max_passes` is a fail-closed
+    // guardrail (user may re-run with higher budget/passes) — the layer must
+    // record `Pending`, not `Passed` or `Failed`. Without this assertion a
+    // regression that silently flipped max_passes to Failed would slip past.
+    assert_eq!(
+        backend.status,
+        LayerStatus::Pending,
+        "max_passes must route to Pending (fail-closed guardrail), not Passed or Failed",
+    );
 }
 
 // ─── Test 6: ADTS three-level escalation exhausts ──────────────────────────

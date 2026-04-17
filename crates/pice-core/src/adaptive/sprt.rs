@@ -23,7 +23,7 @@
 //!      table in `docs/research/convergence-analysis.md` §1.
 
 use crate::adaptive::types::{
-    AdaptiveError, HaltDecision, HaltReason, PassObservation, SprtConfig, CONFIDENCE_CEILING,
+    cap_confidence, AdaptiveError, HaltDecision, HaltReason, PassObservation, SprtConfig,
 };
 
 /// Run SPRT over a sequence of pass observations.
@@ -74,7 +74,7 @@ pub fn run_sprt(
     let alpha = cfg.prior_alpha + successes as f64;
     let beta = cfg.prior_beta + failures as f64;
     let posterior_mean = alpha / (alpha + beta);
-    let confidence = posterior_mean.min(CONFIDENCE_CEILING);
+    let confidence = cap_confidence(posterior_mean);
 
     if passes.is_empty() {
         return Ok(HaltDecision {
@@ -128,6 +128,9 @@ fn count_outcomes(passes: &[PassObservation]) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Tests reference the ceiling constant directly; production code goes
+    // through `cap_confidence(...)` so the lib-level import was removed.
+    use crate::adaptive::types::CONFIDENCE_CEILING;
 
     #[test]
     fn sprt_accepts_after_five_successes_at_95_confidence() {

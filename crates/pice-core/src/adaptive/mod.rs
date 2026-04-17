@@ -48,7 +48,14 @@ pub use cost::CostStats;
 pub use decide::decide_halt;
 pub use sprt::run_sprt;
 pub use types::{
-    AdaptiveError, AdtsConfig, AdtsVerdict, EscalationEvent, HaltDecision, HaltReason,
-    PassObservation, SprtConfig, VecConfig, CONFIDENCE_CEILING,
+    cap_confidence, AdaptiveError, AdtsConfig, AdtsVerdict, EscalationEvent, HaltDecision,
+    HaltReason, PassObservation, SprtConfig, VecConfig, CONFIDENCE_CEILING,
 };
 pub use vec::run_vec;
+
+/// Re-exported for the daemon's adaptive loop — Pass-5 Claude Evaluator C
+/// Criterion 1 fix: the daemon previously carried a duplicate
+/// `posterior_mean_capped` helper. Centralizing the implementation here and
+/// re-exporting eliminates the drift risk (both call sites now call the same
+/// function, so a cap change cannot go out of sync).
+pub use decide::posterior_mean_capped;
