@@ -215,6 +215,14 @@ pub struct ProviderCapabilities {
         rename = "defaultEvalModel"
     )]
     pub default_eval_model: Option<String>,
+    /// Phase 4.1: whether the provider emits real per-pass `costUsd` on
+    /// `evaluate/create` responses. Adaptive evaluation with `budget_usd > 0`
+    /// REQUIRES this — otherwise budget enforcement is synthetic (seed-only)
+    /// and `final_total_cost_usd` misrepresents real spend. Default `false`
+    /// keeps legacy providers from silently claiming cost telemetry they
+    /// cannot deliver; providers must explicitly opt in.
+    #[serde(default, rename = "costTelemetry")]
+    pub cost_telemetry: bool,
 }
 
 /// Parameters for the `session/create` method.
@@ -567,6 +575,7 @@ mod tests {
                 agent_teams: false,
                 models: vec!["claude-opus-4-6".to_string()],
                 default_eval_model: Some("claude-opus-4-6".to_string()),
+                cost_telemetry: true,
             },
             version: "0.1.0".to_string(),
         };
@@ -576,6 +585,7 @@ mod tests {
         assert!(parsed.capabilities.evaluation);
         assert!(!parsed.capabilities.agent_teams);
         assert_eq!(parsed.capabilities.models.len(), 1);
+        assert!(parsed.capabilities.cost_telemetry);
     }
 
     #[test]
@@ -586,11 +596,32 @@ mod tests {
             agent_teams: true,
             models: vec![],
             default_eval_model: None,
+            cost_telemetry: false,
         };
         let json = serde_json::to_string(&caps).unwrap();
         assert!(json.contains("\"agentTeams\""));
         assert!(!json.contains("\"agent_teams\""));
         assert!(!json.contains("defaultEvalModel"));
+        // Phase 4.1: cost_telemetry defaults to false and serializes camelCase.
+        assert!(json.contains("\"costTelemetry\":false"));
+        assert!(!json.contains("\"cost_telemetry\""));
+    }
+
+    /// Phase 4.1: a legacy provider that predates `costTelemetry` must
+    /// deserialize with `cost_telemetry = false` — the fail-closed default.
+    /// Without `#[serde(default)]` this would be a breaking change; with it,
+    /// adaptive evaluation against a legacy provider fails safely in the
+    /// capability gate instead of silently running on synthetic budgets.
+    #[test]
+    fn capabilities_legacy_provider_defaults_cost_telemetry_false() {
+        let json = r#"{
+            "workflow": true,
+            "evaluation": true,
+            "agentTeams": false,
+            "models": ["claude-opus-4-6"]
+        }"#;
+        let parsed: ProviderCapabilities = serde_json::from_str(json).unwrap();
+        assert!(!parsed.cost_telemetry, "legacy provider must default false");
     }
 
     #[test]

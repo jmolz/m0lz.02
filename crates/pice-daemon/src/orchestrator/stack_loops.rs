@@ -570,6 +570,31 @@ async fn try_run_layer_adaptive(
         }
     };
 
+    // Phase 4.1 capability gate (Pass-6 Codex Critical #1): adaptive budgets
+    // are only meaningful when the provider emits real per-pass `costUsd`.
+    // Without telemetry the loop falls back to `budget_usd / max_passes` as
+    // a synthetic seed debit, so `final_total_cost_usd` and every
+    // budget-halt decision are advisory at best — the exact "budget appears
+    // to be enforced, isn't actually" failure mode Codex flagged at
+    // adaptive_loop.rs:291-385. Fail closed here rather than silently
+    // running the hollow path. The check applies regardless of
+    // `adaptive_algorithm` because budget enforcement runs for every algo
+    // (including `None`, per CLAUDE.md — "Budget is a financial safety
+    // rail, not a strategy choice").
+    if budget_usd > 0.0 && !primary.capabilities().cost_telemetry {
+        let msg = format!(
+            "provider '{}' does not declare costTelemetry, but workflow.yaml requests \
+             budget_usd = {:.4} for layer '{}'. Adaptive budgets require real per-pass \
+             cost reporting; otherwise enforcement is synthetic. Either set \
+             budget_usd = 0 (no enforcement) or use a provider that emits costUsd on \
+             evaluate/create.",
+            cfg.primary_provider, budget_usd, layer_name,
+        );
+        warn!(layer = %layer_name, "{msg}");
+        let _ = primary.shutdown().await;
+        return LayerAdaptiveResult::RuntimeError(msg);
+    }
+
     // Start the adversarial provider only when ADTS is selected.
     let mut adversarial: Option<ProviderOrchestrator> = if algo
         == pice_core::workflow::schema::AdaptiveAlgo::Adts

@@ -4,7 +4,7 @@ use pice_core::config::PiceConfig;
 use pice_core::provider::registry;
 use pice_protocol::{
     EvaluateCreateParams, EvaluateCreateResult, EvaluateResultParams, EvaluateScoreParams,
-    InitializeParams,
+    InitializeParams, InitializeResult, ProviderCapabilities,
 };
 use serde_json::Value;
 use std::time::Duration;
@@ -17,6 +17,11 @@ const EVAL_NOTIFICATION_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct ProviderOrchestrator {
     host: ProviderHost,
     provider_name: String,
+    /// Phase 4.1: capabilities declared by the provider during `initialize`.
+    /// Used by the adaptive-budget capability gate in `stack_loops.rs` to
+    /// fail closed when `budget_usd > 0` is requested against a provider
+    /// that cannot supply real per-pass `costUsd` (Pass-6 Codex Critical #1).
+    capabilities: ProviderCapabilities,
 }
 
 /// Per-pass outcome returned by [`ProviderOrchestrator::evaluate_one_pass`].
@@ -47,14 +52,31 @@ impl ProviderOrchestrator {
         let init_params = serde_json::to_value(InitializeParams {
             config: serde_json::json!({}),
         })?;
-        host.request("initialize", Some(init_params), INIT_TIMEOUT)
+        let init_value = host
+            .request("initialize", Some(init_params), INIT_TIMEOUT)
             .await
             .context("provider initialization failed")?;
+
+        // Phase 4.1 (Pass-6 Codex Critical #1): capture declared capabilities.
+        // Providers that predate `costTelemetry` deserialize with the field
+        // defaulted to `false` — the fail-closed semantic that forces the
+        // capability gate in `stack_loops.rs` to reject adaptive budgets on
+        // legacy providers rather than silently running on synthetic spend.
+        let init_result: InitializeResult = serde_json::from_value(init_value)
+            .context("provider returned an invalid initialize response")?;
+        let capabilities = init_result.capabilities;
 
         Ok(Self {
             host,
             provider_name: name.to_string(),
+            capabilities,
         })
+    }
+
+    /// Phase 4.1: capabilities the provider declared during `initialize`.
+    /// Used by the adaptive-budget capability gate (see `stack_loops.rs`).
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &self.capabilities
     }
 
     /// Set notification handler for streaming responses.

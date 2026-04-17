@@ -50,6 +50,14 @@ export interface ProviderCapabilities {
   agentTeams: boolean;
   models: string[];
   defaultEvalModel?: string;
+  /**
+   * Phase 4.1: whether the provider emits real per-pass `costUsd` on
+   * `evaluate/create` responses. Adaptive evaluation with `budget_usd > 0`
+   * REQUIRES this — otherwise budget enforcement is synthetic (seed-only)
+   * and `final_total_cost_usd` misrepresents real spend. Default `false`;
+   * providers must explicitly opt in.
+   */
+  costTelemetry?: boolean;
 }
 
 export interface SessionCreateParams {

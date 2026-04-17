@@ -136,6 +136,37 @@ describe('JSON-RPC roundtrip (matches Rust wire format)', () => {
     expect(json).not.toContain('"agent_teams"');
   });
 
+  // Phase 4.1: costTelemetry is the capability gate for adaptive budgets.
+  it('ProviderCapabilities costTelemetry serializes camelCase', () => {
+    const caps: ProviderCapabilities = {
+      workflow: true,
+      evaluation: true,
+      agentTeams: false,
+      models: ['stub'],
+      costTelemetry: true,
+    };
+    const json = JSON.stringify(caps);
+    expect(json).toContain('"costTelemetry":true');
+    expect(json).not.toContain('"cost_telemetry"');
+    const parsed: ProviderCapabilities = JSON.parse(json);
+    expect(parsed.costTelemetry).toBe(true);
+  });
+
+  // Legacy providers that predate costTelemetry must deserialize without
+  // the field — JSON.parse produces undefined, which consumers must treat
+  // as the fail-closed default (equivalent to false on the Rust side's
+  // `#[serde(default)]`).
+  it('ProviderCapabilities costTelemetry is optional (legacy provider)', () => {
+    const legacyJson = JSON.stringify({
+      workflow: true,
+      evaluation: true,
+      agentTeams: false,
+      models: [],
+    });
+    const parsed: ProviderCapabilities = JSON.parse(legacyJson);
+    expect(parsed.costTelemetry).toBeUndefined();
+  });
+
   it('SessionCreate params/result roundtrip', () => {
     const params: SessionCreateParams = { workingDirectory: '/tmp/project' };
     const result: SessionCreateResult = { sessionId: 'session-abc' };

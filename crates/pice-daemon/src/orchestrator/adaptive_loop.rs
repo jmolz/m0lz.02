@@ -22,7 +22,7 @@
 //!   `decide_halt`.** ADTS divergence is the orchestrator's concern, per
 //!   [`pice_core::adaptive::decide`]'s contract.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use pice_core::adaptive::{
     decide_halt, run_adts, AdtsConfig, AdtsVerdict, CostStats, EscalationEvent, HaltReason,
     PairedScore, PassObservation, SprtConfig, VecConfig,
@@ -86,8 +86,14 @@ pub struct AdaptiveContext {
 /// collect rows in a `Vec` for inspection. The sink is called once per
 /// provider call — so an ADTS pass writes TWO rows (primary + adversarial).
 ///
-/// Errors are logged by the caller (not surfaced through this trait) —
-/// metrics failures are never fatal per CLAUDE.md.
+/// Phase 4.1 Pass-6 Codex High #3: sink errors are now FATAL. Once the
+/// evaluation header exists, a silent pass_event write failure produces
+/// a manifest+DB pair that looks successful but hides missing rows,
+/// breaking cost reconciliation downstream. The trait therefore surfaces
+/// errors to the caller (the adaptive loop), which propagates them via
+/// `?` into a `LayerAdaptiveResult::RuntimeError` → `LayerStatus::Failed`
+/// — the same path used for any other runtime failure. Metrics absence
+/// (`NullPassSink`) is distinct from metrics failure and stays silent.
 pub trait PassMetricsSink: Send {
     fn record_pass(
         &mut self,
@@ -95,14 +101,16 @@ pub trait PassMetricsSink: Send {
         model: &str,
         score: Option<f64>,
         cost_usd: Option<f64>,
-    );
+    ) -> anyhow::Result<()>;
 }
 
 /// Discard sink used when metrics are disabled.
 pub struct NullPassSink;
 
 impl PassMetricsSink for NullPassSink {
-    fn record_pass(&mut self, _: u32, _: &str, _: Option<f64>, _: Option<f64>) {}
+    fn record_pass(&mut self, _: u32, _: &str, _: Option<f64>, _: Option<f64>) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// In-memory sink used by unit and integration tests. Each call appends one
@@ -127,13 +135,14 @@ impl PassMetricsSink for RecordingPassSink {
         model: &str,
         score: Option<f64>,
         cost_usd: Option<f64>,
-    ) {
+    ) -> anyhow::Result<()> {
         self.rows.push(RecordingPassEvent {
             pass_index,
             model: model.to_string(),
             score,
             cost_usd,
         });
+        Ok(())
     }
 }
 
@@ -321,12 +330,21 @@ pub async fn run_adaptive_passes(
         // Write the DEBITED value so SUM(pass_events.cost_usd) matches
         // evaluations.final_total_cost_usd even when the provider's reported
         // cost was missing/invalid and we fell back to the seed.
+        //
+        // Phase 4.1 Pass-6 Codex High #3: sink errors are fatal. Before the
+        // trait change, a failed SQLite insert logged and continued, leaving
+        // the loop to charge cost in memory against rows that never landed.
+        // Propagating via `?` routes the failure through the adaptive loop's
+        // standard `Result` exit → `LayerAdaptiveResult::RuntimeError`
+        // → `LayerStatus::Failed` with the SQLite error surfaced to the
+        // operator.
         sink.record_pass(
             pass_index,
             &primary_model_name,
             primary_score,
             primary_debited_cost,
-        );
+        )
+        .context("failed to persist primary pass_event")?;
 
         // ── Adversarial provider (ADTS only) ─────────────────────────
         let mut adversarial_score: Option<f64> = None;
@@ -393,7 +411,8 @@ pub async fn run_adaptive_passes(
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     findings: adv_out.result.summary.map(|s| vec![s]).unwrap_or_default(),
                 });
-                sink.record_pass(pass_index, &adv_model_name, adv_score, adv_debited_cost);
+                sink.record_pass(pass_index, &adv_model_name, adv_score, adv_debited_cost)
+                    .context("failed to persist adversarial pass_event")?;
             }
         }
 
@@ -652,20 +671,49 @@ mod tests {
     #[test]
     fn null_sink_never_panics() {
         let mut s = NullPassSink;
-        s.record_pass(1, "m", Some(9.0), Some(0.01));
-        s.record_pass(2, "m", None, None);
+        assert!(s.record_pass(1, "m", Some(9.0), Some(0.01)).is_ok());
+        assert!(s.record_pass(2, "m", None, None).is_ok());
     }
 
     #[test]
     fn recording_sink_captures_rows_in_order() {
         let mut s = RecordingPassSink::default();
-        s.record_pass(1, "claude", Some(9.0), Some(0.02));
-        s.record_pass(1, "codex", Some(3.0), Some(0.03));
-        s.record_pass(2, "claude", Some(9.1), Some(0.02));
+        s.record_pass(1, "claude", Some(9.0), Some(0.02)).unwrap();
+        s.record_pass(1, "codex", Some(3.0), Some(0.03)).unwrap();
+        s.record_pass(2, "claude", Some(9.1), Some(0.02)).unwrap();
         assert_eq!(s.rows.len(), 3);
         assert_eq!(s.rows[0].model, "claude");
         assert_eq!(s.rows[1].model, "codex");
         assert_eq!(s.rows[2].pass_index, 2);
+    }
+
+    /// Phase 4.1 Pass-6 Codex High #3: a sink implementation that fails on
+    /// insert must surface the error through `?` to the adaptive loop, which
+    /// routes it to `LayerStatus::Failed`. This guards the trait signature
+    /// itself — if a future refactor reverts `record_pass` to an infallible
+    /// `fn(..)` returning `()`, this test stops compiling.
+    #[test]
+    fn sink_error_is_surfaced_and_not_swallowed() {
+        struct FailingSink;
+        impl PassMetricsSink for FailingSink {
+            fn record_pass(
+                &mut self,
+                _: u32,
+                _: &str,
+                _: Option<f64>,
+                _: Option<f64>,
+            ) -> anyhow::Result<()> {
+                Err(anyhow::anyhow!("simulated DB write failure"))
+            }
+        }
+        let mut s = FailingSink;
+        let result = s.record_pass(1, "m", Some(9.0), Some(0.01));
+        assert!(result.is_err(), "failing sink must return Err");
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("simulated DB write failure"),
+            "error must propagate verbatim; got {err:?}",
+        );
     }
 
     #[test]

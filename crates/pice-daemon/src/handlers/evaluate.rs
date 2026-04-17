@@ -407,6 +407,18 @@ pub async fn run(
                 pice_core::workflow::schema::AdaptiveAlgo::Vec => "vec",
                 pice_core::workflow::schema::AdaptiveAlgo::None => "none",
             };
+            // Phase 4.1 Pass-6 Codex High #4: before this fix, a failed
+            // finalize UPDATE logged `warn!` and the handler returned
+            // success — producing a DB row with placeholder/NULL summary
+            // fields that dashboards would silently render as "pending"
+            // forever. We now capture metrics-persistence errors and
+            // surface them via the typed `ExitJsonStatus::MetricsPersistFailed`
+            // discriminant before returning. The manifest file remains the
+            // source of truth for state (per CLAUDE.md — it's crash-safe
+            // atomic-rename); the metrics DB is the audit trail. A broken
+            // audit trail with a green handler response is the exact
+            // silent-corruption surface this fix closes.
+            let mut metrics_errors: Vec<String> = Vec::new();
             if let Err(e) = metrics::store::finalize_evaluation_with_adaptive_summary(
                 &db,
                 eval_id,
@@ -419,6 +431,7 @@ pub async fn run(
                 final_total_cost_usd,
             ) {
                 tracing::warn!("failed to finalize evaluation with adaptive summary: {e}");
+                metrics_errors.push(format!("finalize_evaluation: {e}"));
             }
 
             // Seam findings attach via FK to `evaluation_id`.
@@ -472,9 +485,43 @@ pub async fn run(
                                 check = %sc.name,
                                 "failed to insert seam finding: {e}"
                             );
+                            metrics_errors.push(format!(
+                                "seam_finding[{}/{}]: {e}",
+                                layer.name, sc.name
+                            ));
                         }
                     }
                 }
+            }
+
+            // Phase 4.1 Pass-6 Codex High #4 fail-close: any metrics-persist
+            // error becomes an observable failure. The evaluation's contract
+            // result is still computed from the manifest (returned above),
+            // but the handler response reflects the persistence failure so
+            // CI pipelines treat it as a real incident rather than rolling
+            // past a ghost success.
+            if !metrics_errors.is_empty() {
+                if req.json {
+                    let value = serde_json::json!({
+                        "status": ExitJsonStatus::MetricsPersistFailed.as_str(),
+                        "errors": metrics_errors,
+                        "hint": "The adaptive loop completed but persisting results to SQLite failed. \
+                                The verification manifest at ~/.pice/state/.../manifest.json is \
+                                authoritative for state; the metrics DB is the audit trail and is \
+                                now incomplete. Inspect daemon logs for the SQLite error.",
+                    });
+                    return Ok(CommandResponse::ExitJson { code: 1, value });
+                }
+                let mut message =
+                    String::from("evaluation completed but metrics persistence failed:\n");
+                for e in &metrics_errors {
+                    message.push_str(&format!("  - {e}\n"));
+                }
+                message.push_str(
+                    "\nThe verification manifest is still authoritative; the audit trail is \
+                     incomplete. See daemon logs for the SQLite error.\n",
+                );
+                return Ok(CommandResponse::Exit { code: 1, message });
             }
         }
 

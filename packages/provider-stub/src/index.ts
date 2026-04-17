@@ -101,11 +101,24 @@ export class StubProvider extends BaseProvider {
   }
 
   getCapabilities(): ProviderCapabilities {
+    // Phase 4.1: stub emits deterministic per-pass `costUsd` on
+    // `evaluate/create` responses (see PICE_STUB_COSTS env var), so it
+    // satisfies the adaptive-budget capability gate by default.
+    //
+    // Pass-6 Codex Critical #1 regression harness: setting
+    // `PICE_STUB_COST_TELEMETRY_OFF=1` flips the capability to `false`,
+    // simulating a legacy provider (e.g. production provider-claude-code
+    // / provider-codex as of this commit) that does not emit `costUsd`.
+    // The daemon's adaptive-budget gate in `stack_loops.rs` must fail
+    // closed in that case rather than silently running on synthetic
+    // `budget_usd / max_passes` seed spend.
+    const telemetryOff = process.env['PICE_STUB_COST_TELEMETRY_OFF'] === '1';
     return {
       workflow: true,
       evaluation: true,
       agentTeams: false,
       models: ['stub-echo'],
+      costTelemetry: !telemetryOff,
     };
   }
 

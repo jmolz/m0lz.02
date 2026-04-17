@@ -236,7 +236,7 @@ impl crate::orchestrator::PassMetricsSink for DbBackedPassSink {
         model: &str,
         score: Option<f64>,
         cost_usd: Option<f64>,
-    ) {
+    ) -> anyhow::Result<()> {
         let row = PassEventRow {
             pass_index,
             model,
@@ -246,6 +246,12 @@ impl crate::orchestrator::PassMetricsSink for DbBackedPassSink {
         // Mutex poisoning is recoverable — a prior panic elsewhere left the
         // mutex poisoned but the DB state is still valid for writes.
         let guard = self.db.lock().unwrap_or_else(|p| p.into_inner());
+        // Phase 4.1 Pass-6 Codex High #3: insert errors propagate to the
+        // adaptive loop, which turns them into `LayerStatus::Failed` via
+        // `LayerAdaptiveResult::RuntimeError`. We still emit a structured
+        // warn log with the evaluation_id + pass_index so operators have
+        // the same forensic breadcrumb the old fail-open path produced —
+        // just with a non-swallowing exit path attached.
         if let Err(e) = insert_pass_event(&guard, self.evaluation_id, &row) {
             tracing::warn!(
                 evaluation_id = self.evaluation_id,
@@ -253,7 +259,9 @@ impl crate::orchestrator::PassMetricsSink for DbBackedPassSink {
                 model,
                 "failed to persist pass_event: {e}"
             );
+            return Err(e);
         }
+        Ok(())
     }
 }
 

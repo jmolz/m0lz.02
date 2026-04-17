@@ -202,6 +202,33 @@ impl Drop for StubMidLoopErrorGuard {
     }
 }
 
+/// Phase 4.1 Pass-6 regression helper — Codex Critical #1 (synthetic budget
+/// on cost-blind providers). Sets `PICE_STUB_COST_TELEMETRY_OFF=1` so the
+/// stub's `getCapabilities()` returns `costTelemetry: false`, simulating a
+/// legacy / production provider that does not emit `costUsd`. Bundles the
+/// normal `PICE_STUB_SCORES` so the loop COULD run if the gate were absent
+/// — that way the test catches regressions where the gate is removed or
+/// mis-scoped.
+struct StubNoCostTelemetryGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl StubNoCostTelemetryGuard {
+    fn new(scores: &str) -> Self {
+        let guard = stub_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("PICE_STUB_SCORES", scores);
+        std::env::set_var("PICE_STUB_COST_TELEMETRY_OFF", "1");
+        Self { _guard: guard }
+    }
+}
+
+impl Drop for StubNoCostTelemetryGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("PICE_STUB_SCORES");
+        std::env::remove_var("PICE_STUB_COST_TELEMETRY_OFF");
+    }
+}
+
 // ─── Shared helpers ─────────────────────────────────────────────────────────
 
 fn git_init(dir: &Path) {
@@ -475,6 +502,134 @@ async fn budget_halts_before_confidence() {
         backend.passes.len() <= 2,
         "budget should halt within ≤2 passes; got {}",
         backend.passes.len()
+    );
+}
+
+// ─── Test 3b: Adaptive budget requires provider cost_telemetry capability ──
+
+/// Phase 4.1 Pass-6 Codex Critical #1 regression: when the primary provider
+/// declares `costTelemetry: false` and the workflow sets `budget_usd > 0`,
+/// the daemon MUST fail closed rather than run the loop on `budget_usd /
+/// max_passes` synthetic seed debits. Without this gate the user sees a
+/// "budget halt" that never reflects real spend — the exact failure mode
+/// flagged at `adaptive_loop.rs:291-385`.
+#[tokio::test]
+async fn adaptive_budget_fails_closed_when_provider_lacks_cost_telemetry() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    // budget_usd = 1.0 (> 0 → gate applies). Scores given so the loop would
+    // otherwise run cleanly — if the gate is silently bypassed, the test
+    // would go green on the wrong signal. The gate must fire BEFORE any
+    // pass runs, so we expect zero passes recorded.
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::BayesianSprt, 0.90, 5, 1.0, None);
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+
+    let _stub = StubNoCostTelemetryGuard::new("9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01");
+
+    let mut sink = NullPassSink;
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap();
+
+    // Gate fires in `run_adaptive_layer_inner` before any pass — the layer
+    // routes through `LayerAdaptiveResult::RuntimeError` to `LayerStatus::Failed`
+    // with the capability message preserved in `halted_by` (prefixed
+    // `runtime_error:` by `runtime_failed_layer_result`). The manifest shape
+    // requires at least one pass row, so a single placeholder with
+    // `model = "runtime-error"` is present — it must NOT be a real scored
+    // pass (score must be None).
+    assert_eq!(
+        backend.status,
+        LayerStatus::Failed,
+        "capability gate must fail-close; got {:?}",
+        backend.status
+    );
+    let halted = backend.halted_by.as_deref().unwrap_or("");
+    assert!(
+        halted.starts_with("runtime_error:") && halted.contains("costTelemetry"),
+        "halted_by should be `runtime_error:` wrapper referencing costTelemetry; got {halted:?}"
+    );
+    assert_eq!(
+        backend.passes.len(),
+        1,
+        "runtime_failed_layer_result inserts exactly one placeholder row",
+    );
+    let placeholder = &backend.passes[0];
+    assert_eq!(
+        placeholder.model, "runtime-error",
+        "placeholder must use the `runtime-error` marker, not a real provider model",
+    );
+    assert!(
+        placeholder.score.is_none(),
+        "gate must fire BEFORE any scoring call; placeholder score must be None",
+    );
+    assert!(
+        placeholder.cost_usd.is_none(),
+        "no real pass ran, so no cost should be attributed to the placeholder",
+    );
+}
+
+/// Phase 4.1 Pass-6 counterpart: `budget_usd = 0` disables budget
+/// enforcement, so the capability gate must NOT fire even on a provider
+/// without cost telemetry. This is the explicit escape hatch for teams
+/// that want adaptive halting (SPRT/VEC) without financial enforcement
+/// on providers that haven't wired `costUsd` yet.
+#[tokio::test]
+async fn adaptive_zero_budget_bypasses_cost_telemetry_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    // budget_usd = 0.0 → gate inert. Loop runs; SPRT accepts on high scores.
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::BayesianSprt, 0.90, 5, 0.0, None);
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+
+    let _stub = StubNoCostTelemetryGuard::new("9.5,0.0;9.5,0.0;9.5,0.0;9.5,0.0;9.5,0.0");
+
+    let mut sink = NullPassSink;
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .unwrap();
+
+    // Without budget enforcement the loop runs to SPRT acceptance. The gate
+    // must NOT have fired — any Failed status with a `costTelemetry`-flavored
+    // halted_by would indicate the gate over-triggered.
+    let halted = backend.halted_by.as_deref().unwrap_or("");
+    assert!(
+        !halted.contains("costTelemetry"),
+        "gate must not fire when budget_usd == 0; got halted_by={halted:?}"
+    );
+    assert!(
+        !backend.passes.is_empty(),
+        "loop should run at least one pass when gate is inert",
     );
 }
 

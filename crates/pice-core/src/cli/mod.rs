@@ -115,6 +115,17 @@ pub enum ExitJsonStatus {
     /// exhaustion, or a failed seam check). Phase 4 contract criterion #11
     /// (CLI exit-code routing) locks this wire form.
     EvaluationFailed,
+    /// `pice evaluate <plan> --json` — the evaluation loop completed but
+    /// persisting the result (final `evaluations` summary UPDATE or a
+    /// `pass_events` insert) failed. Phase 4.1 Pass-6 Codex High #4 fix:
+    /// this was previously swallowed into a `warn!` log and the handler
+    /// returned success, producing a manifest that looked green while the
+    /// DB carried placeholder/NULL summary fields. We now route it through
+    /// the same typed-discriminant path as other structured failures so
+    /// dashboards can distinguish "evaluation failed on contract grading"
+    /// from "evaluation succeeded but metrics didn't land" — both have
+    /// operator-observable consequences but very different remediations.
+    MetricsPersistFailed,
 }
 
 impl ExitJsonStatus {
@@ -130,6 +141,7 @@ impl ExitJsonStatus {
             Self::SeamFloorViolation => "seam-floor-violation",
             Self::MergedSeamValidationFailed => "merged-seam-validation-failed",
             Self::EvaluationFailed => "evaluation-failed",
+            Self::MetricsPersistFailed => "metrics-persist-failed",
         }
     }
 }
@@ -591,6 +603,7 @@ mod tests {
             ExitJsonStatus::SeamFloorViolation,
             ExitJsonStatus::MergedSeamValidationFailed,
             ExitJsonStatus::EvaluationFailed,
+            ExitJsonStatus::MetricsPersistFailed,
         ];
         for variant in &all_variants {
             let serde_output = serde_json::to_string(variant).unwrap();
