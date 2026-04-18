@@ -303,20 +303,55 @@ pub async fn run_adaptive_passes(
         // all four locations agree — and when the provider reported a
         // valid cost, the debited value IS `primary_cost`, so legacy
         // behavior is unchanged.
+        // Compute the debited cost WITHOUT mutating cost_stats or
+        // accumulated_cost yet — see the write-ahead ordering note below.
         let fallback_seed = ctx.budget_usd / ctx.max_passes as f64;
-        let primary_debited_cost: Option<f64> = match primary_cost {
-            Some(c) if CostStats::validate_nonnegative(c).is_ok() => {
-                cost_stats.observe(c);
-                accumulated_cost += c;
-                Some(c)
-            }
-            _ => {
-                // Unknown/invalid cost — debit the seed so budget stays honored.
-                cost_stats.observe(fallback_seed);
-                accumulated_cost += fallback_seed;
-                Some(fallback_seed)
-            }
+        let (primary_debited_cost, primary_observed_cost): (Option<f64>, f64) = match primary_cost {
+            Some(c) if CostStats::validate_nonnegative(c).is_ok() => (Some(c), c),
+            _ => (Some(fallback_seed), fallback_seed),
         };
+
+        // ── Persist FIRST, then mutate in-memory state ──────────────
+        // Phase 4.1 Pass-7 Codex High #3: the sink is the audit-trail
+        // ground truth for `SUM(pass_events.cost_usd)`. Before this fix,
+        // `passes.push` + `accumulated_cost += c` ran BEFORE the sink,
+        // and the sink errored via `?` — which unwound the loop. The
+        // caller rebuilt the layer as a `runtime-error` placeholder with
+        // zero passes and no cost, discarding already-persisted earlier
+        // passes that HAD landed in `pass_events`. Σ(pass_events) then
+        // diverged from the manifest's `total_cost_usd`, re-opening the
+        // reconciliation hole Pass-3 Codex High #3 closed.
+        //
+        // Write-ahead logging pattern: persist to the durable store
+        // first. If the persist fails, no in-memory mutation has
+        // happened, so manifest state at pass N matches sink state at
+        // pass N (both reflect "pass N did not land"). `break` into the
+        // `halted_by_runtime_error` capture path — mirrors the
+        // provider-error handling at line 260-266 — preserves
+        // passes 1..N-1 intact on both sides. Downstream routing via
+        // `runtime_error:` prefix sends the layer to `LayerStatus::Failed`
+        // in `build_adaptive_layer_result`.
+        //
+        // Sink still runs BEFORE the halt dispatcher — the halt check
+        // happens at the bottom of the iteration, after both primary
+        // and (optionally) adversarial have persisted. A budget-halted
+        // loop still records the triggering pass cost.
+        if let Err(e) = sink
+            .record_pass(
+                pass_index,
+                &primary_model_name,
+                primary_score,
+                primary_debited_cost,
+            )
+            .context("failed to persist primary pass_event")
+        {
+            halted_by_runtime_error = Some(format!("runtime_error:metrics_persist_failed:{e}"));
+            break;
+        }
+
+        // Persist succeeded — commit in-memory state.
+        cost_stats.observe(primary_observed_cost);
+        accumulated_cost += primary_observed_cost;
 
         let primary_pr = PassResult {
             index: pass_index,
@@ -331,26 +366,6 @@ pub async fn run_adaptive_passes(
                 .unwrap_or_default(),
         };
         passes.push(primary_pr.clone());
-
-        // Sink BEFORE halt decision — crash-safety invariant.
-        // Write the DEBITED value so SUM(pass_events.cost_usd) matches
-        // evaluations.final_total_cost_usd even when the provider's reported
-        // cost was missing/invalid and we fell back to the seed.
-        //
-        // Phase 4.1 Pass-6 Codex High #3: sink errors are fatal. Before the
-        // trait change, a failed SQLite insert logged and continued, leaving
-        // the loop to charge cost in memory against rows that never landed.
-        // Propagating via `?` routes the failure through the adaptive loop's
-        // standard `Result` exit → `LayerAdaptiveResult::RuntimeError`
-        // → `LayerStatus::Failed` with the SQLite error surfaced to the
-        // operator.
-        sink.record_pass(
-            pass_index,
-            &primary_model_name,
-            primary_score,
-            primary_debited_cost,
-        )
-        .context("failed to persist primary pass_event")?;
 
         // ── Adversarial provider (ADTS only) ─────────────────────────
         let mut adversarial_score: Option<f64> = None;
@@ -396,18 +411,35 @@ pub async fn run_adaptive_passes(
                 // flows into BOTH the manifest `PassResult.cost_usd` AND
                 // the sink (pass_events), keeping reconciliation intact
                 // (Pass-3 Codex High #3 fix).
-                let adv_debited_cost: Option<f64> = match adv_cost {
-                    Some(c) if CostStats::validate_nonnegative(c).is_ok() => {
-                        cost_stats.observe(c);
-                        accumulated_cost += c;
-                        Some(c)
-                    }
-                    _ => {
-                        cost_stats.observe(fallback_seed);
-                        accumulated_cost += fallback_seed;
-                        Some(fallback_seed)
-                    }
+                //
+                // Pass-7 Codex High #3: compute debited cost WITHOUT mutating
+                // state; persist first; then mutate. See the primary-path
+                // write-ahead comment above for the full rationale.
+                let (adv_debited_cost, adv_observed_cost): (Option<f64>, f64) = match adv_cost {
+                    Some(c) if CostStats::validate_nonnegative(c).is_ok() => (Some(c), c),
+                    _ => (Some(fallback_seed), fallback_seed),
                 };
+
+                // Pass-7 Codex High #3: persist to the sink BEFORE pushing
+                // the pass to the manifest and mutating cost state. A sink
+                // failure now breaks cleanly with no manifest-vs-sink drift
+                // for this pass (both sides reflect "pass N adversarial did
+                // not land"). Primary persistence for this pass already
+                // succeeded above; its passes[] entry and cost bookkeeping
+                // stay intact. Halt string prefix `runtime_error:` routes
+                // the layer to `Failed` via `build_adaptive_layer_result`.
+                if let Err(e) = sink
+                    .record_pass(pass_index, &adv_model_name, adv_score, adv_debited_cost)
+                    .context("failed to persist adversarial pass_event")
+                {
+                    halted_by_runtime_error =
+                        Some(format!("runtime_error:metrics_persist_failed:{e}"));
+                    break;
+                }
+
+                // Persist succeeded — commit in-memory state.
+                cost_stats.observe(adv_observed_cost);
+                accumulated_cost += adv_observed_cost;
 
                 passes.push(PassResult {
                     index: pass_index,
@@ -417,8 +449,6 @@ pub async fn run_adaptive_passes(
                     timestamp: chrono::Utc::now().to_rfc3339(),
                     findings: adv_out.result.summary.map(|s| vec![s]).unwrap_or_default(),
                 });
-                sink.record_pass(pass_index, &adv_model_name, adv_score, adv_debited_cost)
-                    .context("failed to persist adversarial pass_event")?;
             }
         }
 

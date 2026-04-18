@@ -11,6 +11,33 @@ use crate::metrics;
 use crate::orchestrator::{ProviderOrchestrator, StreamSink};
 use crate::server::router::DaemonContext;
 
+/// Build the `MetricsPersistFailed` response in either JSON or text mode.
+/// Shared by the startup DB-open / header-insert paths (Pass-7) and the
+/// post-evaluation finalize / seam-finding paths (Pass-6). Exit code is
+/// 1 — this is a persistence failure, not a contract failure (exit 2).
+fn metrics_persist_failed_response(json_mode: bool, errors: Vec<String>) -> CommandResponse {
+    if json_mode {
+        let value = json!({
+            "status": ExitJsonStatus::MetricsPersistFailed.as_str(),
+            "errors": errors,
+            "hint": "Metrics persistence failed. The verification manifest at \
+                     ~/.pice/state/.../manifest.json is authoritative for state; \
+                     the metrics DB is the audit trail. Inspect daemon logs for \
+                     the SQLite error.",
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    let mut message = String::from("evaluation halted: metrics persistence failed:\n");
+    for e in &errors {
+        message.push_str(&format!("  - {e}\n"));
+    }
+    message.push_str(
+        "\nThe verification manifest is authoritative; the audit trail is \
+         incomplete. See daemon logs for the SQLite error.\n",
+    );
+    CommandResponse::Exit { code: 1, message }
+}
+
 pub async fn run(
     req: EvaluateRequest,
     ctx: &DaemonContext,
@@ -266,11 +293,30 @@ pub async fn run(
         // `metrics::store`.
         use std::sync::{Arc, Mutex};
         let normalized_path = metrics::normalize_plan_path(&plan.path, project_root);
+
+        // Phase 4.1 Pass-7 Codex High #2: distinguish a real DB-open failure
+        // (corrupt file, permission error, disk) from `Ok(None)` (no DB file
+        // yet — uninitialized project, legitimate "no metrics configured"
+        // path). Before the fix, `.ok().flatten()` collapsed both cases to
+        // `None` and the handler silently degraded to `NullPassSink`,
+        // returning a green response with no `pass_events`, no `evaluations`
+        // row, and no fail-closed signal — exactly the class of silent
+        // corruption the Pass-6 `MetricsPersistFailed` fix closed on the
+        // mid-loop path. Now fail closed at startup too.
         let db_arc: Option<Arc<Mutex<metrics::db::MetricsDb>>> =
-            metrics::open_metrics_db(project_root)
-                .ok()
-                .flatten()
-                .map(|db| Arc::new(Mutex::new(db)));
+            match metrics::open_metrics_db(project_root) {
+                Ok(Some(db)) => Some(Arc::new(Mutex::new(db))),
+                // DB file simply doesn't exist → proceed without metrics.
+                // `pice init` hasn't run; this is a legitimate mode, not a
+                // failure. Adaptive loop runs with `NullPassSink`.
+                Ok(None) => None,
+                Err(e) => {
+                    let msg = format!("open_metrics_db: {e}");
+                    tracing::error!("{msg}");
+                    return Ok(metrics_persist_failed_response(req.json, vec![msg]));
+                }
+            };
+
         let eval_id = match db_arc.as_ref() {
             Some(db) => {
                 // Mutex poisoning must not crash the daemon (CLAUDE.md
@@ -288,8 +334,15 @@ pub async fn run(
                 ) {
                     Ok(id) => Some(id),
                     Err(e) => {
-                        tracing::warn!("failed to insert evaluation header: {e}");
-                        None
+                        // Pass-7 Codex High #2: header insert failure means
+                        // any later `pass_events` rows would have no FK
+                        // parent. Fail closed — previously this logged
+                        // `warn!` and set `eval_id = None`, which muted the
+                        // sink and silently returned success.
+                        drop(guard);
+                        let msg = format!("insert_evaluation_header: {e}");
+                        tracing::error!("{msg}");
+                        return Ok(metrics_persist_failed_response(req.json, vec![msg]));
                     }
                 }
             }
@@ -516,27 +569,7 @@ pub async fn run(
             // CI pipelines treat it as a real incident rather than rolling
             // past a ghost success.
             if !metrics_errors.is_empty() {
-                if req.json {
-                    let value = serde_json::json!({
-                        "status": ExitJsonStatus::MetricsPersistFailed.as_str(),
-                        "errors": metrics_errors,
-                        "hint": "The adaptive loop completed but persisting results to SQLite failed. \
-                                The verification manifest at ~/.pice/state/.../manifest.json is \
-                                authoritative for state; the metrics DB is the audit trail and is \
-                                now incomplete. Inspect daemon logs for the SQLite error.",
-                    });
-                    return Ok(CommandResponse::ExitJson { code: 1, value });
-                }
-                let mut message =
-                    String::from("evaluation completed but metrics persistence failed:\n");
-                for e in &metrics_errors {
-                    message.push_str(&format!("  - {e}\n"));
-                }
-                message.push_str(
-                    "\nThe verification manifest is still authoritative; the audit trail is \
-                     incomplete. See daemon logs for the SQLite error.\n",
-                );
-                return Ok(CommandResponse::Exit { code: 1, message });
+                return Ok(metrics_persist_failed_response(req.json, metrics_errors));
             }
         }
 

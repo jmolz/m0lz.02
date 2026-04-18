@@ -64,14 +64,25 @@ pub fn decide_halt(
     let confidence = posterior_mean_capped(passes);
 
     // ── 1. Budget gate (universal, fail-closed) ────────────────────────
-    let cold_start_seed = budget_usd / max_passes as f64;
-    let projected = cost_stats.project_next(cold_start_seed);
-    if accumulated_cost_usd + projected > budget_usd {
-        return Ok(HaltDecision {
-            halt: true,
-            reason: Some(HaltReason::Budget),
-            confidence,
-        });
+    // `budget_usd == 0.0` is the documented "no financial enforcement"
+    // escape hatch (see `.claude/plans/phase-4-adaptive-evaluation.md`
+    // Known Limitations). Skip the gate entirely in that case — otherwise
+    // any positive per-pass cost trips `cost + projected > 0` on the first
+    // post-pass check, which silently invalidates the escape hatch.
+    // Pass-7 Codex Critical #1 fix.
+    //
+    // `max_passes` still binds universally; a negative budget is already
+    // rejected via `InvalidBudget` above.
+    if budget_usd > 0.0 {
+        let cold_start_seed = budget_usd / max_passes as f64;
+        let projected = cost_stats.project_next(cold_start_seed);
+        if accumulated_cost_usd + projected > budget_usd {
+            return Ok(HaltDecision {
+                halt: true,
+                reason: Some(HaltReason::Budget),
+                confidence,
+            });
+        }
     }
 
     // ── 2. Max-passes gate (universal) ────────────────────────────────
@@ -427,5 +438,67 @@ mod tests {
         assert!(out.halt);
         assert_eq!(out.reason, Some(HaltReason::Budget));
         assert!(out.confidence <= CONFIDENCE_CEILING);
+    }
+
+    /// Pass-7 Codex Critical #1 regression: `budget_usd == 0.0` is the
+    /// documented "no financial enforcement" escape hatch. Before the fix
+    /// in `decide_halt`, the universal `accumulated + projected > budget_usd`
+    /// check evaluated `positive + positive > 0` as true after the first
+    /// pass with any real cost, halting with `halted_by = "budget"` and
+    /// invalidating the escape hatch. This test runs the dispatcher with
+    /// a positive accumulated cost and `CostStats` that has observed a
+    /// positive per-pass cost, under `budget_usd = 0.0`, and asserts no
+    /// budget halt fires — the algorithm-layer halt (or no-halt) wins.
+    #[test]
+    fn budget_usd_zero_does_not_trip_on_positive_costs() {
+        let (sprt, vc) = defaults();
+        // Two ambiguous observations — SPRT neither accepts nor rejects.
+        let passes = vec![PassObservation::Success, PassObservation::Failure];
+        // Prior passes cost $0.02 each; stats have observed that; the next
+        // projection is positive and (pre-fix) `0.04 + ~0.02 > 0` triggers.
+        let stats = stats_after(&[0.02, 0.02]);
+        let out = decide_halt(
+            AdaptiveAlgo::BayesianSprt,
+            &passes,
+            &sprt,
+            &vc,
+            0.95,
+            10,
+            0.04, // accumulated
+            &stats,
+            0.0, // escape hatch — no financial enforcement
+        )
+        .unwrap();
+        assert!(
+            out.reason != Some(HaltReason::Budget),
+            "budget_usd=0 must not produce a budget halt, got reason={:?}",
+            out.reason
+        );
+        // Ambiguous SPRT state + max_passes not reached → no halt.
+        assert!(!out.halt, "expected no halt, got decision {:?}", out);
+    }
+
+    /// Companion: with `budget_usd = 0.0` and `passes.len() >= max_passes`,
+    /// the max-passes guardrail still binds. Confirms the fix did not
+    /// weaken `max_passes` enforcement in parallel.
+    #[test]
+    fn budget_usd_zero_still_honors_max_passes() {
+        let (sprt, vc) = defaults();
+        let passes = vec![PassObservation::Success; 5];
+        let stats = stats_after(&[0.01, 0.01, 0.01, 0.01, 0.01]);
+        let out = decide_halt(
+            AdaptiveAlgo::None, // disable algorithm halts so max_passes is the only gate
+            &passes,
+            &sprt,
+            &vc,
+            0.95,
+            5,
+            0.05,
+            &stats,
+            0.0, // escape hatch
+        )
+        .unwrap();
+        assert!(out.halt);
+        assert_eq!(out.reason, Some(HaltReason::MaxPasses));
     }
 }

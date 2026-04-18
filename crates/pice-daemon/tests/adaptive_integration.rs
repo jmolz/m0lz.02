@@ -1794,6 +1794,143 @@ async fn mid_loop_runtime_error_preserves_prior_passes_and_costs() {
     );
 }
 
+// ─── Pass-7 regression: sink failures preserve manifest/sink parity ─────────
+
+/// Phase 4.1 Pass-7 Codex High #3 regression: when `sink.record_pass` fails
+/// mid-loop, the capture path must preserve reconciliation between the
+/// manifest (`passes[]`, `total_cost_usd`) and the sink (`pass_events`).
+///
+/// Before the write-ahead ordering fix, the sequence was:
+///   1. Mutate `cost_stats` and `accumulated_cost`
+///   2. Push to `passes[]`
+///   3. Call `sink.record_pass(...)` — if error, propagate via `?`
+/// A `?` on step 3 unwound the loop into a synthetic `runtime-error`
+/// placeholder with zero preserved passes and no cost — discarding earlier
+/// passes that HAD landed in `pass_events`. `SUM(pass_events) > 0` while
+/// manifest reported one fake pass with no cost, breaking Criterion 16.
+///
+/// With the write-ahead fix: persist to the sink FIRST. On success, mutate
+/// in-memory state. On failure, `break` into `halted_by_runtime_error`
+/// capture with prefix `runtime_error:metrics_persist_failed:` so the
+/// layer routes to `Failed`. Because the sink call is the commit point,
+/// a failing pass is absent from BOTH sides — no drift.
+///
+/// This test:
+///   - Pass 1: sink succeeds → both manifest and sink see pass 1 at $0.02
+///   - Pass 2: sink fails → neither manifest nor sink sees pass 2
+///   - Asserts: manifest has exactly 1 pass at $0.02, halt is
+///     `runtime_error:metrics_persist_failed:...`, layer is Failed,
+///     sink.rows.len() == 1, sum(sink) == manifest.total_cost_usd.
+#[tokio::test]
+async fn mid_loop_sink_failure_preserves_manifest_sink_parity() {
+    use pice_daemon::orchestrator::PassMetricsSink;
+
+    /// Sink that succeeds on the first `fail_from - 1` calls, then returns
+    /// `Err(...)` on call `fail_from` and every subsequent call. Records
+    /// ONLY the successful rows — matches what a real DB would hold when
+    /// the Nth INSERT throws.
+    struct FailAfterNSink {
+        rows: Vec<(u32, String, Option<f64>, Option<f64>)>,
+        calls: u32,
+        fail_from: u32,
+    }
+    impl PassMetricsSink for FailAfterNSink {
+        fn record_pass(
+            &mut self,
+            pass_index: u32,
+            model: &str,
+            score: Option<f64>,
+            cost_usd: Option<f64>,
+        ) -> anyhow::Result<()> {
+            self.calls += 1;
+            if self.calls >= self.fail_from {
+                return Err(anyhow::anyhow!(
+                    "simulated SQLite I/O error on call {}",
+                    self.calls
+                ));
+            }
+            self.rows
+                .push((pass_index, model.to_string(), score, cost_usd));
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    // Budget large enough for 3 passes; SPRT won't accept at score 7.0 early.
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::BayesianSprt, 0.95, 5, 1.0, None);
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+    let _stub = StubScoresGuard::new("7.0,0.02;7.0,0.02;7.0,0.02;7.0,0.02;7.0,0.02");
+
+    let mut sink = FailAfterNSink {
+        rows: Vec::new(),
+        calls: 0,
+        fail_from: 2, // succeed on pass 1, fail on pass 2
+    };
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .expect("backend layer missing");
+
+    assert_eq!(
+        backend.status,
+        LayerStatus::Failed,
+        "sink failure must fail the layer; halted_by={:?}",
+        backend.halted_by,
+    );
+    let halted = backend.halted_by.clone().unwrap_or_default();
+    assert!(
+        halted.starts_with("runtime_error:"),
+        "halted_by must route through runtime_error prefix; got {halted:?}",
+    );
+    assert!(
+        halted.contains("metrics_persist_failed"),
+        "halted_by must carry the metrics_persist_failed discriminant; got {halted:?}",
+    );
+
+    // Core invariant: manifest.passes and sink.rows both contain EXACTLY
+    // the passes that fully landed (pass 1 only). The failed pass 2 is
+    // absent from both sides — that's the reconciliation guarantee.
+    assert_eq!(
+        backend.passes.len(),
+        1,
+        "manifest must have exactly 1 pass (the one before sink failure); got {:?}",
+        backend.passes,
+    );
+    assert_eq!(backend.passes[0].index, 1);
+    assert_eq!(backend.passes[0].cost_usd, Some(0.02));
+    assert_eq!(sink.rows.len(), 1, "sink must also hold exactly 1 row");
+    assert_eq!(sink.rows[0].0, 1, "sink row index must match manifest");
+    assert_eq!(sink.rows[0].3, Some(0.02));
+
+    // total_cost_usd reconciliation: manifest total == Σ(sink).
+    let manifest_total = backend.total_cost_usd.unwrap_or(-1.0);
+    let sink_total: f64 = sink.rows.iter().filter_map(|r| r.3).sum();
+    assert!(
+        (manifest_total - sink_total).abs() < 1e-9,
+        "manifest total {manifest_total} must equal Σ(sink) {sink_total}",
+    );
+    assert!(
+        (manifest_total - 0.02_f64).abs() < 1e-9,
+        "manifest total must be 0.02 (pass 1 only); got {manifest_total}",
+    );
+}
+
 // ─── Pass-4 regression: zero-cost totals ship as Some(0.0), not None ─────────
 
 /// Phase 4 Pass-4 regression for Codex High — zero-cost total collapse.

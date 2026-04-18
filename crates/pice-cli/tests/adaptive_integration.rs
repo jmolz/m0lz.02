@@ -411,3 +411,112 @@ fn cli_evaluate_algo_none_respects_budget() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_layer_halted_by(&json, "budget");
 }
+
+// ─── Pass-7 Codex Critical #1: budget_usd=0 escape hatch ───────────────────
+
+/// Phase 4.1 Pass-7 Codex Critical #1 regression: `budget_usd = 0.0` is
+/// the documented "no financial enforcement" escape hatch (plan's Known
+/// Limitation for teams whose providers lack `costTelemetry`). Before the
+/// fix in `adaptive/decide.rs`, the universal `accumulated + projected
+/// > budget_usd` check evaluated `positive + positive > 0` as true after
+/// the first pass with any real cost, silently halting with
+/// `halted_by = "budget"` and invalidating the escape hatch.
+///
+/// This test drives `pice evaluate` end-to-end with `budget_usd = 0` and
+/// a stub that reports positive per-pass costs. Asserts the loop runs
+/// through to `max_passes` (not to `budget`).
+#[test]
+fn cli_evaluate_budget_zero_does_not_halt_on_positive_costs() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = setup(dir.path());
+    // `budget_usd = 0.0` → no financial enforcement. `max_passes = 3`
+    // is the only universal bound. Stub reports $0.02 per pass — pre-fix
+    // would halt at pass 1 with `budget`; post-fix runs to pass 3 and
+    // halts with `max_passes`.
+    write_workflow(dir.path(), "none", 0.90, 3, 0.0);
+
+    let output = pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STUB_SCORES", "9.5,0.02;9.5,0.02;9.5,0.02")
+        .args(["evaluate", plan.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "expected exit 0 (Pending / max_passes is not a CLI failure); stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_layer_halted_by(&json, "max_passes");
+}
+
+// ─── Pass-7 Codex High #2: DB open failure fails closed ────────────────────
+
+/// Phase 4.1 Pass-7 Codex High #2 regression: when the metrics DB path
+/// exists but cannot be opened (corrupt file, wrong type, permission
+/// error, disk full), the handler must fail closed with
+/// `ExitJsonStatus::MetricsPersistFailed` (exit 1) — not silently degrade
+/// to `NullPassSink` and return a green response.
+///
+/// Before the fix, `.ok().flatten()` collapsed `Err(_)` into `None`,
+/// indistinguishable from the legitimate "no DB file" path. Real
+/// production failure modes (corrupt SQLite, RO filesystem, disk full)
+/// returned success with no `pass_events` and no `evaluations` row —
+/// invisible to dashboards and CI.
+///
+/// The test forces failure by making the DB path a DIRECTORY instead of
+/// a file. SQLite's `open` fails on Unix with "is a directory", surfaced
+/// as an `Err` from `open_metrics_db`. The post-fix handler returns the
+/// `MetricsPersistFailed` structured response.
+#[test]
+fn cli_evaluate_corrupt_db_fails_closed_with_metrics_persist_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = setup(dir.path());
+    write_workflow(dir.path(), "bayesian_sprt", 0.90, 5, 10.0);
+
+    // Force `open_metrics_db` to return `Err`: create `.pice/metrics.db` as
+    // a DIRECTORY, not a file. SQLite's `open` surfaces this as a real
+    // failure (not "Ok(None) — no DB yet"), exercising the fail-closed path.
+    fs::create_dir_all(dir.path().join(".pice/metrics.db")).unwrap();
+
+    let output = pice_cmd()
+        .current_dir(dir.path())
+        .env(
+            "PICE_STUB_SCORES",
+            "9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001",
+        )
+        .args(["evaluate", plan.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "expected exit 1 on metrics-persist failure; got {:?}; stderr: {}; stdout: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    // JSON payload on stdout, not stderr — CLAUDE.md daemon rule.
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr_text.contains("\"status\":"),
+        "JSON response must not leak to stderr under --json; got stderr: {stderr_text}",
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must parse as JSON under --json");
+    let status = json["status"]
+        .as_str()
+        .expect("top-level status field required on metrics-persist-failed response");
+    assert_eq!(
+        status,
+        ExitJsonStatus::MetricsPersistFailed.as_str(),
+        "wire status must come from ExitJsonStatus::MetricsPersistFailed.as_str() — not a literal",
+    );
+    assert!(
+        json["errors"].is_array(),
+        "errors field must be an array of SQLite error strings",
+    );
+}
