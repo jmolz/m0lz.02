@@ -258,14 +258,26 @@ fn cli_evaluate_sprt_reject_exits_two_with_typed_status() {
     // `.claude/rules/daemon.md`, the wire form must come from
     // `ExitJsonStatus::EvaluationFailed.as_str()` — verify here so a
     // refactor that swaps to a literal mechanically fails this test.
+    //
+    // Phase 4.1 Pass-10 Codex C12 fix: Pass-9 round allowed a disjunctive
+    // fallback (`halted_by` check when `status` was missing). The handler
+    // at `evaluate.rs:663-678` ALWAYS injects the typed `status` on
+    // exit-2, so the fallback only masked a refactor that removed the
+    // typed injection. Pin to the strict single-contract assertion.
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    if let Some(status) = json["status"].as_str() {
-        assert_eq!(status, ExitJsonStatus::EvaluationFailed.as_str());
-    } else {
-        // Some response shapes embed the manifest directly without a top-level
-        // status — assert the failed-layer halt reason instead.
-        assert_layer_halted_by(&json, "sprt_rejected");
-    }
+    let status = json["status"].as_str().unwrap_or_else(|| {
+        panic!(
+            "exit-2 response MUST carry a top-level `status` field sourced from \
+             ExitJsonStatus::EvaluationFailed.as_str(). Got: {json}"
+        )
+    });
+    assert_eq!(
+        status,
+        ExitJsonStatus::EvaluationFailed.as_str(),
+        "wire status must be ExitJsonStatus::EvaluationFailed.as_str() — not a literal"
+    );
+    // AND the layer's halt reason must be `sprt_rejected` — belt-and-suspenders.
+    assert_layer_halted_by(&json, "sprt_rejected");
 }
 
 // ─── Test 3: Budget halt (exit 0 — Pending is not a CLI failure) ───────────
@@ -586,5 +598,80 @@ fn cli_evaluate_legacy_branch_corrupt_db_fails_closed_with_metrics_persist_faile
     assert!(
         has_legacy_marker,
         "legacy-branch failure must name the branch in its error string; got errors: {errors:?}",
+    );
+}
+
+// ─── Phase 4.1 Pass-10 Codex HIGH #1 — stock-defaults E2E ──────────────────
+//
+// Pass-9 Codex HIGH #1 showed that the capability gate (stack_loops.rs:584)
+// hard-fails every fresh install: shipped `workflow.yaml` had `budget_usd > 0`,
+// but the shipped `claude-code` provider does NOT declare `costTelemetry`,
+// so the gate would reject the layer at startup and block every evaluation.
+//
+// Pass-10 fix: set `budget_usd: 0.00` in every shipped defaults + preset.
+// This test is the regression guard — if a future PR raises the shipped
+// budget above zero WITHOUT first landing cost-telemetry on the primary
+// provider, this test fails and the bug surfaces in CI instead of at the
+// first user's terminal.
+//
+// The test loads the ACTUAL shipped `templates/pice/workflow.yaml` contents
+// (not a test-local fixture), swaps only the `provider: ...` config to
+// point at a stub with `costTelemetry: false`, and asserts `pice evaluate`
+// succeeds. This is the end-to-end shape of a fresh install running
+// adaptive evaluation against a cost-telemetry-less provider.
+
+#[test]
+fn cli_evaluate_stock_defaults_workflow_does_not_trip_capability_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = setup(dir.path());
+
+    // Copy the SHIPPED workflow.yaml verbatim. If someone raises `budget_usd`
+    // in templates/pice/workflow.yaml without also shipping costTelemetry,
+    // the gate trips here and the test fails loudly.
+    let shipped_yaml = include_str!("../../../templates/pice/workflow.yaml").to_string();
+    // Rebind the default model string to the stub (the stub only advertises
+    // one model). Everything else — budget, cost_cap, defaults, presets —
+    // stays as it ships. Use a simple token replace, not a YAML rewrite,
+    // to keep the test's assumptions minimal.
+    let shipped_yaml = shipped_yaml.replace("model: sonnet", "model: stub-model");
+    fs::create_dir_all(dir.path().join(".pice")).unwrap();
+    fs::write(dir.path().join(".pice/workflow.yaml"), shipped_yaml).unwrap();
+
+    let output = pice_cmd()
+        .current_dir(dir.path())
+        .env(
+            "PICE_STUB_SCORES",
+            "9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001",
+        )
+        // CRITICAL: force the stub to declare costTelemetry=false,
+        // simulating the shipped claude-code / codex providers. If the
+        // shipped budget_usd were positive, the gate would fail-close
+        // here and exit nonzero.
+        .env("PICE_STUB_COST_TELEMETRY_OFF", "1")
+        .args(["evaluate", plan.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "fresh install (stock-shipped workflow.yaml + non-cost-telemetry \
+         provider) MUST exit 0. If this fails with a capability-gate error, \
+         someone raised `budget_usd` in templates/pice/workflow.yaml without \
+         shipping cost telemetry — revert or fix. stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+
+    // The response must NOT contain the capability-gate error marker.
+    let stdout_text = String::from_utf8_lossy(&output.stdout);
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stdout_text.contains("does not declare costTelemetry"),
+        "capability gate was tripped — stdout: {stdout_text}",
+    );
+    assert!(
+        !stderr_text.contains("does not declare costTelemetry"),
+        "capability gate was tripped — stderr: {stderr_text}",
     );
 }

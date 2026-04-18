@@ -89,7 +89,19 @@ pub fn validate_schema_only(cfg: &WorkflowConfig) -> ValidationReport {
         });
     }
 
-    if cfg.defaults.budget_usd < 0.0 {
+    // Phase 4.1 Pass-10 Codex MEDIUM #2: `is_finite()` first so a NaN/Inf
+    // YAML literal (`.nan` / `.inf`) surfaces as a deterministic config
+    // error at parse time, not as a runtime layer failure. NaN comparisons
+    // return false for every operator except `!=`, so the naive `< 0.0`
+    // check below would silently pass.
+    if !cfg.defaults.budget_usd.is_finite() {
+        report.errors.push(ValidationError {
+            field: "defaults.budget_usd".into(),
+            message: format!("budget_usd must be finite; got {}", cfg.defaults.budget_usd),
+            line: None,
+            column: None,
+        });
+    } else if cfg.defaults.budget_usd < 0.0 {
         report.errors.push(ValidationError {
             field: "defaults.budget_usd".into(),
             message: format!(
@@ -123,7 +135,15 @@ pub fn validate_schema_only(cfg: &WorkflowConfig) -> ValidationReport {
             }
         }
         if let Some(mc) = o.min_confidence {
-            if !(0.0..=1.0).contains(&mc) {
+            // Pass-10 Codex MEDIUM #2: finite-check first (NaN escapes range check).
+            if !mc.is_finite() {
+                report.errors.push(ValidationError {
+                    field: format!("layer_overrides.{layer}.min_confidence"),
+                    message: format!("min_confidence must be finite; got {mc}"),
+                    line: None,
+                    column: None,
+                });
+            } else if !(0.0..=1.0).contains(&mc) {
                 report.errors.push(ValidationError {
                     field: format!("layer_overrides.{layer}.min_confidence"),
                     message: format!("min_confidence must be between 0 and 1; got {mc}"),
@@ -133,7 +153,15 @@ pub fn validate_schema_only(cfg: &WorkflowConfig) -> ValidationReport {
             }
         }
         if let Some(b) = o.budget_usd {
-            if b < 0.0 {
+            // Pass-10 Codex MEDIUM #2: finite-check first (NaN escapes `<`).
+            if !b.is_finite() {
+                report.errors.push(ValidationError {
+                    field: format!("layer_overrides.{layer}.budget_usd"),
+                    message: format!("budget_usd must be finite; got {b}"),
+                    line: None,
+                    column: None,
+                });
+            } else if b < 0.0 {
                 report.errors.push(ValidationError {
                     field: format!("layer_overrides.{layer}.budget_usd"),
                     message: format!("budget_usd must be non-negative; got {b}"),
@@ -155,6 +183,30 @@ pub fn validate_schema_only(cfg: &WorkflowConfig) -> ValidationReport {
 /// daemon's pre-execution validation catch misconfigured algorithm tuning.
 fn validate_adaptive_into(cfg: &WorkflowConfig, report: &mut ValidationReport) {
     let eval = &cfg.phases.evaluate;
+
+    // Phase 4.1 Pass-10 Codex MEDIUM #2: NaN/Inf rejection for every
+    // adaptive numeric. NaN silently passes every subsequent `<=`, `>=`,
+    // `contains()` check (NaN comparisons return false), so a `.nan` YAML
+    // literal would slip through the whole validator and trip at runtime
+    // with a type-unsafe numeric operation. Surface as a config error
+    // here with the offending field named.
+    for (name, value) in [
+        ("prior_alpha", eval.sprt.prior_alpha),
+        ("prior_beta", eval.sprt.prior_beta),
+        ("accept_threshold", eval.sprt.accept_threshold),
+        ("reject_threshold", eval.sprt.reject_threshold),
+        ("divergence_threshold", eval.adts.divergence_threshold),
+        ("entropy_floor", eval.vec.entropy_floor),
+    ] {
+        if !value.is_finite() {
+            report.errors.push(ValidationError {
+                field: format!("phases.evaluate.{name}"),
+                message: format!("{name} must be finite; got {value}"),
+                line: None,
+                column: None,
+            });
+        }
+    }
 
     // SPRT: accept > reject, both positive
     if eval.sprt.accept_threshold <= eval.sprt.reject_threshold {

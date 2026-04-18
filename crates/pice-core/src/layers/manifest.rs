@@ -185,7 +185,7 @@ impl VerificationManifest {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read manifest from {}", path.display()))?;
-        let manifest: Self = serde_json::from_str(&content)
+        let mut manifest: Self = serde_json::from_str(&content)
             .with_context(|| format!("failed to parse manifest from {}", path.display()))?;
         if manifest.schema_version != SCHEMA_VERSION {
             bail!(
@@ -193,6 +193,29 @@ impl VerificationManifest {
                 manifest.schema_version,
                 SCHEMA_VERSION,
             );
+        }
+        // Phase 4.1 Pass-10 Codex MEDIUM #1: defense-in-depth ceiling clamp
+        // at the load boundary. The compute path caps `final_confidence`
+        // via `cap_confidence()` before writing, but a stale, hand-edited,
+        // or foreign-written manifest can still carry a value above the
+        // correlated-Condorcet ceiling (0.966). Clamping on ingest makes
+        // EVERY downstream consumer (status handler, dashboard, CI
+        // adapter) observe the invariant without having to remember to
+        // clamp at their own report boundary. A warning surfaces the
+        // discrepancy rather than silently swallowing it.
+        for layer in &mut manifest.layers {
+            if let Some(conf) = layer.final_confidence {
+                if conf > crate::adaptive::CONFIDENCE_CEILING {
+                    tracing::warn!(
+                        layer = %layer.name,
+                        found = conf,
+                        ceiling = crate::adaptive::CONFIDENCE_CEILING,
+                        path = %path.display(),
+                        "manifest layer.final_confidence exceeds ceiling; clamping on load",
+                    );
+                    layer.final_confidence = Some(crate::adaptive::cap_confidence(conf));
+                }
+            }
         }
         Ok(manifest)
     }

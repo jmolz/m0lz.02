@@ -761,7 +761,7 @@ See E2E Validation Steps above. Also verify:
     {
       "name": "Protocol roundtrip — pass_index, cost_usd, confidence, fresh_context, effort_override serialize as camelCase and roundtrip through JSON on both Rust and TS sides; unknown fields in the response are tolerated (forward-compat) but known unknown fields in the request are rejected (deny_unknown_fields on params)",
       "threshold": 10,
-      "validation": "cargo test -p pice-protocol evaluate_create_params_with_pass_index_roundtrips evaluate_create_result_with_cost_and_confidence_roundtrips evaluate_create_params_rejects_unknown_field; AND pnpm --filter @pice/provider-protocol test -- --grep=\"passIndex|costUsd|confidence|freshContext|effortOverride\""
+      "validation": "cargo test -p pice-protocol evaluate_create_params_with_pass_index_roundtrips evaluate_create_result_with_cost_and_confidence_roundtrips evaluate_create_params_rejects_unknown_field; AND pnpm --filter @pice/provider-base test -- --reporter=verbose (the TS-side roundtrip tests live in `@pice/provider-base/src/__tests__/roundtrip.test.ts` — `@pice/provider-protocol` is a types-only package with no test runner. Pass-10 Codex HIGH #1 / C9 fix: Pass-9 contract targeted `@pice/provider-protocol` which has no `test` script; evaluator could not run the validation at all)"
     },
     {
       "name": "SQLite v3 migration correctness — idempotent, migrates from v1 and v2, cascades delete on evaluations FK",

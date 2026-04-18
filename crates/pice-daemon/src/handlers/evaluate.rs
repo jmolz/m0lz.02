@@ -300,6 +300,55 @@ pub async fn run(
         let _manifest_lock = ctx.manifest_lock_for(&project_namespace, &manifest_feature_id);
         let _manifest_guard = _manifest_lock.lock().await;
 
+        // Phase 4.1 Pass-10 Codex HIGH #2: acquire the cross-process
+        // advisory file lock. The Pass-6 tokio mutex above only serializes
+        // tasks WITHIN this daemon process; two separate processes (e.g.
+        // two `PICE_DAEMON_INLINE=1` CLI invocations, or a background
+        // daemon plus an inline CLI) each allocate their own mutex map
+        // and therefore race on the atomic-rename dance at
+        // `~/.pice/state/.../manifest.json`. The file lock closes that
+        // gap via POSIX `flock` / Windows `LockFileEx`.
+        //
+        // The `tokio::task::spawn_blocking` wrap is intentional: `flock`
+        // is a blocking syscall that stalls the worker thread until the
+        // lock is released. On a multi-threaded tokio runtime a stalled
+        // worker degrades throughput but does not deadlock. Running the
+        // call on the blocking pool keeps the main runtime responsive
+        // to unrelated tasks (e.g. another feature's `evaluate` or a
+        // `daemon/health` probe).
+        let ctx_for_lock = {
+            let feature_id = manifest_feature_id.clone();
+            let project_root = ctx.project_root().clone();
+            (feature_id, project_root)
+        };
+        let _manifest_file_lock = {
+            let (feature_id, project_root) = ctx_for_lock;
+            tokio::task::spawn_blocking(move || {
+                // Re-derive the path from project_root instead of threading
+                // &DaemonContext through spawn_blocking — keeps lifetimes
+                // simple. Matches `VerificationManifest::manifest_path_for`.
+                use fs2::FileExt;
+                use pice_core::layers::manifest::VerificationManifest;
+                use std::fs::OpenOptions;
+                let manifest_path =
+                    VerificationManifest::manifest_path_for(&feature_id, &project_root)?;
+                if let Some(parent) = manifest_path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let lock_path = manifest_path.with_extension("manifest.lock");
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&lock_path)?;
+                file.lock_exclusive()?;
+                anyhow::Ok(file)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking joined with error: {e}"))??
+        };
+
         // Phase 4: create the evaluation header BEFORE running stack loops.
         // This gives the adaptive loop a valid `evaluation_id` to FK-attach
         // `pass_events` to, persisted BEFORE each halt-decision check. The

@@ -1190,6 +1190,55 @@ async fn determinism_across_two_identical_runs() {
         assert_eq!(a.score, b.score);
         assert_eq!(a.cost_usd, b.cost_usd);
     }
+
+    // Phase 4.1 Pass-10 Codex C15 fix: exhaustive excluded-field assertion.
+    // The per-field asserts above (`halted_by`, `passes_used`, `final_confidence`,
+    // `total_cost_usd`, `escalation_events`, `passes[].{index,model,score,cost_usd}`)
+    // only cover fields we remembered to enumerate. If a future refactor
+    // adds a new non-deterministic field to `LayerResult` or `PassResult`
+    // (e.g. a uuid, a request_id, a wall-clock-derived rate), the per-field
+    // checks would silently pass.
+    //
+    // Close the hole by serializing BOTH layers to JSON, stripping ONLY
+    // the documented non-deterministic fields (`timestamp` on `LayerResult`
+    // and on `PassResult`), and asserting byte-equality of the remainder.
+    // Any new field added to the struct gets compared automatically —
+    // non-determinism surfaces as a test failure against this assertion.
+    fn strip_timestamps(mut v: serde_json::Value) -> serde_json::Value {
+        use serde_json::Value;
+        fn walk(v: &mut Value) {
+            match v {
+                Value::Object(map) => {
+                    // Timestamps are the ONLY permitted non-deterministic fields per
+                    // contract criterion #15. Any other key mismatch is a bug.
+                    map.remove("timestamp");
+                    map.remove("started_at");
+                    map.remove("finished_at");
+                    for (_, child) in map.iter_mut() {
+                        walk(child);
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        walk(item);
+                    }
+                }
+                _ => {}
+            }
+        }
+        walk(&mut v);
+        v
+    }
+    let json_a = strip_timestamps(serde_json::to_value(&backend_a).unwrap());
+    let json_b = strip_timestamps(serde_json::to_value(&backend_b).unwrap());
+    assert_eq!(
+        json_a, json_b,
+        "determinism violated — two identical runs produced different \
+         manifest layer JSON after stripping timestamps. If this test newly \
+         fails after adding a field to LayerResult/PassResult, either make \
+         the field deterministic OR add it to `strip_timestamps` with an \
+         explicit justification (contract criterion #15)."
+    );
 }
 
 // ─── Test 9b: Determinism under ADTS ─────────────────────────────────────

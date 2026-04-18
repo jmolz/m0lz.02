@@ -15,7 +15,8 @@ defaults:
   min_confidence: 0.96
   max_passes: 8
   model: opus
-  budget_usd: 1.50
+  # Opt-out until cost-telemetry providers ship (Pass-9 HIGH #1).
+  budget_usd: 0.00
   cost_cap_behavior: halt
 
 phases:

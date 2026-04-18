@@ -14,8 +14,17 @@ defaults:
   min_confidence: 0.90      # minimum correlated-Condorcet confidence to pass
   max_passes: 5             # hard ceiling; adaptive algorithms usually halt earlier
   model: sonnet             # primary workflow/evaluator model family
-  budget_usd: 2.00          # per-layer cost cap; see cost_cap_behavior
-  cost_cap_behavior: halt   # halt | warn | continue
+  # Per-layer cost cap. The framework default is 0 (no financial
+  # enforcement) because budget enforcement requires a provider that
+  # declares `costTelemetry: true`. The shipped `claude-code` and
+  # `codex` providers do not emit real per-pass cost telemetry yet, so
+  # a positive default would trip the capability gate at layer start
+  # and block every fresh install (Phase 4.1 Pass-9 Codex HIGH #1).
+  # To opt-in: set a positive value AND ensure every provider you use
+  # declares `costTelemetry: true` — otherwise `pice evaluate` will
+  # fail closed at layer start with a clear error.
+  budget_usd: 0.00
+  cost_cap_behavior: halt   # halt | warn | continue (applies when budget_usd > 0)
 
 phases:
   plan:

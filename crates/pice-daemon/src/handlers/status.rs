@@ -189,7 +189,17 @@ fn load_layer_snapshot(
                 layer_json["halted_by"] = json!(halted_by);
             }
             if let Some(conf) = layer.final_confidence {
-                layer_json["final_confidence"] = json!(conf);
+                // Phase 4.1 Pass-10 Codex MEDIUM #1: defense-in-depth clamp.
+                // The compute path (`adaptive_loop.rs`) caps confidence
+                // via `cap_confidence()` before writing the manifest, but
+                // the report boundary was re-emitting whatever was on
+                // disk without re-clamping. A stale, hand-edited, or
+                // schema-drifted manifest with `final_confidence > 0.966`
+                // would then leak past the ceiling invariant at the
+                // `pice status` output — inverting the compute-side
+                // guarantee. Clamping here makes the invariant hold at
+                // EVERY trust boundary, not just at compute time.
+                layer_json["final_confidence"] = json!(pice_core::adaptive::cap_confidence(conf));
             }
             if let Some(cost) = layer.total_cost_usd {
                 layer_json["total_cost_usd"] = json!(cost);

@@ -15,7 +15,8 @@ defaults:
   min_confidence: 0.90
   max_passes: 2
   model: sonnet
-  budget_usd: 1.00
+  # Opt-out until cost-telemetry providers ship (Pass-9 HIGH #1).
+  budget_usd: 0.00
   cost_cap_behavior: halt
   max_parallelism: 1
 

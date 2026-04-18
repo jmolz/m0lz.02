@@ -406,3 +406,154 @@ async fn concurrent_evaluations_on_shared_db_have_disjoint_pass_events() {
         assert_eq!(*pi, (i + 1) as i64, "eval-B pass_index not contiguous");
     }
 }
+
+// ─── Phase 4.1 Pass-10 Codex HIGH #2 + C17 — same-feature concurrency ────────
+//
+// The earlier test above uses DIFFERENT feature IDs, so it never contends
+// on the same lock. These tests exercise the SAME `{project_hash, feature_id}`
+// pair — the case Codex HIGH #2 identified as untested by the Pass-9 suite.
+//
+// Two-dimensional coverage:
+// - Same-process: the Pass-6 in-process `TokioMutex` must serialize two
+//   concurrent tokio tasks that both ask for the manifest lock.
+// - Cross-process: the Pass-10 file lock (POSIX `flock` / Windows
+//   `LockFileEx`) must block a second fd on the same lock path. We
+//   simulate a second process by opening a second file handle from a
+//   blocking thread — `fs2` layers on top of `flock`, which is per-file-
+//   description, not per-process, so a second fd is indistinguishable
+//   from a second process for the blocking semantic.
+
+use pice_daemon::server::router::DaemonContext;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_feature_manifest_lock_serializes_concurrent_tasks() {
+    // Prove the in-process lock's identity semantics: two calls with the
+    // SAME (project_hash, feature_id) return the SAME `Arc<TokioMutex>`,
+    // so two concurrent holders serialize. If they ever interleaved (e.g.
+    // the map keyed incorrectly), the sentinel-check at the bottom
+    // would observe out-of-order timestamps.
+    let ctx = DaemonContext::inline();
+    let (hash, feature) = ("proj-hash-abc", "same-feature");
+
+    let lock_1 = ctx.manifest_lock_for(hash, feature);
+    let lock_2 = ctx.manifest_lock_for(hash, feature);
+
+    // Same Arc identity — critical invariant. If the map keyed on something
+    // derived (e.g. hash+feature hashed) and collisions produced distinct
+    // Arcs, serialization would silently break.
+    assert!(
+        Arc::ptr_eq(&lock_1, &lock_2),
+        "manifest_lock_for must return the SAME Arc for identical (hash, feature) pairs"
+    );
+
+    // Runtime proof: spawn two tasks that both acquire the lock and
+    // verify only one holds at a time. Using atomic counters rather than
+    // sleeps so the test is fast and deterministic.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let holders = Arc::new(AtomicUsize::new(0));
+    let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let lock = ctx.manifest_lock_for(hash, feature);
+            let holders = holders.clone();
+            let max_concurrent = max_concurrent.clone();
+            tokio::spawn(async move {
+                let _g = lock.lock().await;
+                let held = holders.fetch_add(1, Ordering::SeqCst) + 1;
+                // Record any instant where >1 task holds the lock.
+                max_concurrent.fetch_max(held, Ordering::SeqCst);
+                // Yield so another task GETS a chance to violate the invariant
+                // if the lock were broken — the yield forces the scheduler
+                // to re-examine the ready queue.
+                tokio::task::yield_now().await;
+                holders.fetch_sub(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+    for t in tasks {
+        t.await.unwrap();
+    }
+    assert_eq!(
+        max_concurrent.load(Ordering::SeqCst),
+        1,
+        "in-process manifest lock failed to serialize same-feature tasks"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_feature_different_features_hold_distinct_locks() {
+    // Negative control: two DIFFERENT features on the same project hash
+    // must NOT share a lock (otherwise `pice evaluate feat-a` + `pice
+    // evaluate feat-b` would needlessly serialize).
+    let ctx = DaemonContext::inline();
+    let lock_a = ctx.manifest_lock_for("proj", "feat-a");
+    let lock_b = ctx.manifest_lock_for("proj", "feat-b");
+    assert!(
+        !Arc::ptr_eq(&lock_a, &lock_b),
+        "distinct features must return distinct Arc<TokioMutex>"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_file_lock_blocks_second_acquirer() {
+    // Phase 4.1 Pass-10 Codex HIGH #2: cross-process file lock. The
+    // semantic we care about — "a second acquirer on the same path must
+    // block until the first releases" — is verified by opening two file
+    // descriptors on the same lock file. `fs2` uses `flock(2)` on Unix
+    // which is per-file-description, so a second fd from the same
+    // process is indistinguishable from a second process.
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lock_path = tmp.path().join("feat.manifest.lock");
+    std::fs::write(&lock_path, b"").unwrap();
+
+    let holder_released = Arc::new(AtomicBool::new(false));
+    let holder_released_inner = holder_released.clone();
+    let lock_path_clone = lock_path.clone();
+
+    // Task 1: acquire the lock and hold it for ~100ms.
+    let holder = tokio::task::spawn_blocking(move || {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path_clone)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        holder_released_inner.store(true, Ordering::SeqCst);
+        // Drop releases the flock. Explicit drop for clarity.
+        drop(file);
+    });
+
+    // Give task 1 a head-start so its lock is held before task 2 tries.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    let holder_released_outer = holder_released.clone();
+    let lock_path_outer = lock_path.clone();
+
+    // Task 2: blocking acquire — must NOT succeed until task 1 releases.
+    let waiter = tokio::task::spawn_blocking(move || {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path_outer)
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        // Invariant: by the time this lock_exclusive() returns, task 1
+        // must have already set `holder_released`. Anything else means
+        // the file lock let two holders in simultaneously.
+        let released = holder_released_outer.load(Ordering::SeqCst);
+        assert!(
+            released,
+            "file lock did not block — second acquirer got in before the holder released"
+        );
+        drop(file);
+    });
+
+    holder.await.unwrap();
+    waiter.await.unwrap();
+}

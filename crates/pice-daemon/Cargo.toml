@@ -32,6 +32,12 @@ chrono = { workspace = true }
 reqwest = { workspace = true }
 getrandom = { workspace = true }
 subtle = { workspace = true }
+# Phase 4.1 Pass-10 Codex HIGH #2: cross-platform advisory file lock
+# (POSIX `flock()` on Unix, `LockFileEx` on Windows) for per-manifest
+# interprocess serialization. See `server/router.rs::acquire_manifest_file_lock`.
+# Scoped to `pice-daemon` only — `pice-core` stays dep-light (contract
+# criterion #14).
+fs2 = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
