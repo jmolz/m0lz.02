@@ -1347,31 +1347,29 @@ async fn cost_reconciliation_within_tolerance() {
 
 // ─── Pass-3 regression: fallback_seed cost syncs into manifest & sink ──────
 
-/// Phase 4 Pass-3 regression for Codex High #3.
+/// Phase 4 Pass-3 regression for Codex High #3, updated for Pass-8 Codex H1.
 ///
-/// When the provider reports an invalid cost (here, a negative number that
-/// the stub will faithfully round-trip but `CostStats::validate_nonnegative`
-/// rejects), the loop debits the cold-start seed (`budget_usd / max_passes`)
-/// to `accumulated_cost` as a fail-closed safety measure. Earlier Pass-2
-/// code wrote the raw invalid value to manifest `PassResult.cost_usd` AND
-/// to the sink (`pass_events.cost_usd`) while the evaluation total reflected
-/// the seed — so `SUM(passes[].cost_usd) != total_cost_usd`, and
-/// `SUM(pass_events.cost_usd) != evaluations.final_total_cost_usd`. The
-/// reconciliation invariant (Phase 4 contract criterion #16) was broken.
+/// When the provider reports an invalid cost (negative / NaN / ∞) AND
+/// `budget_usd == 0` (no financial enforcement), the loop falls back to the
+/// cold-start seed (which is also 0 under zero budget) and keeps running.
+/// The reconciliation invariant must hold on the fallback path too:
+/// `SUM(passes[].cost_usd) == total_cost_usd` and `SUM(sink rows) == total`.
 ///
-/// With the Pass-3 fix, the debited value is the single source of truth:
-/// it flows into BOTH `PassResult.cost_usd` AND the sink, so all three
-/// accumulators agree. The legacy "cost reconciliation within tolerance"
-/// test above covers the valid-cost path (where debited == provider value).
+/// Under `budget_usd > 0`, invalid cost now fails closed (Pass-8 Codex H1 —
+/// see `negative_cost_under_budget_halts_with_invalid_cost_error` below).
+/// This test exercises the legacy fallback-under-no-enforcement path so the
+/// "debited value is the single source of truth" invariant from Pass-3
+/// stays green for non-budgeted runs.
 #[tokio::test]
 async fn cost_reconciliation_holds_when_provider_cost_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let plan_path = setup_minimal_repo(dir.path());
     let layers = single_layer_config();
     let pice_config = stub_pice_config(false);
-    // Tight budget → seed is meaningful; BayesianSprt with a wide band so
-    // we run multiple passes and exercise the fallback on each one.
-    let budget_usd = 1.0_f64;
+    // budget_usd = 0 → no financial enforcement, fallback branch active.
+    // Pass-8 Codex H1: budget > 0 would now hard-fail on invalid cost;
+    // the reconciliation contract only applies to the fallback path.
+    let budget_usd = 0.0_f64;
     let max_passes = 5_u32;
     let workflow = workflow_with_adaptive(
         AdaptiveAlgo::BayesianSprt,
@@ -1390,10 +1388,9 @@ async fn cost_reconciliation_holds_when_provider_cost_invalid() {
         &seams,
     );
 
-    // Every pass reports a negative cost. The stub parser accepts finite
-    // numbers, so this round-trips to `primary_cost = Some(-0.01)`. In the
-    // loop, `CostStats::validate_nonnegative(-0.01).is_err()` triggers the
-    // fallback branch — debiting `fallback_seed = 1.0 / 5 = 0.2` per pass.
+    // Every pass reports a negative cost. `CostStats::validate_nonnegative`
+    // rejects it; the fallback debits `fallback_seed = budget_usd / max_passes
+    // = 0.0 / 5 = 0.0` per pass (budget == 0 → seed == 0).
     let _stub = StubScoresGuard::new("9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01");
 
     let mut sink = NullPassSink;
@@ -1453,7 +1450,10 @@ async fn pass_events_sink_mirrors_debited_cost_on_fallback() {
     let plan_path = setup_minimal_repo(dir.path());
     let layers = single_layer_config();
     let pice_config = stub_pice_config(false);
-    let budget_usd = 1.0_f64;
+    // Pass-8 Codex H1: budget_usd = 0 keeps the fallback-path sink-mirror
+    // contract alive. Under budget > 0, invalid cost now hard-fails (see
+    // `negative_cost_under_budget_halts_with_invalid_cost_error`).
+    let budget_usd = 0.0_f64;
     let max_passes = 5_u32;
     let workflow = workflow_with_adaptive(
         AdaptiveAlgo::BayesianSprt,
@@ -1928,6 +1928,76 @@ async fn mid_loop_sink_failure_preserves_manifest_sink_parity() {
     assert!(
         (manifest_total - 0.02_f64).abs() < 1e-9,
         "manifest total must be 0.02 (pass 1 only); got {manifest_total}",
+    );
+}
+
+// ─── Pass-8 Codex H1: invalid costUsd fails closed under budget > 0 ───────
+
+/// Phase 4.1 Pass-8 Codex High #1 regression. A provider that declares
+/// `costTelemetry: true` but returns a negative `costUsd` used to fall
+/// through to the `fallback_seed = budget_usd / max_passes` substitute —
+/// so the loop kept evaluating while the real cost went unmeasured. The
+/// Pass-8 fix hard-fails when `budget_usd > 0` AND the reported cost
+/// fails `CostStats::validate_nonnegative` (NaN, ∞, negative). The loop
+/// halts with `runtime_error:invalid_cost_usd:...` and the layer is
+/// marked `Failed`.
+#[tokio::test]
+async fn negative_cost_under_budget_halts_with_invalid_cost_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    // budget_usd > 0 so the capability gate enforces cost_telemetry AND
+    // the new invalid-cost fail-close fires.
+    let workflow = workflow_with_adaptive(AdaptiveAlgo::BayesianSprt, 0.95, 5, 1.0, None);
+    let seams = BTreeMap::new();
+    let cfg = make_cfg(
+        &layers,
+        &plan_path,
+        dir.path(),
+        &pice_config,
+        &workflow,
+        &seams,
+    );
+    // Pass 1 reports a NEGATIVE cost. Stub honors costTelemetry (default on).
+    let _stub = StubScoresGuard::new("7.0,-0.01;7.0,0.02;7.0,0.02");
+
+    let mut sink = crate::RecordingPassSink::default();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+        .await
+        .unwrap();
+
+    let backend = manifest
+        .layers
+        .iter()
+        .find(|l| l.name == "backend")
+        .expect("backend layer missing");
+
+    assert_eq!(
+        backend.status,
+        LayerStatus::Failed,
+        "invalid-cost halt must fail the layer; halted_by={:?}",
+        backend.halted_by,
+    );
+    let halted = backend.halted_by.clone().unwrap_or_default();
+    assert!(
+        halted.starts_with("runtime_error:invalid_cost_usd:"),
+        "halted_by must carry the invalid_cost_usd discriminant; got {halted:?}",
+    );
+    // Pre-fix behavior: sink had 1 row at the fallback seed, loop ran to
+    // completion. Post-fix: sink and manifest both record ZERO primary
+    // passes for this layer — the loop halted BEFORE the sink write for
+    // pass 1 because `primary_cost = Some(-0.01)` takes the halt branch
+    // immediately after the provider returns.
+    assert!(
+        backend.passes.is_empty(),
+        "no passes should be persisted when the first cost is invalid; got {:?}",
+        backend.passes,
+    );
+    assert!(
+        sink.rows.is_empty(),
+        "sink should hold zero rows; got {:?}",
+        sink.rows,
     );
 }
 

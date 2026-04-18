@@ -303,11 +303,36 @@ pub async fn run_adaptive_passes(
         // all four locations agree — and when the provider reported a
         // valid cost, the debited value IS `primary_cost`, so legacy
         // behavior is unchanged.
+        //
+        // Phase 4.1 Pass-8 Codex High #1: under budget enforcement
+        // (`budget_usd > 0`), the cold-start-seed fallback is fail-OPEN
+        // when a `costTelemetry: true` provider returns a malformed cost
+        // (NaN, ∞, negative). The capability gate at `stack_loops.rs:584`
+        // already requires `cost_telemetry = true` for budget > 0, so a
+        // malformed cost here is a provider-contract violation and must
+        // halt the loop with a typed runtime error. Previously, the seed
+        // substitute let the loop run to completion while the true cost
+        // (potentially much larger) went unmeasured — exactly the
+        // "budget appears enforced, isn't actually" failure mode.
+        //
+        // Missing cost (`None`) under budget > 0 is also a violation —
+        // `costTelemetry: true` obliges the provider to emit `costUsd` on
+        // every pass. Budget-zero runs preserve the old fallback path
+        // (financial enforcement is disabled so malformed cost data is
+        // harmless beyond logging).
+        //
         // Compute the debited cost WITHOUT mutating cost_stats or
         // accumulated_cost yet — see the write-ahead ordering note below.
         let fallback_seed = ctx.budget_usd / ctx.max_passes as f64;
         let (primary_debited_cost, primary_observed_cost): (Option<f64>, f64) = match primary_cost {
             Some(c) if CostStats::validate_nonnegative(c).is_ok() => (Some(c), c),
+            _ if ctx.budget_usd > 0.0 => {
+                halted_by_runtime_error = Some(format!(
+                    "runtime_error:invalid_cost_usd:primary provider returned invalid cost_usd={:?} under budget_usd={:.4} (capability gate expects finite, non-negative cost)",
+                    primary_cost, ctx.budget_usd
+                ));
+                break;
+            }
             _ => (Some(fallback_seed), fallback_seed),
         };
 
@@ -415,8 +440,21 @@ pub async fn run_adaptive_passes(
                 // Pass-7 Codex High #3: compute debited cost WITHOUT mutating
                 // state; persist first; then mutate. See the primary-path
                 // write-ahead comment above for the full rationale.
+                //
+                // Pass-8 Codex High #1: fail-close under `budget_usd > 0`
+                // on malformed / missing cost. ADTS adversarial providers
+                // are equally subject to the capability gate — a bad value
+                // here would under-debit the budget. See the primary-path
+                // comment above for the full rationale.
                 let (adv_debited_cost, adv_observed_cost): (Option<f64>, f64) = match adv_cost {
                     Some(c) if CostStats::validate_nonnegative(c).is_ok() => (Some(c), c),
+                    _ if ctx.budget_usd > 0.0 => {
+                        halted_by_runtime_error = Some(format!(
+                            "runtime_error:invalid_cost_usd:adversarial provider returned invalid cost_usd={:?} under budget_usd={:.4} (capability gate expects finite, non-negative cost)",
+                            adv_cost, ctx.budget_usd
+                        ));
+                        break;
+                    }
                     _ => (Some(fallback_seed), fallback_seed),
                 };
 

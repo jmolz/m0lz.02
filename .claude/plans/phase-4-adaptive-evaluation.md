@@ -751,12 +751,12 @@ See E2E Validation Steps above. Also verify:
     {
       "name": "Floor-merge compliance — min_confidence user override can raise but not lower; budget_usd user override can lower but not raise; max_passes user override permitted in either direction (not floor-guarded, per Phase 2 decision)",
       "threshold": 10,
-      "validation": "cargo test -p pice-core workflow::merge::user_can_raise_min_confidence workflow::merge::user_cannot_lower_min_confidence_below_project_floor workflow::merge::user_can_lower_budget_usd workflow::merge::user_cannot_raise_budget_usd_above_project_ceiling workflow::merge::user_can_lower_or_raise_max_passes -- --exact"
+      "validation": "cargo test -p pice-core --lib workflow::merge::tests::user_can_raise_min_confidence workflow::merge::tests::user_cannot_lower_min_confidence_below_project_floor workflow::merge::tests::user_can_lower_budget_usd workflow::merge::tests::user_cannot_raise_budget_usd_above_project_ceiling workflow::merge::tests::user_can_lower_or_raise_max_passes -- --exact. Pass-8 Claude Evaluator C fix: prior wording omitted `--lib` and the `tests::` module-path segment; with `-- --exact`, cargo selected ZERO tests and exited 0, silently false-green-lighting the criterion."
     },
     {
       "name": "Schema hardening — SprtConfig, AdtsConfig, VecConfig each deny unknown fields (misspelled key in YAML fails parsing with the bad key named in the error)",
       "threshold": 10,
-      "validation": "cargo test -p pice-core workflow::schema::sprt_config_denies_unknown_fields workflow::schema::adts_config_denies_unknown_fields workflow::schema::vec_config_denies_unknown_fields -- --exact; assert error message contains the misspelled field name"
+      "validation": "cargo test -p pice-core --lib workflow::schema::tests::sprt_config_denies_unknown_fields workflow::schema::tests::adts_config_denies_unknown_fields workflow::schema::tests::vec_config_denies_unknown_fields -- --exact; assert error message contains the misspelled field name. Pass-8 Claude Evaluator C fix: added `--lib` and `tests::` module-path segment — previously cargo matched 0 tests under `--exact` and silently reported ok."
     },
     {
       "name": "Protocol roundtrip — pass_index, cost_usd, confidence, fresh_context, effort_override serialize as camelCase and roundtrip through JSON on both Rust and TS sides; unknown fields in the response are tolerated (forward-compat) but known unknown fields in the request are rejected (deny_unknown_fields on params)",
@@ -766,12 +766,12 @@ See E2E Validation Steps above. Also verify:
     {
       "name": "SQLite v3 migration correctness — idempotent, migrates from v1 and v2, cascades delete on evaluations FK",
       "threshold": 10,
-      "validation": "cargo test -p pice-daemon metrics::db::migrate_v3_is_idempotent metrics::db::migrate_from_v1_to_v3 metrics::db::migrate_from_v2_to_v3 metrics::store::pass_events_cascade_delete -- --exact"
+      "validation": "cargo test -p pice-daemon --lib metrics::db::tests::migrate_v3_is_idempotent metrics::db::tests::migrate_from_v1_to_v3 metrics::db::tests::migrate_from_v2_to_v3 metrics::store::tests::pass_events_cascade_delete -- --exact. Pass-8 Claude Evaluator C fix: `tests::` module-path segment was missing — `cargo test ... -- --exact` matched zero tests and silently reported ok."
     },
     {
       "name": "Context isolation preserved — each pass sees only contract + current diff + CLAUDE.md; never sees prior passes' scores or findings (the prompt passed to evaluate/create is byte-identical across pass_index=1..N for a given layer)",
       "threshold": 10,
-      "validation": "cargo test -p pice-daemon orchestrator::adaptive_loop::prompt_identical_across_passes; additionally assert no prior-pass data appears in the provider-side request capture from stub provider logs"
+      "validation": "cargo test -p pice-daemon --test adaptive_integration prompt_identical_across_passes -- --exact; additionally assert no prior-pass data appears in the provider-side request capture from stub provider logs. Pass-8 Claude Evaluator C fix: corrected invocation path — the test lives in the `adaptive_integration` integration-test target, not under an `orchestrator::adaptive_loop::` module-path inside the `pice-daemon` library crate."
     },
     {
       "name": "CLI exit-code routing — SPRT reject produces exit 2 via ExitJsonStatus::EvaluationFailed; budget/max-passes produce exit 0; JSON mode emits ExitJson (stdout) not Exit (stderr) on non-zero exit",

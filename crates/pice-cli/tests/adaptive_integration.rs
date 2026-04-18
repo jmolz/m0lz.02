@@ -520,3 +520,71 @@ fn cli_evaluate_corrupt_db_fails_closed_with_metrics_persist_failed() {
         "errors field must be an array of SQLite error strings",
     );
 }
+
+/// Phase 4.1 Pass-8 Codex High #2 regression: the legacy v0.1 single-loop
+/// branch in `evaluate.rs` (taken when `.pice/layers.toml` is absent) used
+/// to pattern-match `if let Ok(Some(db)) = open_metrics_db(...)` and silently
+/// skip persistence on `Err` — so a corrupt / unreadable metrics DB
+/// returned a green evaluation with no audit row. The Pass-7 fail-closed
+/// guarantee existed only on the Stack Loops branch; this test locks the
+/// legacy branch to the same behavior.
+///
+/// The scaffolding deliberately omits `write_layers_toml(...)` so the
+/// handler takes the non-Stack-Loops path. The DB is forced to a
+/// directory-in-place-of-file to make `open_metrics_db` return `Err`.
+#[test]
+fn cli_evaluate_legacy_branch_corrupt_db_fails_closed_with_metrics_persist_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    git_init(dir.path());
+    write_stub_config(dir.path());
+    // NOTE: no `write_layers_toml(...)` — exercises the legacy v0.1 branch.
+    write_file(dir.path(), "src/main.rs", "fn main() {}");
+    let plan = write_minimal_plan(dir.path());
+
+    // Force `open_metrics_db` to Err on the legacy code path.
+    fs::create_dir_all(dir.path().join(".pice/metrics.db")).unwrap();
+
+    let output = pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STUB_SCORES", "9.5,0.001")
+        .args(["evaluate", plan.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "legacy branch must exit 1 on metrics-persist failure; got {:?}; stderr: {}; stdout: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr_text.contains("\"status\":"),
+        "JSON response must not leak to stderr under --json; got stderr: {stderr_text}",
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout must parse as JSON under --json");
+    let status = json["status"]
+        .as_str()
+        .expect("legacy-branch metrics-persist-failed response must carry top-level status");
+    assert_eq!(
+        status,
+        ExitJsonStatus::MetricsPersistFailed.as_str(),
+        "legacy branch must produce the same MetricsPersistFailed wire status as the Stack Loops branch",
+    );
+    let errors = json["errors"]
+        .as_array()
+        .expect("errors array required on MetricsPersistFailed response");
+    // The message must name the legacy path so operators know which branch tripped.
+    let has_legacy_marker = errors.iter().any(|e| {
+        e.as_str()
+            .map(|s| s.contains("legacy v0.1 path"))
+            .unwrap_or(false)
+    });
+    assert!(
+        has_legacy_marker,
+        "legacy-branch failure must name the branch in its error string; got errors: {errors:?}",
+    );
+}

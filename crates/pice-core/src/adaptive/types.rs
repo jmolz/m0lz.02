@@ -198,9 +198,19 @@ pub const CONFIDENCE_CEILING: f64 = 0.966;
 /// through this single function closes that drift risk and makes the
 /// ceiling invariant grep-auditable as a single function name.
 ///
-/// NaN is passed through unchanged (`.min()` propagates NaN) so the caller
-/// can treat invalid inputs as a validation error rather than silently
-/// clamping to the ceiling.
+/// Pass-8 Claude Evaluator B docstring correction: Rust's `f64::min`
+/// follows IEEE-754 `minNum` semantics, which treats NaN as a missing
+/// value and returns the non-NaN argument. `cap_confidence(NaN)` therefore
+/// returns `CONFIDENCE_CEILING` (0.966), not NaN. The ceiling invariant
+/// still holds (clamped output ≤ 0.966), but callers cannot use NaN as
+/// a sentinel for "invalid input, rejected." In practice this is
+/// immaterial — the Beta posterior mean `(α / (α + β))` cannot be NaN
+/// for `α ≥ 1, β ≥ 1` (the priors used everywhere in this codebase) —
+/// so NaN inputs only arise from upstream arithmetic bugs, and reporting
+/// 0.966 for such bugs is still a safe upper bound.
+///
+/// ±∞ inputs clamp to `CONFIDENCE_CEILING` the same way (finite wins via
+/// `minNum`). No input can produce output above the ceiling.
 #[inline]
 pub fn cap_confidence(raw: f64) -> f64 {
     raw.min(CONFIDENCE_CEILING)

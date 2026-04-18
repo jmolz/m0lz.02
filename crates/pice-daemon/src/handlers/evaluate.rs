@@ -276,9 +276,28 @@ pub async fn run(
         // The lock is held for the full evaluation (manifest writes,
         // run_stack_loops, finalize). `tokio::sync::Mutex` so it survives
         // the `.await` on `run_stack_loops`.
+        //
+        // Phase 4.1 Pass-8 Codex High #3: the lock identity MUST match
+        // the on-disk manifest identity. `stack_loops.rs` derives
+        // `feature_id` from `plan_path.file_stem()` and writes the
+        // manifest at `~/.pice/state/{project_hash}/{feature_id}.manifest.json`.
+        // Previously, the lock keyed on `contract.feature` (the free-form
+        // JSON `"feature"` string from `## Contract`, e.g. "PRDv2 Phase 4
+        // — Adaptive Evaluation"). Two evaluate calls with different
+        // `contract.feature` strings but the same plan filename would hit
+        // DIFFERENT mutexes while writing the SAME manifest — the single-
+        // writer guarantee was a lie. Keying on the plan file stem
+        // restores the invariant: one lock per on-disk manifest path.
         let project_namespace =
             pice_core::layers::manifest::manifest_project_namespace(project_root);
-        let _manifest_lock = ctx.manifest_lock_for(&project_namespace, &contract.feature);
+        // Matches `stack_loops.rs::run_stack_loops` line 88-92 verbatim.
+        // Any divergence breaks the single-writer guarantee.
+        let manifest_feature_id = std::path::Path::new(&plan.path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let _manifest_lock = ctx.manifest_lock_for(&project_namespace, &manifest_feature_id);
         let _manifest_guard = _manifest_lock.lock().await;
 
         // Phase 4: create the evaluation header BEFORE running stack loops.
@@ -423,7 +442,25 @@ pub async fn run(
             // `total_cost_usd` sums per-layer costs so it equals
             // `SUM(pass_events.cost_usd)` within 1e-9 — the Phase 4 contract
             // criterion #16 cost-reconciliation invariant.
-            let passes_used: u32 = manifest.layers.iter().map(|l| l.passes.len() as u32).sum();
+            //
+            // Phase 4.1 Pass-8 Codex Medium #1: exclude synthetic
+            // placeholder passes from the count. `phase1_pending_layer_result`
+            // and `runtime_failed_layer_result` both construct a single
+            // `PassResult { index: 0, ... }` to keep the manifest shape
+            // well-formed for downstream readers — but those passes
+            // emitted NO `pass_events` rows. Summing `passes.len()` as-is
+            // wrote `passes_used = 1` while the audit table had 0 rows,
+            // breaking Criterion 17's "passes_used matches pass_events
+            // row count" invariant on provider-not-started / init-failed
+            // runs. Real adaptive passes are indexed `1..=max_passes`
+            // (see adaptive_loop.rs:220), so `index > 0` cleanly
+            // partitions real passes from placeholders.
+            let passes_used: u32 = manifest
+                .layers
+                .iter()
+                .flat_map(|l| l.passes.iter())
+                .filter(|p| p.index > 0)
+                .count() as u32;
             // Phase 4 Pass-4 fix for Codex High: previously `sum > 0.0` gated
             // emission, which collapsed `0.0` sums to None — breaking the
             // cost-reconciliation invariant that `SUM(pass_events.cost_usd) ==
@@ -808,9 +845,27 @@ pub async fn run(
         None => None,
     };
 
-    // Record to metrics DB (non-fatal — per CLAUDE.md and metrics.md rules).
+    // Record to metrics DB. Pass-8 Codex High #2: distinguish a real DB-open
+    // failure (corrupt, permission error, directory-in-place-of-file) from
+    // `Ok(None)` (no DB file yet — legitimate "no metrics configured" path).
+    // Before the fix, `.ok().flatten()`-style `if let Ok(Some(db)) = ...`
+    // collapsed both cases to "skip persistence" and the legacy v0.1 branch
+    // silently returned a green response with no audit-trail entry even
+    // when the DB was unreadable — exactly the silent-corruption class the
+    // Pass-7 Stack Loops branch closed via `metrics_persist_failed_response`.
+    // Fail closed on the legacy path too so `MetricsPersistFailed` is the
+    // single source of truth for both branches of this handler.
     let normalized_path = metrics::normalize_plan_path(&plan.path, project_root);
-    if let Ok(Some(db)) = metrics::open_metrics_db(project_root) {
+    let db_opt = match metrics::open_metrics_db(project_root) {
+        Ok(Some(db)) => Some(db),
+        Ok(None) => None,
+        Err(e) => {
+            let msg = format!("open_metrics_db (legacy v0.1 path): {e}");
+            tracing::error!("{msg}");
+            return Ok(metrics_persist_failed_response(req.json, vec![msg]));
+        }
+    };
+    if let Some(db) = db_opt {
         let adv_provider = if adversarial_summary.is_some() {
             Some(config.evaluation.adversarial.provider.as_str())
         } else {
@@ -834,7 +889,15 @@ pub async fn run(
             primary.summary.as_deref(),
             &scores,
         ) {
-            tracing::warn!("failed to record evaluation metrics: {e}");
+            // Pass-8 Codex High #2: a successful DB open followed by a
+            // failed write is also fail-closed on the legacy path. The
+            // record contains the feature, tier, pass/fail verdict, and
+            // model identity — dropping it silently would leave downstream
+            // `pice status` and `pice metrics` unable to distinguish
+            // "never ran" from "ran and disappeared."
+            let msg = format!("record_evaluation (legacy v0.1 path): {e}");
+            tracing::error!("{msg}");
+            return Ok(metrics_persist_failed_response(req.json, vec![msg]));
         }
     }
 
