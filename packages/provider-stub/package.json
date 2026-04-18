@@ -1,6 +1,6 @@
 {
   "name": "@pice/provider-stub",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "description": "Echo provider for testing the PICE protocol without an AI SDK",
   "main": "./dist/index.js",
