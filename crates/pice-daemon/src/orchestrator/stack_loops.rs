@@ -1224,6 +1224,13 @@ struct LayerOutcome {
 /// def AND has a non-empty filtered diff. The three "skip" paths are
 /// handled inline in the outer loop to keep this helper focused on the
 /// one case that actually spawns work.
+///
+/// The argument count is load-bearing: every value is an OWNED projection
+/// of cfg that the spawned task needs. Collapsing these into a single
+/// "context" struct would require introducing another cross-layer
+/// aggregate which is exactly what we're trying to avoid (see the
+/// "compile-time isolation" comment above). Allow the clippy lint here.
+#[allow(clippy::too_many_arguments)]
 fn build_per_layer_inputs(
     cfg: &StackLoopsConfig<'_>,
     layer_name: &str,
