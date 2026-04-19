@@ -31,6 +31,29 @@ pub struct WorkflowConfig {
     pub seams: Option<BTreeMap<String, Vec<String>>>,
 }
 
+/// Hard upper bound on `defaults.max_parallelism`, regardless of user config.
+///
+/// Phase 5 cohort parallelism: caps the cohort-level concurrency the daemon
+/// will ever dispatch. Users may LOWER this via `defaults.max_parallelism`;
+/// they cannot raise it. Raising requires provider-side rate-limit-aware
+/// backoff (a v0.6 concern) — without it, ≥17-way fan-out against Anthropic
+/// or OpenAI breaks rate limits for both this user's workspace and any
+/// other concurrent PICE invocations.
+///
+/// The constant lives in `pice-core` so BOTH surfaces enforce it:
+/// load-time `validate_schema_only` emits a `ValidationWarning` (surfaced
+/// by `pice validate` and the daemon's pre-execution check) when a user
+/// sets `max_parallelism` above this floor; dispatch-time
+/// `pice-daemon::orchestrator::stack_loops` clamps to this value and emits
+/// a runtime `warn!` if the clamp actually fires.
+///
+/// A reviewer-flagged gap in the prior implementation was that ONLY the
+/// dispatch site enforced the cap — a user who set `max_parallelism: 32`
+/// saw zero feedback from `pice validate` and only a silent clamp at
+/// runtime. This dual-surface pattern is the defense-in-depth the
+/// `.claude/rules/stack-loops.md` "both sites" invariant asks for.
+pub const MAX_PARALLELISM_HARD_CAP: u32 = 16;
+
 /// Pipeline-wide defaults applied when no layer override specifies otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -139,7 +162,15 @@ impl Default for RetryConfig {
 pub struct EvaluatePhase {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(default)]
+    // Phase 5 cohort parallelism: field-level default fn returns `true`.
+    // Previously `#[serde(default)]` with no path resolved to `bool::default()`
+    // which is `false` — contradicting the struct-level `Default` impl that
+    // sets `parallel: true`. The asymmetry meant YAML with `phases.evaluate`
+    // present but `parallel` omitted deserialized to `false` (fields walked
+    // individually) while YAML with the whole `evaluate:` block omitted
+    // deserialized to `true` (struct `Default::default()`). A named default
+    // fn makes both paths converge.
+    #[serde(default = "default_evaluate_parallel")]
     pub parallel: bool,
     #[serde(default)]
     pub seam_checks: bool,
@@ -242,6 +273,14 @@ fn default_notification() -> String {
     "stdout".to_string()
 }
 
+/// Phase 5 cohort parallelism: `phases.evaluate.parallel` defaults to
+/// `true`. Users opt out of parallel cohort execution by setting this to
+/// `false` explicitly. See `.claude/rules/stack-loops.md` → "Phase 5
+/// cohort-parallelism invariants".
+fn default_evaluate_parallel() -> bool {
+    true
+}
+
 /// What to do when a review gate times out.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -325,5 +364,45 @@ mod tests {
         assert_eq!(phase.sprt, SprtConfig::default());
         assert_eq!(phase.adts, AdtsConfig::default());
         assert_eq!(phase.vec, VecConfig::default());
+    }
+
+    /// Phase 5 cohort parallelism: `EvaluatePhase::default().parallel`
+    /// MUST be `true`. Locks in the new opt-out behavior — changing the
+    /// default to `false` silently breaks every project whose
+    /// `.pice/workflow.yaml` omits the field.
+    #[test]
+    fn evaluate_phase_default_parallel_is_true() {
+        assert!(EvaluatePhase::default().parallel);
+    }
+
+    /// Phase 5 cohort parallelism: when `phases.evaluate.parallel` is
+    /// omitted, the field-level `#[serde(default = "default_evaluate_parallel")]`
+    /// fires and produces `true`. Prior to the named-default fix this
+    /// test would fail (serde used `bool::default() = false` for omitted
+    /// fields when the parent struct IS present). Regression guard.
+    #[test]
+    fn evaluate_phase_parallel_defaults_to_true_when_omitted_in_yaml() {
+        let yaml = "seam_checks: true\n";
+        let parsed: EvaluatePhase = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            parsed.parallel,
+            "parallel must default to true when omitted; got {:?}",
+            parsed.parallel
+        );
+    }
+
+    /// Phase 5 cohort parallelism: the `parallel` field is opt-outable
+    /// but a typo (`parallell`) must NOT silently be ignored. Mirrors the
+    /// existing `evaluate_phase_deny_unknown_fields` pattern — a stale
+    /// config with a misspelled key would otherwise run parallel on a
+    /// project that explicitly opted out.
+    #[test]
+    fn evaluate_phase_denies_typo_in_parallel() {
+        let yaml = "parallell: false\n";
+        let err = serde_yaml::from_str::<EvaluatePhase>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("parallell"),
+            "error must name the bad field: {err}"
+        );
     }
 }

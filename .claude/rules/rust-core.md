@@ -100,3 +100,26 @@ impl ExitJsonStatus {
 Lock the agreement with a unit test that exercises both: builds a string from the constant and asserts the helper accepts it. See `crates/pice-core/src/cli/mod.rs::metrics_persist_failed_prefix_helper_agrees_with_constant`. Without this test, a refactor that updates the const but forgets the helper (or vice versa) compiles and silently changes routing semantics.
 
 This rule is the runtime-string analogue of the `ExitJsonStatus::as_str()` ↔ serde-kebab-case parity test for typed discriminants. Apply it whenever a literal crosses crate boundaries with semantic meaning.
+
+## Pure-function tests in `pice-core` complement orchestrator tests
+
+When you add or extend a pure function in `pice-core` (e.g., `LayerDag::build_dag`, `decide_halt`, seam validators) that the daemon orchestrator consumes, write pure-function unit tests in `pice-core` EVEN IF the orchestrator already has an integration test exercising the behavior end-to-end.
+
+Rationale:
+- The daemon integration test requires spinning up the stub provider, scheduling tokio tasks, and running the full Stack Loops pipeline — slow feedback, noisy failures.
+- The pure-function test runs in milliseconds on `cargo test -p pice-core` and pinpoints the bug to a specific input/output pair.
+- Integration tests verify the seams between components; pure-function tests verify the components themselves. Both matter; neither substitutes for the other.
+
+Minimum coverage when introducing or modifying a `pice-core` pure function consumed by orchestration: 1 happy path + 1 edge case (e.g., diamond topology, entropy floor boundary) + 1 error case (e.g., cycle rejection, NaN input). Example: Phase 5 added 4 `build_dag` tests (`diamond_topology_produces_three_cohorts`, `all_independent_layers_produces_single_cohort`, `deterministic_across_runs`, `rejects_cycle`) to complement the single pre-existing `dag_cohort_grouping` test — each covers a distinct shape category.
+
+## Holding `std::sync::MutexGuard` across `.await` in tests
+
+`clippy::await_holding_lock` pattern-matches on naked `let guard = some_lock();` bindings whose static type is `MutexGuard`. Tests that serialize env-var mutations (`std::env::set_var` — process-global and inherently racy across tokio tasks) often need to hold a `OnceLock<Mutex<()>>` guard across `.await` on the system under test. The lint fires even when the mutex is test-binary-local with a single consumer.
+
+**Two equally acceptable fixes — pick based on how much the test does:**
+
+1. **Wrap the guard in an RAII struct with env-setup + cleanup-on-drop.** Clippy no longer sees a naked `MutexGuard` binding because the struct field's type is private. Bonus: cleanup survives panics. Pattern: `ParallelStubGuard` in `crates/pice-daemon/tests/parallel_cohort_integration.rs` and `StubEnvGuard` in `crates/pice-daemon/tests/parallel_cohort_speedup_assertion.rs`.
+
+2. **Add `#[allow(clippy::await_holding_lock)]`** with a comment naming the single-consumer invariant and why the lock never contends.
+
+**Prefer option 1** when the test also needs env cleanup on panic, which is almost always. The struct-field pattern is structural, not a suppression — a future refactor that moves the guard around can't accidentally expose it. NEVER swap the `std::sync::Mutex` for `tokio::sync::Mutex` as a lint-dodge: `std::env::set_var` is synchronous, and yielding mid-critical-section defeats the "this block runs atomically" semantic. The lint is about scheduler fairness, not correctness — our single-consumer tests satisfy the real concern either way.

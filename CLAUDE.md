@@ -51,7 +51,9 @@ pnpm typecheck                 # Type check (tsc --noEmit)
 cargo fmt --check && cargo clippy -- -D warnings && cargo test && pnpm lint && pnpm typecheck && pnpm test && pnpm build && cargo build --release
 ```
 
-**Expected baseline:** 811 Rust tests (1 ignored), 78 TypeScript tests, 0 lint errors, 0 warnings, clean release build. The 1 ignored test is the doc-test in `crates/pice-daemon/src/handlers/mod.rs` (line 5) — a documentation-only example that the doc harness intentionally skips. Pre-Phase-4 this slot was occupied by `handlers::tests::dispatch_plan_errors_without_provider` (timing-flaky); that test was de-flaked during Phase 3 and now runs to completion. If the doc-test annotation moves, update this baseline accordingly.
+**Expected baseline:** 836 Rust tests (1 ignored), 96 TypeScript tests, 0 lint errors, 0 warnings, clean release build. The 1 ignored test is the doc-test in `crates/pice-daemon/src/handlers/mod.rs` (line 5) — a documentation-only example that the doc harness intentionally skips. Pre-Phase-4 this slot was occupied by `handlers::tests::dispatch_plan_errors_without_provider` (timing-flaky); that test was de-flaked during Phase 3 and now runs to completion. If the doc-test annotation moves, update this baseline accordingly.
+
+**Phase 5 cohort parallelism.** `pice evaluate` runs independent layers within a DAG cohort concurrently via `tokio::JoinSet` + `Semaphore`. Configured via `phases.evaluate.parallel: bool` (default `true`) and `defaults.max_parallelism: u32` (default `num_cpus::get()`, hard-capped at 16 to stay rate-limit-friendly against Anthropic / OpenAI). Set `phases.evaluate.parallel: false` in `.pice/workflow.yaml` to opt out. Manifest `layers[]` ordering is DAG topological — NOT task-completion order. Cancellation propagates through a `tokio_util::sync::CancellationToken` to spawned tasks; affected layers carry `halted_by` starting with `"cancelled:"`. See `.claude/rules/stack-loops.md` → "Phase 5 cohort-parallelism invariants".
 
 ---
 

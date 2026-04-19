@@ -405,10 +405,9 @@ async fn sprt_accepts_and_halts_before_max_passes() {
         "9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001",
     );
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -449,10 +448,9 @@ async fn sprt_rejects_after_consistent_failures() {
 
     let _stub = StubScoresGuard::new("3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -487,10 +485,9 @@ async fn budget_halts_before_confidence() {
     // High score so SPRT does not pre-halt; budget gate must still fire.
     let _stub = StubScoresGuard::new("9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -536,10 +533,9 @@ async fn adaptive_budget_fails_closed_when_provider_lacks_cost_telemetry() {
 
     let _stub = StubNoCostTelemetryGuard::new("9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -609,10 +605,9 @@ async fn adaptive_zero_budget_bypasses_cost_telemetry_gate() {
 
     let _stub = StubNoCostTelemetryGuard::new("9.5,0.0;9.5,0.0;9.5,0.0;9.5,0.0;9.5,0.0");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -674,8 +669,9 @@ async fn telemetry_off_writes_null_cost_to_sink_for_every_pass() {
     // ignored because the capability declaration is the source of truth.
     let _stub = StubNoCostTelemetryGuard::new("9.5,0.005;9.5,0.005;9.5,0.005;9.5,0.005;9.5,0.005");
 
-    let mut sink = RecordingPassSink::default();
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+    let sink = std::sync::Arc::new(RecordingPassSink::default());
+    let sink_dyn: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = sink.clone();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink_dyn)
         .await
         .unwrap();
 
@@ -687,8 +683,9 @@ async fn telemetry_off_writes_null_cost_to_sink_for_every_pass() {
 
     // At least one pass must have recorded — otherwise we're testing the
     // wrong path (e.g. a degenerate config that halted before pass 1).
+    let rows = sink.rows();
     assert!(
-        !sink.rows.is_empty(),
+        !rows.is_empty(),
         "sink must capture at least one pass row to test the NULL-cost contract; \
          got zero rows. backend halted_by={:?}",
         backend.halted_by,
@@ -698,7 +695,7 @@ async fn telemetry_off_writes_null_cost_to_sink_for_every_pass() {
     // In `metrics::store::insert_pass_event` this becomes a SQL NULL via
     // rusqlite::params! — the same NULL the cost-reconciliation COALESCE
     // SQL relies on.
-    for (i, row) in sink.rows.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         assert!(
             row.cost_usd.is_none(),
             "sink row {i} (pass_index {pi}, model {m}) MUST carry cost_usd=None \
@@ -753,10 +750,9 @@ async fn cold_start_seed_blocks_overspend_on_pass_one() {
 
     let _stub = StubScoresGuard::new("9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -798,10 +794,9 @@ async fn max_passes_halts_uncertain_layer() {
     // statistic near unity → no early accept/reject.
     let _stub = StubScoresGuard::new("6.0,0.001;4.0,0.001;6.0,0.001;4.0,0.001");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -873,10 +868,9 @@ async fn adts_three_level_escalation_exhausts() {
         Some(&log_path),
     );
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1027,10 +1021,9 @@ async fn prompt_identical_across_passes() {
         Some(&log_path),
     );
 
-    let mut sink = NullPassSink;
-    let _manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let _manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
 
     let log_content = std::fs::read_to_string(&log_path).expect("stub request log present");
     let entries: Vec<serde_json::Value> = log_content
@@ -1117,10 +1110,9 @@ async fn vec_halts_when_entropy_stabilizes() {
 
     let _stub = StubScoresGuard::new("8.0,0.001;8.0,0.001;8.0,0.001;8.0,0.001;8.0,0.001;8.0,0.001");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1160,10 +1152,9 @@ async fn vec_halt_on_failure_sequence_does_not_pass() {
 
     let _stub = StubScoresGuard::new("3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001;3.0,0.001");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1203,10 +1194,9 @@ async fn adaptive_algo_none_respects_budget() {
         "9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03;9.5,0.03",
     );
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1246,8 +1236,9 @@ async fn determinism_across_two_identical_runs() {
 
     let _stub = StubScoresGuard::new("9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001");
 
-    let mut sink_a = NullPassSink;
-    let manifest_a = run_stack_loops(&cfg, &NullSink, true, &mut sink_a)
+    let sink_a: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest_a = run_stack_loops(&cfg, &NullSink, true, sink_a)
         .await
         .unwrap();
     let backend_a = manifest_a
@@ -1257,8 +1248,9 @@ async fn determinism_across_two_identical_runs() {
         .unwrap()
         .clone();
 
-    let mut sink_b = NullPassSink;
-    let manifest_b = run_stack_loops(&cfg, &NullSink, true, &mut sink_b)
+    let sink_b: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest_b = run_stack_loops(&cfg, &NullSink, true, sink_b)
         .await
         .unwrap();
     let backend_b = manifest_b
@@ -1379,8 +1371,9 @@ async fn adts_determinism_across_two_identical_runs() {
         None,
     );
 
-    let mut sink_a = NullPassSink;
-    let manifest_a = run_stack_loops(&cfg, &NullSink, true, &mut sink_a)
+    let sink_a: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest_a = run_stack_loops(&cfg, &NullSink, true, sink_a)
         .await
         .unwrap();
     let backend_a = manifest_a
@@ -1390,8 +1383,9 @@ async fn adts_determinism_across_two_identical_runs() {
         .unwrap()
         .clone();
 
-    let mut sink_b = NullPassSink;
-    let manifest_b = run_stack_loops(&cfg, &NullSink, true, &mut sink_b)
+    let sink_b: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest_b = run_stack_loops(&cfg, &NullSink, true, sink_b)
         .await
         .unwrap();
     let backend_b = manifest_b
@@ -1468,10 +1462,9 @@ async fn cost_reconciliation_within_tolerance() {
 
     let _stub = StubScoresGuard::new("9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01;9.5,0.01");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1541,10 +1534,9 @@ async fn cost_reconciliation_holds_when_provider_cost_invalid() {
     // because no real cost was observed.
     let _stub = StubScoresGuard::new("9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1620,8 +1612,9 @@ async fn pass_events_sink_mirrors_debited_cost_on_fallback() {
 
     let _stub = StubScoresGuard::new("9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01;9.5,-0.01");
 
-    let mut sink = RecordingPassSink::default();
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+    let sink = std::sync::Arc::new(RecordingPassSink::default());
+    let sink_dyn: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = sink.clone();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink_dyn)
         .await
         .unwrap();
     let backend = manifest
@@ -1632,11 +1625,12 @@ async fn pass_events_sink_mirrors_debited_cost_on_fallback() {
 
     // Pass-11.1 W1: sink must have recorded every pass; each row MUST
     // carry `cost_usd = None` (which becomes SQL NULL via rusqlite::params!).
+    let rows = sink.rows();
     assert!(
-        !sink.rows.is_empty(),
+        !rows.is_empty(),
         "expected at least one sink row to have been recorded",
     );
-    for row in &sink.rows {
+    for row in rows.iter() {
         assert!(
             row.cost_usd.is_none(),
             "sink row (pass {}, model {}): with W1, invalid provider cost \
@@ -1704,10 +1698,9 @@ async fn runtime_error_fails_layer_not_pending() {
 
     let _stub = StubEvaluateErrorGuard::new("simulated provider timeout");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
 
     let backend = manifest
         .layers
@@ -1795,10 +1788,9 @@ async fn provider_init_failure_fails_layer_not_pending() {
 
     let _stub = StubInitErrorGuard::new("simulated init crash");
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
 
     let backend = manifest
         .layers
@@ -1876,8 +1868,9 @@ async fn mid_loop_runtime_error_preserves_prior_passes_and_costs() {
         3,
     );
 
-    let mut sink = RecordingPassSink::default();
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+    let sink = std::sync::Arc::new(RecordingPassSink::default());
+    let sink_dyn: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = sink.clone();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink_dyn)
         .await
         .unwrap();
 
@@ -1927,13 +1920,14 @@ async fn mid_loop_runtime_error_preserves_prior_passes_and_costs() {
         (total - expected_total).abs() < 1e-9,
         "total_cost_usd = {total}, expected {expected_total}",
     );
-    let sink_total: f64 = sink.rows.iter().map(|r| r.cost_usd.unwrap_or(0.0)).sum();
+    let rows = sink.rows();
+    let sink_total: f64 = rows.iter().map(|r| r.cost_usd.unwrap_or(0.0)).sum();
     assert!(
         (sink_total - expected_total).abs() < 1e-9,
         "Σ(sink) = {sink_total}, expected {expected_total}",
     );
     assert_eq!(
-        sink.rows.len(),
+        rows.len(),
         2,
         "sink must hold exactly the two completed passes",
     );
@@ -1977,27 +1971,35 @@ async fn mid_loop_sink_failure_preserves_manifest_sink_parity() {
     /// `Err(...)` on call `fail_from` and every subsequent call. Records
     /// ONLY the successful rows — matches what a real DB would hold when
     /// the Nth INSERT throws.
+    ///
+    /// Phase 5 cohort parallelism: the trait now takes `&self`, so the
+    /// mutable state lives behind a `Mutex`. The test is single-threaded
+    /// (one layer) so the mutex never contends.
     struct FailAfterNSink {
+        state: std::sync::Mutex<FailAfterNState>,
+    }
+    struct FailAfterNState {
         rows: Vec<(u32, String, Option<f64>, Option<f64>)>,
         calls: u32,
         fail_from: u32,
     }
     impl PassMetricsSink for FailAfterNSink {
         fn record_pass(
-            &mut self,
+            &self,
             pass_index: u32,
             model: &str,
             score: Option<f64>,
             cost_usd: Option<f64>,
         ) -> anyhow::Result<()> {
-            self.calls += 1;
-            if self.calls >= self.fail_from {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            st.calls += 1;
+            if st.calls >= st.fail_from {
                 return Err(anyhow::anyhow!(
                     "simulated SQLite I/O error on call {}",
-                    self.calls
+                    st.calls
                 ));
             }
-            self.rows
+            st.rows
                 .push((pass_index, model.to_string(), score, cost_usd));
             Ok(())
         }
@@ -2020,12 +2022,15 @@ async fn mid_loop_sink_failure_preserves_manifest_sink_parity() {
     );
     let _stub = StubScoresGuard::new("7.0,0.02;7.0,0.02;7.0,0.02;7.0,0.02;7.0,0.02");
 
-    let mut sink = FailAfterNSink {
-        rows: Vec::new(),
-        calls: 0,
-        fail_from: 2, // succeed on pass 1, fail on pass 2
-    };
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+    let sink = std::sync::Arc::new(FailAfterNSink {
+        state: std::sync::Mutex::new(FailAfterNState {
+            rows: Vec::new(),
+            calls: 0,
+            fail_from: 2, // succeed on pass 1, fail on pass 2
+        }),
+    });
+    let sink_dyn: std::sync::Arc<dyn PassMetricsSink> = sink.clone();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink_dyn)
         .await
         .unwrap();
 
@@ -2061,13 +2066,21 @@ async fn mid_loop_sink_failure_preserves_manifest_sink_parity() {
     );
     assert_eq!(backend.passes[0].index, 1);
     assert_eq!(backend.passes[0].cost_usd, Some(0.02));
-    assert_eq!(sink.rows.len(), 1, "sink must also hold exactly 1 row");
-    assert_eq!(sink.rows[0].0, 1, "sink row index must match manifest");
-    assert_eq!(sink.rows[0].3, Some(0.02));
+    let sink_state = sink.state.lock().unwrap_or_else(|p| p.into_inner());
+    assert_eq!(
+        sink_state.rows.len(),
+        1,
+        "sink must also hold exactly 1 row"
+    );
+    assert_eq!(
+        sink_state.rows[0].0, 1,
+        "sink row index must match manifest"
+    );
+    assert_eq!(sink_state.rows[0].3, Some(0.02));
 
     // total_cost_usd reconciliation: manifest total == Σ(sink).
     let manifest_total = backend.total_cost_usd.unwrap_or(-1.0);
-    let sink_total: f64 = sink.rows.iter().filter_map(|r| r.3).sum();
+    let sink_total: f64 = sink_state.rows.iter().filter_map(|r| r.3).sum();
     assert!(
         (manifest_total - sink_total).abs() < 1e-9,
         "manifest total {manifest_total} must equal Σ(sink) {sink_total}",
@@ -2109,8 +2122,9 @@ async fn negative_cost_under_budget_halts_with_invalid_cost_error() {
     // Pass 1 reports a NEGATIVE cost. Stub honors costTelemetry (default on).
     let _stub = StubScoresGuard::new("7.0,-0.01;7.0,0.02;7.0,0.02");
 
-    let mut sink = crate::RecordingPassSink::default();
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+    let sink = std::sync::Arc::new(crate::RecordingPassSink::default());
+    let sink_dyn: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = sink.clone();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink_dyn)
         .await
         .unwrap();
 
@@ -2141,10 +2155,11 @@ async fn negative_cost_under_budget_halts_with_invalid_cost_error() {
         "no passes should be persisted when the first cost is invalid; got {:?}",
         backend.passes,
     );
+    let rows = sink.rows();
     assert!(
-        sink.rows.is_empty(),
+        rows.is_empty(),
         "sink should hold zero rows; got {:?}",
-        sink.rows,
+        *rows,
     );
 }
 
@@ -2184,8 +2199,9 @@ async fn zero_cost_provider_preserves_some_zero_total() {
 
     let _stub = StubScoresGuard::new("3.0,0.0;3.0,0.0;3.0,0.0");
 
-    let mut sink = RecordingPassSink::default();
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
+    let sink = std::sync::Arc::new(RecordingPassSink::default());
+    let sink_dyn: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = sink.clone();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink_dyn)
         .await
         .unwrap();
 
@@ -2219,12 +2235,13 @@ async fn zero_cost_provider_preserves_some_zero_total() {
     );
 
     // Sink reconciliation: Σ(sink.cost_usd) == total_cost_usd, both 0.0.
-    let sink_total: f64 = sink.rows.iter().map(|r| r.cost_usd.unwrap_or(-1.0)).sum();
+    let rows = sink.rows();
+    let sink_total: f64 = rows.iter().map(|r| r.cost_usd.unwrap_or(-1.0)).sum();
     assert!(
         (sink_total - 0.0).abs() < 1e-9,
         "Σ(sink.cost_usd) must equal 0.0 for zero-cost passes; got {sink_total}",
     );
-    for row in &sink.rows {
+    for row in rows.iter() {
         assert_eq!(
             row.cost_usd,
             Some(0.0),
@@ -2267,10 +2284,9 @@ async fn unresolvable_provider_remains_phase1_pending_not_failed() {
         merged_seams: &seams,
     };
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
 
     let backend = manifest
         .layers
@@ -2344,10 +2360,9 @@ async fn adts_budget_halt_wins_over_escalation_on_final_iteration() {
     let log_path = dir.path().join("stub-adts-budget.log");
     let _stub = StubAdtsGuard::new("9.0,0.02", "3.0,0.02", Some(&log_path));
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -2436,10 +2451,9 @@ async fn evaluate_result_filters_stale_notifications_by_session_id() {
         "wrong-session-xyz-that-does-not-exist",
     );
 
-    let mut sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut sink)
-        .await
-        .unwrap();
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()

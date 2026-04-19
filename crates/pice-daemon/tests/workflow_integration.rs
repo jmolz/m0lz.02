@@ -125,8 +125,9 @@ layer_overrides:
         merged_seams: &empty_seams,
     };
 
-    let mut pass_sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, false, &mut pass_sink)
+    let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, false, pass_sink)
         .await
         .unwrap();
 
@@ -219,8 +220,9 @@ paths = ["src/server/**"]
         merged_seams: &empty_seams,
     };
 
-    let mut pass_sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut pass_sink)
+    let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, pass_sink)
         .await
         .unwrap();
     let backend = manifest

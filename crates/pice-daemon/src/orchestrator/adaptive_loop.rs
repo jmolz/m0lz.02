@@ -106,9 +106,30 @@ pub struct AdaptiveContext {
 /// `?` into a `LayerAdaptiveResult::RuntimeError` → `LayerStatus::Failed`
 /// — the same path used for any other runtime failure. Metrics absence
 /// (`NullPassSink`) is distinct from metrics failure and stays silent.
-pub trait PassMetricsSink: Send {
+///
+/// Phase 5 cohort parallelism redesign: `record_pass` takes `&self`, and
+/// the trait bound is `Send + Sync`. A single `Arc<dyn PassMetricsSink>`
+/// is shared across every cohort task; concrete impls own their interior
+/// mutability (see `DbBackedPassSink`'s `Arc<Mutex<MetricsDb>>`). Prior
+/// to this redesign the `&mut self` signature forced per-task sink
+/// ownership, which would have either serialized all writes through a
+/// single owning task (defeating parallelism) or required per-task sink
+/// construction (breaking the `evaluation_id` sharing contract with
+/// SQLite). Concurrent correctness is verified by
+/// `pass_sink_concurrent_record_no_data_race` below.
+///
+/// **Cost aggregator audit (Phase 4.1 surface, Task 2 step 8):** there is
+/// no shared mutable cost aggregator in the per-pass hot path. `CostStats`
+/// lives in `pice-core::adaptive::cost` and is constructed fresh inside
+/// each `run_adaptive_passes` call — task-local by construction, so
+/// parallel cohorts cannot contend. `metrics::aggregator` is the READ
+/// side (query functions for `pice metrics`) and takes `&MetricsDb`, not
+/// `&mut`. Write-side cost accounting flows through this sink's
+/// `cost_usd` parameter, which is why THIS trait (and only this trait)
+/// required the `&self + Send + Sync` redesign.
+pub trait PassMetricsSink: Send + Sync {
     fn record_pass(
-        &mut self,
+        &self,
         pass_index: u32,
         model: &str,
         score: Option<f64>,
@@ -117,25 +138,29 @@ pub trait PassMetricsSink: Send {
 }
 
 /// Discard sink used when metrics are disabled.
+///
+/// Trivially `Send + Sync` — zero-sized type with no state to contend on.
 pub struct NullPassSink;
 
 impl PassMetricsSink for NullPassSink {
-    fn record_pass(
-        &mut self,
-        _: u32,
-        _: &str,
-        _: Option<f64>,
-        _: Option<f64>,
-    ) -> anyhow::Result<()> {
+    fn record_pass(&self, _: u32, _: &str, _: Option<f64>, _: Option<f64>) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
-/// In-memory sink used by unit and integration tests. Each call appends one
-/// record to `rows`.
+/// In-memory sink used by unit and integration tests. Each call appends
+/// one record to the internal `Vec`.
+///
+/// Phase 5 redesign: the `Vec` is wrapped in `std::sync::Mutex` so the
+/// `&self` trait method can mutate state. Callers access recorded rows
+/// via the [`RecordingPassSink::rows`] accessor which returns a
+/// `MutexGuard`; the guard dereferences to `&Vec<RecordingPassEvent>`,
+/// so call patterns like `sink.rows().len()`, `sink.rows().iter()`,
+/// indexing, and `is_empty()` continue to work without locking ceremony
+/// at each call site.
 #[derive(Debug, Default)]
 pub struct RecordingPassSink {
-    pub rows: Vec<RecordingPassEvent>,
+    inner: std::sync::Mutex<Vec<RecordingPassEvent>>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,15 +171,31 @@ pub struct RecordingPassEvent {
     pub cost_usd: Option<f64>,
 }
 
+impl RecordingPassSink {
+    /// Access recorded rows. Poisoned locks are recovered via
+    /// `into_inner()` — the stored data is still valid, and a panic in a
+    /// different task shouldn't cascade into a test assertion failure.
+    pub fn rows(&self) -> std::sync::MutexGuard<'_, Vec<RecordingPassEvent>> {
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Snapshot the currently recorded rows into a fresh `Vec`.
+    /// Convenient when a test wants to release the lock before proceeding
+    /// (e.g., iterating while other tasks may continue recording).
+    pub fn snapshot(&self) -> Vec<RecordingPassEvent> {
+        self.rows().clone()
+    }
+}
+
 impl PassMetricsSink for RecordingPassSink {
     fn record_pass(
-        &mut self,
+        &self,
         pass_index: u32,
         model: &str,
         score: Option<f64>,
         cost_usd: Option<f64>,
     ) -> anyhow::Result<()> {
-        self.rows.push(RecordingPassEvent {
+        self.rows().push(RecordingPassEvent {
             pass_index,
             model: model.to_string(),
             score,
@@ -194,7 +235,7 @@ pub async fn run_adaptive_passes(
     ctx: &AdaptiveContext,
     primary: &mut ProviderOrchestrator,
     mut adversarial: Option<&mut ProviderOrchestrator>,
-    sink: &mut dyn PassMetricsSink,
+    sink: &dyn PassMetricsSink,
 ) -> Result<AdaptiveOutcome> {
     let mut passes: Vec<PassResult> = Vec::new();
     let mut observations: Vec<PassObservation> = Vec::new();
@@ -830,21 +871,22 @@ mod tests {
 
     #[test]
     fn null_sink_never_panics() {
-        let mut s = NullPassSink;
+        let s = NullPassSink;
         assert!(s.record_pass(1, "m", Some(9.0), Some(0.01)).is_ok());
         assert!(s.record_pass(2, "m", None, None).is_ok());
     }
 
     #[test]
     fn recording_sink_captures_rows_in_order() {
-        let mut s = RecordingPassSink::default();
+        let s = RecordingPassSink::default();
         s.record_pass(1, "claude", Some(9.0), Some(0.02)).unwrap();
         s.record_pass(1, "codex", Some(3.0), Some(0.03)).unwrap();
         s.record_pass(2, "claude", Some(9.1), Some(0.02)).unwrap();
-        assert_eq!(s.rows.len(), 3);
-        assert_eq!(s.rows[0].model, "claude");
-        assert_eq!(s.rows[1].model, "codex");
-        assert_eq!(s.rows[2].pass_index, 2);
+        let rows = s.rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].model, "claude");
+        assert_eq!(rows[1].model, "codex");
+        assert_eq!(rows[2].pass_index, 2);
     }
 
     /// Phase 4.1 Pass-6 Codex High #3: a sink implementation that fails on
@@ -857,7 +899,7 @@ mod tests {
         struct FailingSink;
         impl PassMetricsSink for FailingSink {
             fn record_pass(
-                &mut self,
+                &self,
                 _: u32,
                 _: &str,
                 _: Option<f64>,
@@ -866,13 +908,91 @@ mod tests {
                 Err(anyhow::anyhow!("simulated DB write failure"))
             }
         }
-        let mut s = FailingSink;
+        let s = FailingSink;
         let result = s.record_pass(1, "m", Some(9.0), Some(0.01));
         assert!(result.is_err(), "failing sink must return Err");
         let err = result.unwrap_err();
         assert!(
             err.to_string().contains("simulated DB write failure"),
             "error must propagate verbatim; got {err:?}",
+        );
+    }
+
+    /// Phase 5 cohort parallelism: 8 tasks × 1000 concurrent `record_pass`
+    /// calls against `Arc<NullPassSink>` must not panic. `NullPassSink` is
+    /// stateless so there's no data to race on — this test guards the
+    /// trait bound itself. If a future refactor removes `Send + Sync`
+    /// from the trait, `Arc<dyn PassMetricsSink>` stops being cloneable
+    /// into spawned tasks and this test stops compiling.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pass_sink_concurrent_record_no_data_race_null() {
+        let sink: std::sync::Arc<dyn PassMetricsSink> = std::sync::Arc::new(NullPassSink);
+        let mut handles = Vec::new();
+        for task_id in 0..8 {
+            let s = std::sync::Arc::clone(&sink);
+            handles.push(tokio::spawn(async move {
+                for i in 0..1000 {
+                    // `record_pass` takes `&self` — clone is unnecessary;
+                    // the Arc just keeps the trait-object alive across tasks.
+                    s.record_pass(i, &format!("task-{task_id}"), Some(9.0), Some(0.01))
+                        .expect("null sink cannot fail");
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task panicked");
+        }
+    }
+
+    /// Phase 5 cohort parallelism: 4 tasks × 250 concurrent `record_pass`
+    /// calls against `Arc<RecordingPassSink>` produce exactly 1000 rows,
+    /// no torn writes. Verifies that the `Mutex<Vec>` interior gives us
+    /// lost-update-free append semantics — if someone replaces the mutex
+    /// with a lockless ring buffer and forgets the happens-before ordering,
+    /// `rows().len()` will not equal 1000 and this test fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn pass_sink_concurrent_record_no_data_race_recording() {
+        let sink = std::sync::Arc::new(RecordingPassSink::default());
+        let mut handles = Vec::new();
+        for task_id in 0..4u32 {
+            let s = std::sync::Arc::clone(&sink);
+            handles.push(tokio::spawn(async move {
+                for i in 0..250u32 {
+                    s.record_pass(
+                        task_id * 1000 + i,
+                        &format!("task-{task_id}"),
+                        Some((task_id * 1000 + i) as f64),
+                        Some(0.01),
+                    )
+                    .expect("recording sink cannot fail");
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task panicked");
+        }
+        let rows = sink.rows();
+        assert_eq!(
+            rows.len(),
+            1000,
+            "expected 1000 total rows from 4 tasks × 250, got {}",
+            rows.len()
+        );
+        // Verify no torn writes: every row's `pass_index` uniquely identifies
+        // (task_id, i). Duplicates or missing entries would indicate lost
+        // writes under concurrency.
+        let mut seen = std::collections::HashSet::new();
+        for row in rows.iter() {
+            assert!(
+                seen.insert(row.pass_index),
+                "duplicate pass_index {} detected (lost update signal)",
+                row.pass_index
+            );
+        }
+        assert_eq!(
+            seen.len(),
+            1000,
+            "distinct pass_index count must equal row count"
         );
     }
 

@@ -120,8 +120,9 @@ async fn env_var_mismatch() {
         merged_seams: &seams,
     };
 
-    let mut pass_sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut pass_sink)
+    let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, pass_sink)
         .await
         .unwrap();
     let backend = manifest
@@ -200,8 +201,9 @@ async fn orm_schema_drift() {
         merged_seams: &seams,
     };
 
-    let mut pass_sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut pass_sink)
+    let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, pass_sink)
         .await
         .unwrap();
     let backend = manifest
@@ -278,8 +280,9 @@ async fn openapi_drift() {
         merged_seams: &seams,
     };
 
-    let mut pass_sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut pass_sink)
+    let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, pass_sink)
         .await
         .unwrap();
     let api_layer = manifest.layers.iter().find(|l| l.name == "api").unwrap();
@@ -351,8 +354,9 @@ async fn clean_fixture_passes_all_checks() {
         merged_seams: &seams,
     };
 
-    let mut pass_sink = NullPassSink;
-    let manifest = run_stack_loops(&cfg, &NullSink, true, &mut pass_sink)
+    let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, pass_sink)
         .await
         .unwrap();
     let backend = manifest

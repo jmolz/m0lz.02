@@ -140,6 +140,23 @@ impl ExitJsonStatus {
     /// closes Pass-11.1 W2 (duplicated routing logic).
     pub const METRICS_PERSIST_FAILED_PREFIX: &'static str = "metrics_persist_failed:";
 
+    /// Wire prefix carried in the per-layer `LayerResult.halted_by` string
+    /// when a parallel cohort task is cancelled (via
+    /// `CancellationToken::cancel()`) before, during, or after provider
+    /// evaluation. Phase 5 emits three concrete sub-variants via
+    /// [`CancelledReason`]:
+    ///
+    /// - `"cancelled:pre_spawn"` — cancelled before `tokio::spawn` of the task
+    /// - `"cancelled:in_flight"` — observed by the task after it started
+    /// - `"cancelled:join_aborted"` — `JoinSet::abort_all()` killed the task
+    ///
+    /// Centralized so future phases (e.g. Phase 5.5 daemon-shutdown
+    /// integration, where `cancelled:*` values may become routing signals
+    /// for exit-code mapping) update ONE site and every consumer picks it
+    /// up automatically — the same silent-divergence prevention pattern as
+    /// [`Self::METRICS_PERSIST_FAILED_PREFIX`].
+    pub const CANCELLED_PREFIX: &'static str = "cancelled:";
+
     /// Returns the serialized wire string. Used by tests so the assertion
     /// runs against the same enum the handler emits — no risk of typo drift
     /// between handler call site and test fixture.
@@ -163,6 +180,50 @@ impl ExitJsonStatus {
     /// sites would silently misroute the exit code).
     pub fn is_metrics_persist_failed(halted_by: &str) -> bool {
         halted_by.starts_with(Self::METRICS_PERSIST_FAILED_PREFIX)
+    }
+
+    /// True if `halted_by` represents a parallel-cohort cancellation (any
+    /// of the three Phase-5 sub-variants in [`CancelledReason`]). Every
+    /// consumer — integration tests today, daemon-shutdown routing in
+    /// Phase 5.5 — calls this helper; the inline literal is not
+    /// re-typed anywhere. Same pattern as `is_metrics_persist_failed`.
+    pub fn is_cancelled(halted_by: &str) -> bool {
+        halted_by.starts_with(Self::CANCELLED_PREFIX)
+    }
+}
+
+/// Typed sub-variant of a `cancelled:*` `halted_by` string. Pairs with
+/// [`ExitJsonStatus::CANCELLED_PREFIX`] so call sites never re-type the
+/// literal. Three variants are pinned by the Phase-5 cohort-parallelism
+/// integration tests; adding a fourth requires updating `as_str` AND the
+/// `CANCELLED_PREFIX`-const-agrees-with-helper parity test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelledReason {
+    /// The task was cancelled before `tokio::spawn` got to run it.
+    PreSpawn,
+    /// The task observed cancellation after spawn.
+    InFlight,
+    /// `JoinSet::abort_all()` dropped the task's future; synthesized
+    /// during the post-drain walk over layers that never produced a
+    /// `LayerOutcome`.
+    JoinAborted,
+}
+
+impl CancelledReason {
+    /// Returns the full `halted_by` wire string
+    /// (`"cancelled:<reason>"`). Callers always use this — the prefix
+    /// is never concatenated inline.
+    pub fn as_halted_by(&self) -> String {
+        format!("{}{}", ExitJsonStatus::CANCELLED_PREFIX, self.suffix())
+    }
+
+    /// Just the reason tail after the `:` (used by the parity test).
+    pub fn suffix(&self) -> &'static str {
+        match self {
+            Self::PreSpawn => "pre_spawn",
+            Self::InFlight => "in_flight",
+            Self::JoinAborted => "join_aborted",
+        }
     }
 }
 
@@ -633,6 +694,42 @@ mod tests {
         // strings can be empty in pathological cases.
         assert!(ExitJsonStatus::is_metrics_persist_failed(
             ExitJsonStatus::METRICS_PERSIST_FAILED_PREFIX
+        ));
+    }
+
+    /// Phase 5 cohort-parallelism: lock the `cancelled:` prefix constant
+    /// against the helper AND the typed `CancelledReason` enum. Three
+    /// production call sites in `stack_loops.rs` construct
+    /// `halted_by` via `CancelledReason::as_halted_by()`; integration
+    /// tests consume via `ExitJsonStatus::is_cancelled(...)`. A refactor
+    /// that updates one without the other must fail loudly — this test
+    /// catches that drift.
+    #[test]
+    fn cancelled_prefix_helper_and_reason_enum_agree() {
+        // Every typed reason produces a `halted_by` string that the
+        // helper accepts.
+        for reason in [
+            CancelledReason::PreSpawn,
+            CancelledReason::InFlight,
+            CancelledReason::JoinAborted,
+        ] {
+            let halted_by = reason.as_halted_by();
+            assert!(
+                halted_by.starts_with(ExitJsonStatus::CANCELLED_PREFIX),
+                "{halted_by} must start with CANCELLED_PREFIX"
+            );
+            assert!(ExitJsonStatus::is_cancelled(&halted_by));
+        }
+        // Negative cases: disjoint prefixes must not match.
+        assert!(!ExitJsonStatus::is_cancelled(
+            ExitJsonStatus::METRICS_PERSIST_FAILED_PREFIX
+        ));
+        assert!(!ExitJsonStatus::is_cancelled("runtime_error:provider"));
+        assert!(!ExitJsonStatus::is_cancelled(""));
+        // Bare prefix (empty reason tail) is still cancellation — the
+        // post-drain synthesis path writes it in pathological races.
+        assert!(ExitJsonStatus::is_cancelled(
+            ExitJsonStatus::CANCELLED_PREFIX
         ));
     }
 

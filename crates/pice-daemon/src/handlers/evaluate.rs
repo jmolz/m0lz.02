@@ -416,19 +416,19 @@ pub async fn run(
             }
             None => None,
         };
-        let mut db_pass_sink: Option<metrics::store::DbBackedPassSink> =
+        // Phase 5 cohort parallelism: `PassMetricsSink` is now `&self +
+        // Send + Sync`; the orchestrator holds an `Arc<dyn ...>` and
+        // clones it into each cohort task. Constructing the Arc here
+        // keeps the sink alive for the whole evaluation (all cohort
+        // tasks drop their clones before `run_stack_loops` returns).
+        let pass_sink: std::sync::Arc<dyn crate::orchestrator::PassMetricsSink> =
             match (db_arc.as_ref(), eval_id) {
-                (Some(db), Some(eid)) => Some(metrics::store::DbBackedPassSink {
+                (Some(db), Some(eid)) => std::sync::Arc::new(metrics::store::DbBackedPassSink {
                     db: db.clone(),
                     evaluation_id: eid,
                 }),
-                _ => None,
+                _ => std::sync::Arc::new(crate::orchestrator::NullPassSink),
             };
-        let mut null_sink = crate::orchestrator::NullPassSink;
-        let pass_sink: &mut dyn crate::orchestrator::PassMetricsSink = match db_pass_sink.as_mut() {
-            Some(s) => s,
-            None => &mut null_sink,
-        };
         let manifest = crate::orchestrator::stack_loops::run_stack_loops(
             &stack_cfg, sink, req.json, pass_sink,
         )

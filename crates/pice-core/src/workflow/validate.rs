@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::layers::LayersConfig;
 use crate::seam::types::{LayerBoundary, ParseBoundaryError};
 use crate::seam::Registry;
-use crate::workflow::schema::{AdaptiveAlgo, WorkflowConfig};
+use crate::workflow::schema::{AdaptiveAlgo, WorkflowConfig, MAX_PARALLELISM_HARD_CAP};
 use crate::workflow::trigger;
 use crate::workflow::SCHEMA_VERSION;
 
@@ -120,6 +120,30 @@ pub fn validate_schema_only(cfg: &WorkflowConfig) -> ValidationReport {
             line: None,
             column: None,
         });
+    }
+
+    // Phase 5 cohort parallelism: `MAX_PARALLELISM_HARD_CAP` is a
+    // floor the daemon ALWAYS clamps to at dispatch time — users cannot
+    // raise it. Surface the clamp here as a Warning (not Error) so
+    // `pice validate` flags the config drift before evaluation runs;
+    // the daemon also logs a `warn!` at dispatch if the clamp fires.
+    // Rationale for Warning vs Error: silently discarding the user's
+    // number would be worse, but refusing to load would block valid
+    // configs (other fields fine) on a field whose only consequence is
+    // a logged cap. A Warning keeps `pice validate` exit 0 while still
+    // surfacing the issue textually.
+    if let Some(n) = cfg.defaults.max_parallelism {
+        if n > MAX_PARALLELISM_HARD_CAP {
+            report.warnings.push(ValidationWarning {
+                field: "defaults.max_parallelism".into(),
+                message: format!(
+                    "max_parallelism = {n} exceeds hard cap {MAX_PARALLELISM_HARD_CAP}; \
+                     daemon will clamp at dispatch. Lower the value to silence this warning \
+                     (users can only lower, not raise, the cap — see \
+                     .claude/rules/stack-loops.md)."
+                ),
+            });
+        }
     }
 
     // Per-layer override sanity: tier range, confidence range.
@@ -1302,6 +1326,67 @@ mod tests {
             "expected multiple adaptive errors collected, got {}: {:?}",
             report.errors.len(),
             report.errors
+        );
+    }
+
+    // ─── Phase 5 max_parallelism cap tests ──────────────────────────────
+    //
+    // Users can LOWER `defaults.max_parallelism` but cannot raise it above
+    // `MAX_PARALLELISM_HARD_CAP`. The validator emits a Warning (not Error)
+    // so `pice validate` exit 0 remains unchanged — blocking evaluation on
+    // this alone would be over-eager.
+
+    #[test]
+    fn max_parallelism_above_hard_cap_warns_without_erroring() {
+        use crate::workflow::schema::MAX_PARALLELISM_HARD_CAP;
+        let mut cfg = embedded_defaults();
+        cfg.defaults.max_parallelism = Some(MAX_PARALLELISM_HARD_CAP + 16);
+        let report = validate_schema_only(&cfg);
+        assert!(
+            report.errors.is_empty(),
+            "over-cap max_parallelism should warn, not error: {:?}",
+            report.errors
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.field == "defaults.max_parallelism"
+                    && w.message.contains("exceeds hard cap")),
+            "expected max_parallelism cap warning; got {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn max_parallelism_at_or_below_cap_does_not_warn() {
+        use crate::workflow::schema::MAX_PARALLELISM_HARD_CAP;
+        for n in [1u32, 4, 8, MAX_PARALLELISM_HARD_CAP] {
+            let mut cfg = embedded_defaults();
+            cfg.defaults.max_parallelism = Some(n);
+            let report = validate_schema_only(&cfg);
+            assert!(
+                !report
+                    .warnings
+                    .iter()
+                    .any(|w| w.field == "defaults.max_parallelism"),
+                "n={n} should not warn; warnings were {:?}",
+                report.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn max_parallelism_unset_does_not_warn() {
+        let mut cfg = embedded_defaults();
+        cfg.defaults.max_parallelism = None;
+        let report = validate_schema_only(&cfg);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|w| w.field == "defaults.max_parallelism"),
+            "unset max_parallelism must not warn (defaults to num_cpus at runtime)"
         );
     }
 

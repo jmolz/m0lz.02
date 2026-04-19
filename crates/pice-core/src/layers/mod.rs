@@ -702,6 +702,170 @@ paths = ["a/**"]
         assert!(result.is_err());
     }
 
+    // ─── Phase 5 build_dag tests ───────────────────────────────────────
+    //
+    // These cover multi-cohort topologies at the pure-function level.
+    // Orchestrator-level behavior is already covered end-to-end by
+    // `crates/pice-daemon/tests/parallel_cohort_integration.rs`, but
+    // pure-function tests give faster feedback on DAG regressions
+    // without spinning up the daemon stack.
+
+    #[test]
+    fn build_dag_diamond_topology_produces_three_cohorts() {
+        // D → {B, C} → A → {}
+        // Cohorts should be [[D], [B, C], [A]] — three distinct levels.
+        let toml_str = r#"
+[layers]
+order = ["a", "b", "c", "d"]
+
+[layers.a]
+paths = ["a/**"]
+depends_on = ["b", "c"]
+
+[layers.b]
+paths = ["b/**"]
+depends_on = ["d"]
+
+[layers.c]
+paths = ["c/**"]
+depends_on = ["d"]
+
+[layers.d]
+paths = ["d/**"]
+"#;
+        let config: LayersConfig = toml::from_str(toml_str).unwrap();
+        let dag = config.build_dag().unwrap();
+
+        assert_eq!(
+            dag.cohorts.len(),
+            3,
+            "diamond: expected 3 cohorts (d → {{b,c}} → a); got {:?}",
+            dag.cohorts
+        );
+        assert_eq!(dag.cohorts[0], vec!["d".to_string()]);
+        // Cohort 1 has {b, c} — `build_dag` sorts the intra-cohort order
+        // via `sort()` on next_queue, so lexicographic "b" < "c".
+        assert_eq!(dag.cohorts[1], vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(dag.cohorts[2], vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn build_dag_all_independent_layers_produces_single_cohort() {
+        // Five layers, zero edges → every layer is in the first cohort.
+        // This is the maximum parallelism case — a 5-wide fan-out.
+        let toml_str = r#"
+[layers]
+order = ["alpha", "bravo", "charlie", "delta", "echo"]
+
+[layers.alpha]
+paths = ["a/**"]
+
+[layers.bravo]
+paths = ["b/**"]
+
+[layers.charlie]
+paths = ["c/**"]
+
+[layers.delta]
+paths = ["d/**"]
+
+[layers.echo]
+paths = ["e/**"]
+"#;
+        let config: LayersConfig = toml::from_str(toml_str).unwrap();
+        let dag = config.build_dag().unwrap();
+
+        assert_eq!(
+            dag.cohorts.len(),
+            1,
+            "all-independent: expected 1 cohort; got {:?}",
+            dag.cohorts
+        );
+        assert_eq!(
+            dag.cohorts[0],
+            vec![
+                "alpha".to_string(),
+                "bravo".to_string(),
+                "charlie".to_string(),
+                "delta".to_string(),
+                "echo".to_string()
+            ]
+        );
+        assert_eq!(
+            dag.edges.len(),
+            0,
+            "all-independent: expected zero edges; got {:?}",
+            dag.edges
+        );
+    }
+
+    #[test]
+    fn build_dag_deterministic_across_runs() {
+        // Two identical configs must produce byte-identical cohort vectors.
+        // Nondeterminism here (e.g., HashMap iteration order leaking into
+        // cohort assembly) would break Phase 5's "manifest layers[] order =
+        // DAG topological order" invariant pinned by the orchestrator
+        // `parallel_cohort_preserves_dag_order` test — pinning it at the
+        // pure-function layer catches regressions faster.
+        let toml_str = r#"
+[layers]
+order = ["backend", "database", "api", "frontend"]
+
+[layers.backend]
+paths = ["backend/**"]
+
+[layers.database]
+paths = ["db/**"]
+
+[layers.api]
+paths = ["api/**"]
+depends_on = ["backend", "database"]
+
+[layers.frontend]
+paths = ["web/**"]
+depends_on = ["api"]
+"#;
+        let config: LayersConfig = toml::from_str(toml_str).unwrap();
+        let dag_a = config.build_dag().unwrap();
+        let dag_b = config.build_dag().unwrap();
+        assert_eq!(
+            dag_a.cohorts, dag_b.cohorts,
+            "two back-to-back build_dag calls must produce identical cohorts"
+        );
+        // Also verify cohort structure since we assert equality above:
+        assert_eq!(
+            dag_a.cohorts[0],
+            vec!["backend".to_string(), "database".to_string()]
+        );
+        assert_eq!(dag_a.cohorts[1], vec!["api".to_string()]);
+        assert_eq!(dag_a.cohorts[2], vec!["frontend".to_string()]);
+    }
+
+    #[test]
+    fn build_dag_rejects_cycle() {
+        // A → B → A forms a cycle. `build_dag` calls `detect_cycle` up
+        // front and must return an error rather than emit partial cohorts.
+        // This is the error-case companion to the happy-path tests above.
+        let toml_str = r#"
+[layers]
+order = ["a", "b"]
+
+[layers.a]
+paths = ["a/**"]
+depends_on = ["b"]
+
+[layers.b]
+paths = ["b/**"]
+depends_on = ["a"]
+"#;
+        let config: LayersConfig = toml::from_str(toml_str).unwrap();
+        let err = config.build_dag().unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("cycle"),
+            "expected cycle error; got: {err}"
+        );
+    }
+
     #[test]
     fn seams_section_parsed() {
         let toml_str = r#"

@@ -10,6 +10,7 @@
 //! orchestrator records a placeholder result and continues.
 
 use anyhow::{Context, Result};
+use pice_core::cli::CancelledReason;
 use pice_core::config::PiceConfig;
 use pice_core::layers::filter::{filter_diff_by_globs, scan_files_by_globs};
 use pice_core::layers::manifest::{
@@ -20,8 +21,12 @@ use pice_core::layers::{active_layers, LayersConfig};
 use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
 use pice_core::seam::{default_registry, types::LayerBoundary, Registry};
 use pice_core::workflow::WorkflowConfig;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::adaptive_loop::{
@@ -29,6 +34,21 @@ use super::adaptive_loop::{
 };
 use super::{run_seams_for_layer, ProviderOrchestrator, StreamSink};
 use crate::prompt::layer_builder::build_layer_evaluation_prompt;
+
+/// Hard cap on parallel cohort tasks. Rate-limit-friendly against Anthropic /
+/// OpenAI — even on a 32-core host, spawning 32 concurrent provider sessions
+/// swamps the API. Users can LOWER via `defaults.max_parallelism`; they
+/// cannot raise above this cap. Revisiting requires rate-limit-aware backoff
+/// in the providers (v0.6 concern).
+///
+/// The canonical value lives in `pice-core::workflow::schema`; re-exporting
+/// here as a `usize` keeps the `clamp(1, MAX_PARALLELISM_HARD_CAP)` math
+/// type-friendly and gives both the load-time validator
+/// (`validate_schema_only` warns if user config > cap) and the dispatch-time
+/// clamp + `warn!` a single source of truth. A typo on one site can never
+/// diverge from the other.
+const MAX_PARALLELISM_HARD_CAP: usize =
+    pice_core::workflow::schema::MAX_PARALLELISM_HARD_CAP as usize;
 
 /// Configuration for a Stack Loops evaluation run.
 ///
@@ -79,7 +99,28 @@ pub async fn run_stack_loops(
     cfg: &StackLoopsConfig<'_>,
     sink: &dyn StreamSink,
     json_mode: bool,
-    pass_sink: &mut dyn PassMetricsSink,
+    pass_sink: std::sync::Arc<dyn PassMetricsSink>,
+) -> Result<VerificationManifest> {
+    // Default: a fresh never-cancelled token. Callers that need
+    // cancellation (daemon shutdown, tests) use
+    // [`run_stack_loops_with_cancel`] directly.
+    run_stack_loops_with_cancel(cfg, sink, json_mode, pass_sink, CancellationToken::new()).await
+}
+
+/// Same as [`run_stack_loops`] but accepts a cancellation token the caller
+/// can fire to abort an in-flight evaluation.
+///
+/// Phase 5 cohort parallelism: when the token is cancelled mid-cohort, the
+/// `JoinSet` drain's `tokio::select!` picks the cancelled branch, calls
+/// `abort_all()`, and each in-flight `evaluate_one_layer` returns a
+/// `cancelled:in_flight`-halted `LayerResult::Failed`. Provider sessions are
+/// torn down via the always-shutdown pattern inside `try_run_layer_adaptive`.
+pub async fn run_stack_loops_with_cancel(
+    cfg: &StackLoopsConfig<'_>,
+    sink: &dyn StreamSink,
+    json_mode: bool,
+    pass_sink: std::sync::Arc<dyn PassMetricsSink>,
+    cancel: CancellationToken,
 ) -> Result<VerificationManifest> {
     let config = cfg.layers;
     let plan_path = cfg.plan_path;
@@ -202,38 +243,82 @@ pub async fn run_stack_loops(
         }
     };
 
-    // Process each cohort sequentially, layers within a cohort sequentially
-    // (Phase 2 will parallelize layers within a cohort via worktrees)
+    // Phase 5 cohort parallelism: compute the concurrency cap once per
+    // evaluation. `defaults.max_parallelism: None` → `num_cpus::get()`
+    // (defensive minimum of 1). Hard-capped at
+    // `MAX_PARALLELISM_HARD_CAP` regardless of user config, to stay
+    // rate-limit-friendly with Anthropic / OpenAI.
+    //
+    // Operator feedback loop: if the user explicitly set
+    // `max_parallelism` above the hard cap, emit a runtime `warn!`
+    // NAMING both values so the daemon log is actionable. This
+    // complements the load-time `ValidationWarning` from
+    // `validate_schema_only` (surfaced by `pice validate`) — dual-
+    // surface enforcement of the rule `.claude/rules/stack-loops.md`
+    // calls "both sites". Users who ran the daemon directly without
+    // `pice validate` first still see the feedback.
+    let requested_parallelism = cfg
+        .workflow
+        .defaults
+        .max_parallelism
+        .map(|n| n as usize)
+        .unwrap_or_else(num_cpus::get);
+    let max_parallelism = requested_parallelism.clamp(1, MAX_PARALLELISM_HARD_CAP);
+    if requested_parallelism > MAX_PARALLELISM_HARD_CAP {
+        warn!(
+            requested = requested_parallelism,
+            cap = MAX_PARALLELISM_HARD_CAP,
+            "defaults.max_parallelism exceeds hard cap; clamping. Run `pice validate` \
+             to surface this warning pre-evaluation."
+        );
+    }
+
+    let parallel_configured = cfg.workflow.phases.evaluate.parallel;
+
+    // Wrap the seam registry once; every parallel task holds an Arc clone.
+    // Cheap: the registry is `Box<dyn SeamCheck + Send + Sync>` inside a
+    // `BTreeMap`, and `Arc::clone` is pointer-only.
+    let seam_registry_arc: Arc<Registry> = Arc::new(seam_registry);
+
+    // Process each cohort sequentially; layers within a cohort MAY run in
+    // parallel when `phases.evaluate.parallel == true`, cohort size > 1,
+    // and `max_parallelism > 1`. All four cells of the gate matrix are
+    // covered by `parallel_cohort_integration.rs`.
     for (cohort_idx, cohort) in dag.cohorts.iter().enumerate() {
         debug!(cohort = cohort_idx, layers = ?cohort, "processing cohort");
 
+        // Partition cohort into immediate results (skip / missing-def /
+        // empty-diff) and "real work" that runs the adaptive pipeline.
+        // The real-work subset is what gets parallelized; skip paths stay
+        // inline (they're cheap, just string formatting + a seam pass).
+        let mut immediate_results: HashMap<String, LayerResult> = HashMap::new();
+        let mut immediate_chunks: HashMap<String, Vec<String>> = HashMap::new();
+        let mut work_inputs: Vec<LayerInputs> = Vec::new();
+
         for layer_name in cohort {
-            // Skip layers that aren't active
             if !active.contains(layer_name) {
                 debug!(layer = %layer_name, "skipping inactive layer");
-                manifest.add_layer_result(LayerResult {
-                    name: layer_name.clone(),
-                    status: LayerStatus::Skipped,
-                    passes: Vec::new(),
-                    seam_checks: no_seam_checks(),
-                    halted_by: None,
-                    final_confidence: None,
-                    total_cost_usd: None,
-                    escalation_events: None,
-                });
+                immediate_results.insert(
+                    layer_name.clone(),
+                    LayerResult {
+                        name: layer_name.clone(),
+                        status: LayerStatus::Skipped,
+                        passes: Vec::new(),
+                        seam_checks: no_seam_checks(),
+                        halted_by: None,
+                        final_confidence: None,
+                        total_cost_usd: None,
+                        escalation_events: None,
+                    },
+                );
                 continue;
             }
 
-            if !json_mode {
-                sink.send_chunk(&format!("  Evaluating layer: {layer_name}...\n"));
-            }
-
-            // Get layer definition for globs
-            let layer_def = match config.layers.defs.get(layer_name) {
-                Some(def) => def,
-                None => {
-                    warn!(layer = %layer_name, "layer defined in order but missing definition");
-                    manifest.add_layer_result(LayerResult {
+            let Some(layer_def) = config.layers.defs.get(layer_name) else {
+                warn!(layer = %layer_name, "layer defined in order but missing definition");
+                immediate_results.insert(
+                    layer_name.clone(),
+                    LayerResult {
                         name: layer_name.clone(),
                         status: LayerStatus::Failed,
                         passes: Vec::new(),
@@ -242,18 +327,13 @@ pub async fn run_stack_loops(
                         final_confidence: None,
                         total_cost_usd: None,
                         escalation_events: None,
-                    });
-                    continue;
-                }
+                    },
+                );
+                continue;
             };
 
-            // Filter diff to this layer's globs
             let filtered_diff = filter_diff_by_globs(&full_diff, &layer_def.paths);
 
-            // Handle layers with empty filtered diffs.
-            // - always_run layers: remain PENDING (they must never be Skipped —
-            //   seam checks or static analysis will evaluate them in Phase 3).
-            // - Cascade-only layers: SKIPPED (activated by dependency, no own files).
             if filtered_diff.is_empty() {
                 let is_always_run = layer_def.always_run;
                 let (status, label, reason) = if is_always_run {
@@ -277,14 +357,11 @@ pub async fn run_stack_loops(
                     )
                 };
                 info!(layer = %layer_name, always_run = is_always_run, "empty diff for active layer");
-                // Even with no own-diff, seam checks may still fire — especially
-                // for always_run layers like `infrastructure`. Run them and
-                // downgrade to Failed on any Failed finding.
                 let seam_checks = run_seams_for_layer(
                     layer_name,
                     &active_set,
                     merged_seams,
-                    &seam_registry,
+                    seam_registry_arc.as_ref(),
                     project_root,
                     &full_diff,
                     &layer_paths,
@@ -297,34 +374,27 @@ pub async fn run_stack_loops(
                     Some(failed_id) => (LayerStatus::Failed, format!("seam:{failed_id}")),
                     None => (status, reason),
                 };
-                manifest.add_layer_result(LayerResult {
-                    name: layer_name.clone(),
-                    status: final_status,
-                    passes: Vec::new(),
-                    seam_checks,
-                    halted_by: Some(final_reason),
-                    final_confidence: None,
-                    total_cost_usd: None,
-                    escalation_events: None,
-                });
-                if !json_mode {
-                    sink.send_chunk(&format!("  [{layer_name}] {label} (no file changes)\n"));
-                }
-                // Checkpoint: persist manifest after each layer result
-                if let Some(ref path) = manifest_path {
-                    if let Err(e) = manifest.save(path) {
-                        warn!("failed to checkpoint manifest: {e}");
-                    }
-                }
+                immediate_results.insert(
+                    layer_name.clone(),
+                    LayerResult {
+                        name: layer_name.clone(),
+                        status: final_status,
+                        passes: Vec::new(),
+                        seam_checks,
+                        halted_by: Some(final_reason),
+                        final_confidence: None,
+                        total_cost_usd: None,
+                        escalation_events: None,
+                    },
+                );
+                immediate_chunks.insert(
+                    layer_name.clone(),
+                    vec![format!("  [{layer_name}] {label} (no file changes)\n")],
+                );
                 continue;
             }
 
-            // Load layer contract or fall back to plan contract
             let contract_content = load_layer_contract(project_root, layer_name, layer_def);
-
-            // Build context-isolated prompt (returned for future Phase 5
-            // prompt-inspection hooks; the adaptive loop below re-builds its
-            // own view from contract + diff + claude_md).
             let _prompt = build_layer_evaluation_prompt(
                 layer_name,
                 &contract_content,
@@ -332,80 +402,215 @@ pub async fn run_stack_loops(
                 &claude_md,
             );
 
-            let effective_tier = effective_tier_for(cfg.workflow, layer_name);
-
-            // Attempt to spawn the provider(s) and run the adaptive pass
-            // loop. If provider startup fails (common in test environments
-            // without a resolved binary), fall back to the Phase-1-pending
-            // placeholder so orchestration flow stays observable. This is
-            // a fail-closed path — no layer gets marked `Passed` on a
-            // provider failure.
-            let adaptive_outcome = try_run_layer_adaptive(
+            work_inputs.push(build_per_layer_inputs(
                 cfg,
                 layer_name,
-                &contract_content,
-                &filtered_diff,
+                contract_content,
+                filtered_diff,
                 &claude_md,
-                pass_sink,
-            )
-            .await;
-
-            // Phase 3 — seam checks. Run AFTER the adaptive loop completes;
-            // seam failures still downgrade layer status to Failed regardless
-            // of the adaptive halt reason.
-            let seam_checks = run_seams_for_layer(
-                layer_name,
                 &active_set,
-                merged_seams,
-                &seam_registry,
-                project_root,
-                &full_diff,
                 &layer_paths,
-            );
-            let first_failed_seam = seam_checks
-                .iter()
-                .find(|c| c.status == CheckStatus::Failed)
-                .map(|c| c.name.clone());
+                &full_diff,
+                Arc::clone(&seam_registry_arc),
+            ));
+        }
 
-            let min_confidence = effective_min_confidence_for(cfg.workflow, layer_name);
-            let layer_result = match adaptive_outcome {
-                LayerAdaptiveResult::Completed(outcome) => build_adaptive_layer_result(
-                    layer_name.clone(),
-                    outcome,
-                    seam_checks,
-                    first_failed_seam,
-                    min_confidence,
-                ),
-                LayerAdaptiveResult::NotStarted => phase1_pending_layer_result(
-                    layer_name.clone(),
-                    effective_tier,
-                    filtered_diff.len(),
-                    seam_checks,
-                    first_failed_seam,
-                ),
-                // Pass-3 Codex Critical #2: runtime errors fail-close to
-                // `LayerStatus::Failed` (exit 2), NOT to the phase-1-pending
-                // placeholder (exit 0). Seam failures still take priority
-                // via `first_failed_seam` inside the helper.
-                LayerAdaptiveResult::RuntimeError(msg) => runtime_failed_layer_result(
-                    layer_name.clone(),
-                    msg,
-                    seam_checks,
-                    first_failed_seam,
-                ),
+        // Dispatch the real-work subset: parallel when allowed, sequential
+        // otherwise. The gate is `parallel AND cohort_size>1 AND
+        // max_parallelism>1`. Any false branch collapses to the sequential
+        // path — exercised by the 5-cell edge-case matrix in
+        // `parallel_cohort_integration.rs`.
+        let cohort_size = work_inputs.len();
+        let parallel_enabled = parallel_configured && cohort_size > 1 && max_parallelism > 1;
+        let path_tag = if parallel_enabled {
+            "parallel"
+        } else {
+            "sequential"
+        };
+        // The gate emits a `pice.cohort` tracing event with the chosen
+        // path — tests use `tracing-subscriber::fmt::TestWriter` or a
+        // custom layer to capture this and assert which cell fired.
+        // Hard rule: NO production code uses a `path_counter` or similar
+        // test-only instrumentation (Cycle-2 Consider #6). This event IS
+        // the instrumentation.
+        debug!(
+            target: "pice.cohort",
+            cohort_index = cohort_idx,
+            layer_count = cohort_size,
+            max_parallelism,
+            parallel_configured,
+            path = path_tag,
+            "cohort dispatch path decided"
+        );
+
+        let cohort_start = std::time::Instant::now();
+
+        // HashMap of real-work outcomes, keyed by layer name. Merged with
+        // `immediate_results` during DAG-ordered emission.
+        let mut work_results: HashMap<String, LayerResult> = HashMap::new();
+        let mut work_chunks: HashMap<String, Vec<String>> = HashMap::new();
+
+        if parallel_enabled {
+            let semaphore = Arc::new(Semaphore::new(max_parallelism));
+            let mut join_set: JoinSet<LayerOutcome> = JoinSet::new();
+
+            for inputs in work_inputs {
+                let sem = Arc::clone(&semaphore);
+                let sink_clone = Arc::clone(&pass_sink);
+                let cancel_child = cancel.child_token();
+                join_set.spawn(async move {
+                    // Acquire the permit INSIDE the task so the JoinSet
+                    // scheduler can size itself against the semaphore cap.
+                    // If permit acquisition fails (semaphore closed on
+                    // cancellation), fall through to `evaluate_one_layer`
+                    // which will observe the cancellation and return a
+                    // `Cancelled` outcome.
+                    let _permit = sem.acquire_owned().await.ok();
+                    evaluate_one_layer(inputs, sink_clone, cancel_child).await
+                });
+            }
+
+            // Drain the JoinSet. Cancellation wins over completion — on
+            // `cancel.cancelled()` we abort all in-flight tasks ONCE and
+            // then keep draining the remaining handles so spawned tasks
+            // that reached `evaluate_one_layer`'s `cancelled:in_flight`
+            // branch are collected normally.
+            //
+            // `cancel_fired` gates the select branch: `cancel.cancelled()`
+            // resolves permanently once triggered, so without the gate we
+            // would re-enter that arm on every subsequent iteration and
+            // spin — hanging the drain + starving other tests on the
+            // global env mutex.
+            let mut collected: Vec<LayerOutcome> = Vec::new();
+            let mut cancel_fired = false;
+            loop {
+                if join_set.is_empty() {
+                    break;
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled(), if !cancel_fired => {
+                        cancel_fired = true;
+                        join_set.abort_all();
+                    }
+                    joined = join_set.join_next() => {
+                        match joined {
+                            Some(Ok(out)) => collected.push(out),
+                            Some(Err(join_err)) if join_err.is_cancelled() => {
+                                // Spawn-level cancellation from abort_all().
+                                // Synthetic outcome assembled after drain
+                                // by diffing against the original cohort.
+                            }
+                            Some(Err(join_err)) => {
+                                warn!("cohort task join error: {join_err}");
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+
+            // Any work_inputs layer that never produced an outcome was
+            // cancelled at the join-handle layer. Synthesize a Failed
+            // result so the manifest reflects what happened.
+            let mut seen: HashSet<String> =
+                collected.iter().map(|o| o.layer_name.clone()).collect();
+            for out in collected {
+                work_chunks.insert(out.layer_name.clone(), out.streamed_chunks);
+                work_results.insert(out.layer_name, out.layer_result);
+            }
+            // Discover layers that were enqueued but never produced a
+            // result (join-level abort). Walk `cohort` — NOT the original
+            // `work_inputs` — so the logic compares against the DAG.
+            for layer_name in cohort {
+                if immediate_results.contains_key(layer_name) {
+                    continue; // skip / missing-def / empty-diff path
+                }
+                if seen.insert(layer_name.clone()) {
+                    // Was enqueued as work, never produced an outcome.
+                    work_results.insert(
+                        layer_name.clone(),
+                        LayerResult {
+                            name: layer_name.clone(),
+                            status: LayerStatus::Failed,
+                            passes: Vec::new(),
+                            seam_checks: no_seam_checks(),
+                            halted_by: Some(CancelledReason::JoinAborted.as_halted_by()),
+                            final_confidence: None,
+                            total_cost_usd: None,
+                            escalation_events: None,
+                        },
+                    );
+                    work_chunks.insert(
+                        layer_name.clone(),
+                        vec![format!("  [{layer_name}] Cancelled\n")],
+                    );
+                }
+            }
+        } else {
+            // Sequential path — identical semantics to pre-Phase-5.
+            for inputs in work_inputs {
+                let sink_clone = Arc::clone(&pass_sink);
+                let cancel_child = cancel.child_token();
+                let out = evaluate_one_layer(inputs, sink_clone, cancel_child).await;
+                work_chunks.insert(out.layer_name.clone(), out.streamed_chunks);
+                work_results.insert(out.layer_name, out.layer_result);
+            }
+        }
+
+        // DAG-ordered emission. Walk `cohort` (topological position) to
+        // insert into the manifest so `manifest.layers[]` is deterministic
+        // across runs regardless of task completion order. This is the
+        // invariant `parallel_cohort_preserves_dag_order` in
+        // `parallel_cohort_integration.rs` pins down.
+        for layer_name in cohort {
+            let (layer_result, chunks) = match (
+                immediate_results.remove(layer_name),
+                work_results.remove(layer_name),
+            ) {
+                (Some(r), _) => {
+                    let chunks = immediate_chunks.remove(layer_name).unwrap_or_default();
+                    (r, chunks)
+                }
+                (None, Some(r)) => {
+                    let chunks = work_chunks.remove(layer_name).unwrap_or_default();
+                    (r, chunks)
+                }
+                // Should be unreachable — every cohort layer falls into
+                // exactly one bucket above.
+                (None, None) => {
+                    warn!(layer = %layer_name, "no result computed for cohort layer");
+                    continue;
+                }
             };
 
             if !json_mode {
-                sink.send_chunk(&format!("  [{}] {:?}\n", layer_name, layer_result.status));
+                for chunk in &chunks {
+                    sink.send_chunk(chunk);
+                }
             }
+
             manifest.add_layer_result(layer_result);
 
-            // Checkpoint: persist manifest after each layer result
             if let Some(ref path) = manifest_path {
                 if let Err(e) = manifest.save(path) {
                     warn!("failed to checkpoint manifest: {e}");
                 }
             }
+        }
+
+        info!(
+            cohort_index = cohort_idx,
+            elapsed_ms = cohort_start.elapsed().as_millis() as u64,
+            path = path_tag,
+            "cohort complete"
+        );
+
+        // Honor cancellation between cohorts too — don't start the next
+        // cohort if the token fired.
+        if cancel.is_cancelled() {
+            warn!("cancellation observed between cohorts; aborting remaining cohorts");
+            break;
         }
     }
 
@@ -518,7 +723,7 @@ async fn try_run_layer_adaptive(
     contract_toml: &str,
     filtered_diff: &str,
     claude_md: &str,
-    pass_sink: &mut dyn PassMetricsSink,
+    pass_sink: &dyn PassMetricsSink,
 ) -> LayerAdaptiveResult {
     let workflow = cfg.workflow;
     let algo = effective_adaptive_algo_for(workflow, layer_name);
@@ -971,6 +1176,316 @@ fn load_layer_contract(
     )
 }
 
+// ─── Phase 5 cohort parallelism ─────────────────────────────────────────────
+//
+// `LayerInputs` + `build_per_layer_inputs` + `evaluate_one_layer` — the per-
+// layer work unit the parallel cohort path spawns into each `tokio::spawn`'d
+// JoinSet task. Three design choices are load-bearing:
+//
+// 1. `LayerInputs` holds OWNED clones, never `&StackLoopsConfig<'_>`. The
+//    tokio::spawn future requires `'static`, so a reference to the outer
+//    config would not compile — this is the compile-time enforcement of
+//    "spawned cohort task cannot see other layers' data" that the plan's
+//    contract criterion #3 demands. The `build_per_layer_inputs` signature
+//    takes `&cfg` because it's the EXTRACTOR (single-threaded, runs in the
+//    outer function). The task body receives only the extracted struct.
+//
+// 2. `primary_provider`, `primary_model`, `pice_config`, `workflow` are
+//    cloned per task. Costs are negligible (small structs, no heavy
+//    payloads). The alternative — wrapping cfg in `Arc<StackLoopsConfig>`
+//    — would require `StackLoopsConfig` to own its fields (Arc<LayersConfig>
+//    etc.) which ripples through every call site of the orchestrator.
+//    Cloning is the pragmatic choice.
+//
+// 3. `seam_registry` is `Arc<Registry>` — the registry owns `Box<dyn
+//    SeamCheck + Send + Sync>` which is NOT Clone. One registry, N task
+//    references; cheap clone semantics, no data copy.
+
+/// Per-layer work unit passed into a spawned cohort task.
+///
+/// Intentionally has no reference to `StackLoopsConfig` — that's the
+/// compile-time guarantee that cross-layer data cannot leak into a
+/// spawned task (contract criterion #3). Every field is either owned or
+/// `Arc`-shared (for read-only shared state like the seam registry).
+#[derive(Clone)]
+struct LayerInputs {
+    layer_name: String,
+    contract_content: String,
+    filtered_diff: String,
+    claude_md: String,
+    effective_tier: u8,
+    min_confidence: f64,
+    /// Owned provider + workflow state — cloned from cfg in
+    /// `build_per_layer_inputs`. Cheap: these are small configs.
+    primary_provider: String,
+    primary_model: String,
+    pice_config: PiceConfig,
+    workflow: WorkflowConfig,
+    /// Seam-runner inputs. `layer_paths` is inherently cross-layer
+    /// (boundary checks read counterpart files), so it's shared — but
+    /// that shared read isn't a context-isolation breach because the
+    /// ORCHESTRATOR runs seam checks, not the provider.
+    active_set: HashSet<String>,
+    merged_seams: BTreeMap<String, Vec<String>>,
+    layer_paths: BTreeMap<String, Vec<PathBuf>>,
+    project_root: PathBuf,
+    full_diff: String,
+    seam_registry: Arc<Registry>,
+}
+
+/// Outcome of one parallel cohort task. The outer `run_stack_loops_with_cancel`
+/// collects these by layer name, then flushes in DAG order so manifest
+/// `layers[]` ordering is topological (not completion-order).
+///
+/// `streamed_chunks` holds the per-layer status lines the task would have
+/// emitted incrementally in the sequential path; the outer function prints
+/// them after drain so parallel output doesn't interleave.
+struct LayerOutcome {
+    layer_name: String,
+    layer_result: LayerResult,
+    streamed_chunks: Vec<String>,
+}
+
+/// Extract LAYER-OWN inputs from `cfg` for `layer_name`. The result owns
+/// its data and has no lifetime parameter — spawn-safe by construction.
+///
+/// Caller has already vetted that `layer_name` is active AND has a layer
+/// def AND has a non-empty filtered diff. The three "skip" paths are
+/// handled inline in the outer loop to keep this helper focused on the
+/// one case that actually spawns work.
+///
+/// The argument count is load-bearing: every value is an OWNED projection
+/// of cfg that the spawned task needs. Collapsing these into a single
+/// "context" struct would require introducing another cross-layer
+/// aggregate which is exactly what we're trying to avoid (see the
+/// "compile-time isolation" comment above). Allow the clippy lint here.
+#[allow(clippy::too_many_arguments)]
+fn build_per_layer_inputs(
+    cfg: &StackLoopsConfig<'_>,
+    layer_name: &str,
+    contract_content: String,
+    filtered_diff: String,
+    claude_md: &str,
+    active_set: &HashSet<String>,
+    layer_paths: &BTreeMap<String, Vec<PathBuf>>,
+    full_diff: &str,
+    seam_registry: Arc<Registry>,
+) -> LayerInputs {
+    LayerInputs {
+        layer_name: layer_name.to_string(),
+        contract_content,
+        filtered_diff,
+        claude_md: claude_md.to_string(),
+        effective_tier: effective_tier_for(cfg.workflow, layer_name),
+        min_confidence: effective_min_confidence_for(cfg.workflow, layer_name),
+        primary_provider: cfg.primary_provider.to_string(),
+        primary_model: cfg.primary_model.to_string(),
+        pice_config: cfg.pice_config.clone(),
+        workflow: cfg.workflow.clone(),
+        active_set: active_set.clone(),
+        merged_seams: cfg.merged_seams.clone(),
+        layer_paths: layer_paths.clone(),
+        project_root: cfg.project_root.to_path_buf(),
+        full_diff: full_diff.to_string(),
+        seam_registry,
+    }
+}
+
+/// Run the full per-layer evaluation pipeline for ONE layer with owned
+/// inputs: provider startup, adaptive pass loop, seam checks, result
+/// routing. Returns a `LayerOutcome` the outer function inserts into the
+/// manifest in DAG order.
+///
+/// The `cancel` token is checked at session boundaries inside the
+/// adaptive loop's transport layer. On `cancel.cancelled()` the in-flight
+/// provider RPC aborts via `tokio::select!` and the function returns a
+/// `Cancelled`-flavored `LayerResult::Failed` so the manifest reflects
+/// which layer did not complete.
+async fn evaluate_one_layer(
+    inputs: LayerInputs,
+    pass_sink: Arc<dyn PassMetricsSink>,
+    cancel: CancellationToken,
+) -> LayerOutcome {
+    let mut chunks: Vec<String> = Vec::new();
+    chunks.push(format!("  Evaluating layer: {}...\n", inputs.layer_name));
+
+    // Short-circuit on pre-existing cancellation so we don't even start
+    // the provider. Pre-spawn cancel = no provider startup = zero cost.
+    if cancel.is_cancelled() {
+        let layer_result = LayerResult {
+            name: inputs.layer_name.clone(),
+            status: LayerStatus::Failed,
+            passes: Vec::new(),
+            seam_checks: no_seam_checks(),
+            halted_by: Some(CancelledReason::PreSpawn.as_halted_by()),
+            final_confidence: None,
+            total_cost_usd: None,
+            escalation_events: None,
+        };
+        chunks.push(format!("  [{}] Cancelled\n", inputs.layer_name));
+        return LayerOutcome {
+            layer_name: inputs.layer_name.clone(),
+            layer_result,
+            streamed_chunks: chunks,
+        };
+    }
+
+    // Race the adaptive pipeline against the cancellation token. The
+    // provider sessions inside `try_run_layer_adaptive_owned` are
+    // torn down via RAII inside that function — on cancel we just drop
+    // the future and let those destructors run. The adaptive path does
+    // NOT spawn additional tokio tasks (just awaits on child processes),
+    // so dropping the outer future cascades cleanly.
+    let eval_future = try_run_layer_adaptive_owned(
+        inputs.layer_name.clone(),
+        inputs.contract_content.clone(),
+        inputs.filtered_diff.clone(),
+        inputs.claude_md.clone(),
+        inputs.primary_provider.clone(),
+        inputs.primary_model.clone(),
+        inputs.pice_config.clone(),
+        inputs.workflow.clone(),
+        inputs.project_root.clone(),
+        Arc::clone(&pass_sink),
+    );
+
+    let adaptive_outcome = tokio::select! {
+        out = eval_future => out,
+        _ = cancel.cancelled() => {
+            let layer_result = LayerResult {
+                name: inputs.layer_name.clone(),
+                status: LayerStatus::Failed,
+                passes: Vec::new(),
+                seam_checks: no_seam_checks(),
+                halted_by: Some(CancelledReason::InFlight.as_halted_by()),
+                final_confidence: None,
+                total_cost_usd: None,
+                escalation_events: None,
+            };
+            chunks.push(format!("  [{}] Cancelled\n", inputs.layer_name));
+            return LayerOutcome {
+                layer_name: inputs.layer_name.clone(),
+                layer_result,
+                streamed_chunks: chunks,
+            };
+        }
+    };
+
+    // Seam checks run after the adaptive loop. Cheap + deterministic, no
+    // cancellation plumbing needed here.
+    let seam_checks = run_seams_for_layer(
+        &inputs.layer_name,
+        &inputs.active_set,
+        &inputs.merged_seams,
+        inputs.seam_registry.as_ref(),
+        &inputs.project_root,
+        &inputs.full_diff,
+        &inputs.layer_paths,
+    );
+    let first_failed_seam = seam_checks
+        .iter()
+        .find(|c| c.status == CheckStatus::Failed)
+        .map(|c| c.name.clone());
+
+    let layer_result = match adaptive_outcome {
+        LayerAdaptiveResult::Completed(outcome) => build_adaptive_layer_result(
+            inputs.layer_name.clone(),
+            outcome,
+            seam_checks,
+            first_failed_seam,
+            inputs.min_confidence,
+        ),
+        LayerAdaptiveResult::NotStarted => phase1_pending_layer_result(
+            inputs.layer_name.clone(),
+            inputs.effective_tier,
+            inputs.filtered_diff.len(),
+            seam_checks,
+            first_failed_seam,
+        ),
+        LayerAdaptiveResult::RuntimeError(msg) => runtime_failed_layer_result(
+            inputs.layer_name.clone(),
+            msg,
+            seam_checks,
+            first_failed_seam,
+        ),
+    };
+
+    chunks.push(format!(
+        "  [{}] {:?}\n",
+        inputs.layer_name, layer_result.status
+    ));
+
+    LayerOutcome {
+        layer_name: inputs.layer_name.clone(),
+        layer_result,
+        streamed_chunks: chunks,
+    }
+}
+
+/// Owned-inputs variant of [`try_run_layer_adaptive`]. Same semantics, but
+/// the signature takes owned `String` / `PiceConfig` / `WorkflowConfig` so
+/// the function can live inside a `tokio::spawn` future (which requires
+/// `'static`). The sequential path still uses the reference-based
+/// [`try_run_layer_adaptive`] for backwards compatibility with existing
+/// tests.
+#[allow(clippy::too_many_arguments)]
+async fn try_run_layer_adaptive_owned(
+    layer_name: String,
+    contract_toml: String,
+    filtered_diff: String,
+    claude_md: String,
+    primary_provider: String,
+    primary_model: String,
+    pice_config: PiceConfig,
+    workflow: WorkflowConfig,
+    project_root: PathBuf,
+    pass_sink: Arc<dyn PassMetricsSink>,
+) -> LayerAdaptiveResult {
+    // Build a transient `StackLoopsConfig` and delegate to the shared
+    // reference-based implementation. The config holds borrows of our
+    // locals — they stay alive for the duration of the await because
+    // `.await` on the returned future keeps this function's stack frame.
+    //
+    // NOTE: we construct a minimal `LayersConfig` placeholder because
+    // `try_run_layer_adaptive` doesn't actually read `cfg.layers` for
+    // the adaptive path — only `primary_provider`, `primary_model`,
+    // `pice_config`, `workflow`, and (post-review) `project_root`. The
+    // placeholder keeps the struct constructable without pulling the
+    // real layers config into the spawned task (another compile-time
+    // isolation lever).
+    //
+    // `project_root` is the REAL layer input — NOT a dummy. A prior
+    // revision passed `Path::new(".")` here on the assumption that
+    // `try_run_layer_adaptive` would not read the field. That held
+    // today but was a latent hazard: any future refactor touching
+    // `cfg.project_root` would silently resolve against the daemon's
+    // current working directory (typically `~/.pice/`) instead of the
+    // user's project. Threading the real path through
+    // `LayerInputs::project_root` closes the hazard.
+    let empty_layers = LayersConfig::default();
+    let dummy_plan = std::path::PathBuf::from("/dev/null");
+    let dummy_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let cfg = StackLoopsConfig {
+        layers: &empty_layers,
+        plan_path: &dummy_plan,
+        project_root: project_root.as_path(),
+        primary_provider: &primary_provider,
+        primary_model: &primary_model,
+        pice_config: &pice_config,
+        workflow: &workflow,
+        merged_seams: &dummy_seams,
+    };
+    try_run_layer_adaptive(
+        &cfg,
+        &layer_name,
+        &contract_toml,
+        &filtered_diff,
+        &claude_md,
+        pass_sink.as_ref(),
+    )
+    .await
+}
+
 /// Extract file paths from a unified diff output.
 ///
 /// Parses `diff --git a/... b/...` headers to extract the `b/` path
@@ -1129,8 +1644,9 @@ mod tests {
             merged_seams: &empty_seams,
         };
 
-        let mut pass_sink = super::super::adaptive_loop::NullPassSink;
-        let manifest = run_stack_loops(&cfg, &NullSink, false, &mut pass_sink)
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+        let manifest = run_stack_loops(&cfg, &NullSink, false, pass_sink)
             .await
             .unwrap();
 
@@ -1229,8 +1745,9 @@ mod tests {
             merged_seams: &empty_seams,
         };
 
-        let mut pass_sink = super::super::adaptive_loop::NullPassSink;
-        let manifest = run_stack_loops(&cfg, &NullSink, true, &mut pass_sink)
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+        let manifest = run_stack_loops(&cfg, &NullSink, true, pass_sink)
             .await
             .unwrap();
 
@@ -1367,8 +1884,9 @@ mod tests {
             merged_seams: &seams,
         };
 
-        let mut pass_sink = super::super::adaptive_loop::NullPassSink;
-        let manifest = run_stack_loops(&cfg, &NullSink, true, &mut pass_sink)
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+        let manifest = run_stack_loops(&cfg, &NullSink, true, pass_sink)
             .await
             .unwrap();
         let backend = manifest
