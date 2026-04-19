@@ -77,6 +77,12 @@ cargo test -p pice-daemon --test seam_integration
 cargo test -p pice-daemon --test adaptive_integration --test adaptive_concurrent
 cargo test -p pice-cli --test adaptive_integration
 
+# Phase 5 cohort parallelism (gate matrix, DAG order, context isolation, speedup, cancellation, hard cap)
+cargo test -p pice-daemon --test parallel_cohort_integration --test parallel_cohort_speedup_assertion
+
+# Phase 5 criterion bench (advisory — does NOT fail CI on regression; speedup gate lives in the assertion test above)
+cargo bench -p pice-daemon --bench parallel_cohort_speedup -- --quick
+
 # TS provider stack
 pnpm test
 ```
@@ -118,6 +124,18 @@ pnpm test
 | `provider-claude-code/__tests__/claude-code.test.ts` (7 tests) | Claude Code SDK provider | Capability declaration, prompt assembly, error propagation |
 | `provider-codex/__tests__/codex.test.ts` (5 tests) | Codex/OpenAI evaluator provider | Adversarial review structuring, cost extraction |
 
+**Phase 5 cohort parallelism (commits 1f6424f..84aa43f)**
+
+| Test File | Feature | What It Validates |
+| --------- | ------- | ----------------- |
+| `pice-daemon/tests/parallel_cohort_integration.rs` (~10 tests) | Gate matrix + DAG order + context isolation + cancellation + hard cap | Five-cell gate matrix via `tracing`-layer `path=` capture (`parallel` vs `sequential`), `parallel_cohort_preserves_dag_order` (manifest order = topological, not completion), `parallel_layers_dont_leak_context` (structural `EvaluateCreateParams.contract`/`.diff` inequality + `PICE_STUB_REQUEST_LOG`), `cancellation_aborts_in_flight_cohort` (cancel-to-return ≤ 300ms = 200ms + 100ms scheduler slack, `halted_by` begins `"cancelled:"`, Unix `libc::kill(pid, 0)` orphan probe via `PICE_STUB_ALIVE_FILE`), `max_parallelism_hard_cap_at_16` (20 layers × 100ms, requested 64 → clamped to 16) |
+| `pice-daemon/tests/parallel_cohort_speedup_assertion.rs` (1 test) | Speedup CI gate | `parallel_cohort_meets_16x_speedup` — real `#[tokio::test(flavor = "multi_thread")]` (NOT `tokio::time::pause()`), asserts `parallel_mean ≤ 0.625 × sequential_mean` (≥ 1.6× speedup). Advisory criterion bench at `crates/pice-daemon/benches/parallel_cohort_speedup.rs` runs same fixture at bench N for humans; CI-failing gate lives HERE |
+| `pice-daemon/tests/adaptive_concurrent.rs` (+ 3 Phase-5 additions, 7 total) | `PassMetricsSink` thread-safety + task-local cost rollup | `pass_sink_concurrent_record_no_data_race_null` (8×1000 on `NullPassSink`), `pass_sink_concurrent_record_no_data_race_recording` (4×250 on `RecordingPassSink`), `cost_aggregator_concurrent_record_produces_correct_rollup` (8 tasks × 100 observations × $0.01 = $8.00 ± 1e-9 — proves `CostStats` is task-local, no shared aggregator) |
+| `pice-daemon/src/metrics/store.rs::tests::db_backed_pass_sink_concurrent_record_no_lost_writes` (inline, 1 test) | SQLite-backed sink concurrency | 4 tasks × 250 `record_pass` calls on `Arc<DbBackedPassSink>` wrapping `Arc<Mutex<MetricsDb>>` → 1000 rows persisted, zero lost writes |
+| `pice-core/src/workflow/schema.rs::tests` (+ 3 Phase-5 additions) | `phases.evaluate.parallel` serde default | `evaluate_phase_parallel_default_true_when_field_omitted`, `workflow_yaml_empty_evaluate_block_applies_parallel_default`, `evaluate_phase_rejects_unknown_field_parralel_typo` (deny_unknown_fields) |
+| `provider-stub/__tests__/atomic-scores.test.ts` (8 tests) | Per-layer score isolation contract | `perLayerScoreEnvName` normalization, `parseStubScores` independence, 6 concurrent `Promise.all` interleaved (backend → [8,9,10], frontend → [7,7,7]), 50-iteration stress test across two layers, read-only array semantics |
+| `provider-stub/__tests__/latency.test.ts` (10 tests) | `PICE_STUB_LATENCY_MS` real-clock wait | env variants (unset, `200`, invalid), elapsed ≥ 190 ms at 200 ms env (documents ~50 ms jitter tolerance) |
+
 ### Source files these tests protect
 
 - `crates/pice-cli/src/main.rs` — CLI entrypoint
@@ -145,10 +163,19 @@ pnpm test
 - `packages/provider-claude-code/src/*.ts` — Claude Code SDK bridge
 - `packages/provider-codex/src/*.ts` — Codex/OpenAI bridge
 - `templates/pice/workflow.yaml` + `templates/pice/workflow-presets/*.yaml` — shipped defaults (capability-gate compatible)
+- `crates/pice-daemon/src/orchestrator/stack_loops.rs` — Phase 5 cohort parallel path: `MAX_PARALLELISM_HARD_CAP=16`, gate conjunction `parallel_configured && cohort_size>1 && max_parallelism>1`, `LayerInputs` owned-struct compile-time context-isolation boundary, `build_per_layer_inputs` single-threaded extractor, `tokio::JoinSet` + `Semaphore` dispatch, `biased` `tokio::select!` with `cancel_fired` gate, `CancellationToken` child-token propagation, `"cancelled:{pre_spawn,in_flight,join_aborted}"` halted_by markers, DAG-order manifest emission, `debug!(target: "pice.cohort", path=...)` gate observability
+- `crates/pice-daemon/src/orchestrator/adaptive_loop.rs` — Phase 5 `PassMetricsSink: Send + Sync` trait with `&self` `record_pass`, `NullPassSink` stateless, `RecordingPassSink` with `Mutex<Vec<_>>` + poison-safe `rows()` reader, task-local `CostStats` (no shared aggregator)
+- `crates/pice-daemon/src/provider/host.rs` — Phase 5 `tokio::process::Command::kill_on_drop(true)` on `ProviderHost::spawn` — load-bearing for zero-orphan-session invariant on cohort cancellation
+- `crates/pice-daemon/src/metrics/store.rs` — Phase 5 `DbBackedPassSink` wrapping `Arc<Mutex<MetricsDb>>` for concurrent SQLite writes from parallel cohort tasks
+- `crates/pice-core/src/workflow/schema.rs` — Phase 5 `EvaluatePhase.parallel: bool` with `#[serde(default = "default_evaluate_parallel")]` returning `true` (deny_unknown_fields closes the empty-evaluate-block regression)
+- `crates/pice-daemon/benches/parallel_cohort_speedup.rs` — Phase 5 criterion bench (advisory only — no CI failure on regression)
+- `crates/pice-daemon/Cargo.toml` — Phase 5 `[target.'cfg(unix)'.dev-dependencies] libc = "0.2"` for orphan-PID liveness probe in cancellation test; `tokio-util` with `rt` feature for `CancellationToken`
+- `packages/provider-stub/src/deterministic.ts` — Phase 5 `perLayerScoreEnvName` + `PICE_STUB_SCORES_<LAYER>` per-layer isolation (disjoint score arrays, zero shared-iterator contention)
+- `packages/provider-stub/src/index.ts` — Phase 5 `PICE_STUB_LATENCY_MS` real-clock setTimeout, `PICE_STUB_ALIVE_FILE` alive/done PID sentinel, `PICE_STUB_REQUEST_LOG` per-request JSONL capture
 
 ### Expected results
 
-All tests should pass. Baseline: **811 Rust tests (1 ignored — doc-test in `crates/pice-daemon/src/handlers/mod.rs` line 5), 78 TypeScript tests, 0 lint errors, 0 warnings, clean release build.**
+All tests should pass. Baseline: **829 Rust tests (1 ignored — doc-test in `crates/pice-daemon/src/handlers/mod.rs` line 5), 96 TypeScript tests, 0 lint errors, 0 warnings, clean release build.**
 
 If any fail after your changes:
 
@@ -193,7 +220,7 @@ pnpm build
 cargo build --release
 ```
 
-Expected baseline: **811 Rust tests passing (1 ignored — doc-test in `pice-daemon/src/handlers/mod.rs`), 78 TypeScript tests passing, 0 lint errors, 0 clippy warnings (workspace + lib unwrap/expect denies), clean release build.**
+Expected baseline: **829 Rust tests passing (1 ignored — doc-test in `pice-daemon/src/handlers/mod.rs`), 96 TypeScript tests passing, 0 lint errors, 0 clippy warnings (workspace + lib unwrap/expect denies), clean release build.**
 
 ## Phase 3: Code Review of Current Changes
 
@@ -265,11 +292,19 @@ v0.2 daemon split:
 
 Phase 4 adaptive evaluation:
   - daemon adaptive_integration (~27 tests): ✓ / ✗
-  - daemon adaptive_concurrent (4 tests): ✓ / ✗
+  - daemon adaptive_concurrent (4 original + 3 Phase-5 concurrent-sink tests): ✓ / ✗
   - cli adaptive_integration (12 tests, including Pass-11 telemetry-off + stock-defaults): ✓ / ✗
   - TS roundtrip + deterministic stub (52 tests): ✓ / ✗
 
-Full Suite: 811 / 78 tests passing
+Phase 5 cohort parallelism:
+  - parallel_cohort_integration (~10 tests — gate matrix, DAG order, context isolation, cancellation + orphan probe, hard cap): ✓ / ✗
+  - parallel_cohort_speedup_assertion (1 test — ≥1.6× speedup CI gate on real multi-thread runtime): ✓ / ✗
+  - parallel_cohort_speedup bench (advisory, criterion): ✓ / ✗
+  - workflow/schema Phase-5 additions (3 tests — evaluate.parallel default + deny_unknown_fields): ✓ / ✗
+  - metrics/store db_backed_pass_sink_concurrent_record_no_lost_writes (1 test): ✓ / ✗
+  - TS atomic-scores + latency (18 tests): ✓ / ✗
+
+Full Suite: 829 / 96 tests passing
 Lint: 0 errors, 0 warnings (workspace + lib unwrap/expect denies)
 Build: PASS / FAIL
 ```
