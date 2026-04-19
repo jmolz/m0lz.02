@@ -23,6 +23,15 @@ pub struct ProviderHost {
 
 impl ProviderHost {
     /// Spawn a provider process with piped stdin/stdout and inherited stderr.
+    ///
+    /// `kill_on_drop(true)` is load-bearing for Phase 5 cohort cancellation:
+    /// when a cohort task's future drops (e.g., `JoinSet::abort_all()` after
+    /// the cancellation token fires), the `Child` drops too, and without
+    /// `kill_on_drop` the provider process would keep running until its own
+    /// work completed — orphaning API quota and violating the contract's
+    /// zero-orphan-sessions invariant. See the Phase 5 cancellation
+    /// contract criterion and `tests/parallel_cohort_integration.rs::
+    /// cancellation_leaves_no_orphan_provider_processes`.
     pub async fn spawn(command: &str, args: &[&str]) -> Result<Self> {
         debug!(command, ?args, "spawning provider process");
         let mut child = Command::new(command)
@@ -30,6 +39,7 @@ impl ProviderHost {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to spawn provider: {command}"))?;
 

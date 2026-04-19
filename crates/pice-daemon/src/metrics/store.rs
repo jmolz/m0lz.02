@@ -1090,4 +1090,86 @@ mod tests {
         let pending = get_pending_telemetry(&db, 3).unwrap();
         assert_eq!(pending.len(), 3);
     }
+
+    /// Phase 5 cohort parallelism — contract criterion #4: the SQLite
+    /// `PassMetricsSink` must tolerate `record_pass` calls from multiple
+    /// cohort tasks simultaneously without losing writes or corrupting
+    /// state. Spawns 4 tokio tasks × 250 `record_pass` calls (= 1000
+    /// total) against a shared `Arc<DbBackedPassSink>`; asserts the
+    /// final `pass_events` row count is exactly 1000. The interior
+    /// `Mutex<MetricsDb>` serializes INSERTs while the `Arc` allows
+    /// every cohort task to hold its own cheap clone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn db_backed_pass_sink_concurrent_record_no_lost_writes() {
+        use crate::orchestrator::PassMetricsSink;
+        use std::sync::Arc;
+
+        let db = MetricsDb::open_in_memory().unwrap();
+        let scores = vec![CriterionScore {
+            name: "concurrent".to_string(),
+            score: 8,
+            threshold: 7,
+            passed: true,
+            findings: None,
+        }];
+        let eval_id = record_evaluation(
+            &db,
+            ".claude/plans/concurrent.md",
+            "Concurrent",
+            2,
+            true,
+            "stub",
+            "stub-model",
+            None,
+            None,
+            None,
+            &scores,
+        )
+        .unwrap();
+
+        let db_arc = Arc::new(std::sync::Mutex::new(db));
+        let sink = Arc::new(DbBackedPassSink {
+            db: Arc::clone(&db_arc),
+            evaluation_id: eval_id,
+        });
+
+        const TASKS: u32 = 4;
+        const CALLS_PER_TASK: u32 = 250;
+        let mut handles = Vec::with_capacity(TASKS as usize);
+        for task_idx in 0..TASKS {
+            // Cast per-task to Arc<dyn PassMetricsSink> to prove the
+            // trait object is what cohort tasks actually hold.
+            let sink_dyn: Arc<dyn PassMetricsSink> = Arc::clone(&sink) as Arc<dyn PassMetricsSink>;
+            handles.push(tokio::spawn(async move {
+                for i in 0..CALLS_PER_TASK {
+                    // Unique pass_index per insert across all tasks —
+                    // lets us detect duplicate writes or dropped ones.
+                    let pass_index = task_idx * CALLS_PER_TASK + i;
+                    sink_dyn
+                        .record_pass(pass_index, "stub", Some(8.0), Some(0.001))
+                        .expect("record_pass must not fail under concurrency");
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task panicked");
+        }
+
+        let db_guard = db_arc.lock().unwrap();
+        let count: i64 = db_guard
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM pass_events WHERE evaluation_id = ?1",
+                [eval_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count,
+            (TASKS * CALLS_PER_TASK) as i64,
+            "expected {} total pass_event rows (4 tasks × 250 calls); got {count} — \
+             indicates lost writes under concurrent record_pass",
+            TASKS * CALLS_PER_TASK
+        );
+    }
 }

@@ -54,6 +54,14 @@ tempfile = "3"
 # at `tests/parallel_cohort_speedup_assertion.rs` is what actually fails
 # CI on regression — `cargo bench` is informational only.
 criterion = { version = "0.5", features = ["async_tokio"] }
+# Phase 5 cancellation verification: `kill(pid, 0)` liveness probe in
+# `tests/parallel_cohort_integration.rs::find_orphan_alive_pids`. Used
+# to verify `ProviderHost::spawn`'s `kill_on_drop(true)` actually
+# terminates the Node stub on cohort cancellation — a missing kill
+# would leave orphan provider processes burning API quota after the
+# manifest has already returned. Unix-only; CI matrix covers macOS + Linux.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [[bench]]
 name = "parallel_cohort_speedup"

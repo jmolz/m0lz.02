@@ -301,8 +301,33 @@ export class StubProvider extends BaseProvider {
       // "multi_thread")]` precisely to keep real time advancing. See
       // `benches/parallel_cohort_speedup.rs` top-of-file comment.
       const latencyMs = readStubLatencyMs();
+
+      // Phase 5 cancellation verification: when PICE_STUB_ALIVE_FILE is set,
+      // emit "alive <pid>\n" BEFORE the sleep and "done <pid>\n" AFTER.
+      // Cancellation tests read the file after firing cancel and assert
+      // that every "alive" PID has either a matching "done" OR is dead
+      // (via kill -0). A kill_on_drop=true Child drop sends SIGKILL, so
+      // an orphaned "alive"-without-"done" PID must no longer exist.
+      // Test-only — when the env var is absent, no file I/O happens.
+      const aliveFile = process.env.PICE_STUB_ALIVE_FILE;
+      if (aliveFile) {
+        try {
+          appendFileSync(aliveFile, `alive ${process.pid}\n`);
+        } catch (err) {
+          console.error(`[stub] alive-file write failed: ${String(err)}`);
+        }
+      }
+
       if (latencyMs > 0) {
         await sleep(latencyMs);
+      }
+
+      if (aliveFile) {
+        try {
+          appendFileSync(aliveFile, `done ${process.pid}\n`);
+        } catch (err) {
+          console.error(`[stub] done-file write failed: ${String(err)}`);
+        }
       }
 
       // Default score if `PICE_STUB_SCORES` is not configured. Kept at 8 for
