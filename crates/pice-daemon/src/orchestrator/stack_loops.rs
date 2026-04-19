@@ -487,7 +487,8 @@ pub async fn run_stack_loops_with_cancel(
             // Any work_inputs layer that never produced an outcome was
             // cancelled at the join-handle layer. Synthesize a Failed
             // result so the manifest reflects what happened.
-            let mut seen: HashSet<String> = collected.iter().map(|o| o.layer_name.clone()).collect();
+            let mut seen: HashSet<String> =
+                collected.iter().map(|o| o.layer_name.clone()).collect();
             for out in collected {
                 work_chunks.insert(out.layer_name.clone(), out.streamed_chunks);
                 work_results.insert(out.layer_name, out.layer_result);
@@ -542,9 +543,7 @@ pub async fn run_stack_loops_with_cancel(
                 work_results.remove(layer_name),
             ) {
                 (Some(r), _) => {
-                    let chunks = immediate_chunks
-                        .remove(layer_name)
-                        .unwrap_or_default();
+                    let chunks = immediate_chunks.remove(layer_name).unwrap_or_default();
                     (r, chunks)
                 }
                 (None, Some(r)) => {
@@ -1384,7 +1383,10 @@ async fn evaluate_one_layer(
         ),
     };
 
-    chunks.push(format!("  [{}] {:?}\n", inputs.layer_name, layer_result.status));
+    chunks.push(format!(
+        "  [{}] {:?}\n",
+        inputs.layer_name, layer_result.status
+    ));
 
     LayerOutcome {
         layer_name: inputs.layer_name.clone(),

@@ -407,9 +407,7 @@ async fn sprt_accepts_and_halts_before_max_passes() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -452,9 +450,7 @@ async fn sprt_rejects_after_consistent_failures() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -491,9 +487,7 @@ async fn budget_halts_before_confidence() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -541,9 +535,7 @@ async fn adaptive_budget_fails_closed_when_provider_lacks_cost_telemetry() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -615,9 +607,7 @@ async fn adaptive_zero_budget_bypasses_cost_telemetry_gate() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -762,9 +752,7 @@ async fn cold_start_seed_blocks_overspend_on_pass_one() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -808,9 +796,7 @@ async fn max_passes_halts_uncertain_layer() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -884,9 +870,7 @@ async fn adts_three_level_escalation_exhausts() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1039,9 +1023,7 @@ async fn prompt_identical_across_passes() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let _manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let _manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
 
     let log_content = std::fs::read_to_string(&log_path).expect("stub request log present");
     let entries: Vec<serde_json::Value> = log_content
@@ -1130,9 +1112,7 @@ async fn vec_halts_when_entropy_stabilizes() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1174,9 +1154,7 @@ async fn vec_halt_on_failure_sequence_does_not_pass() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1218,9 +1196,7 @@ async fn adaptive_algo_none_respects_budget() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1488,9 +1464,7 @@ async fn cost_reconciliation_within_tolerance() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1562,9 +1536,7 @@ async fn cost_reconciliation_holds_when_provider_cost_invalid() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -1728,9 +1700,7 @@ async fn runtime_error_fails_layer_not_pending() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
 
     let backend = manifest
         .layers
@@ -1820,9 +1790,7 @@ async fn provider_init_failure_fails_layer_not_pending() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
 
     let backend = manifest
         .layers
@@ -2104,7 +2072,10 @@ async fn mid_loop_sink_failure_preserves_manifest_sink_parity() {
         1,
         "sink must also hold exactly 1 row"
     );
-    assert_eq!(sink_state.rows[0].0, 1, "sink row index must match manifest");
+    assert_eq!(
+        sink_state.rows[0].0, 1,
+        "sink row index must match manifest"
+    );
     assert_eq!(sink_state.rows[0].3, Some(0.02));
 
     // total_cost_usd reconciliation: manifest total == Σ(sink).
@@ -2315,9 +2286,7 @@ async fn unresolvable_provider_remains_phase1_pending_not_failed() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
 
     let backend = manifest
         .layers
@@ -2393,9 +2362,7 @@ async fn adts_budget_halt_wins_over_escalation_on_final_iteration() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()
@@ -2486,9 +2453,7 @@ async fn evaluate_result_filters_stale_notifications_by_session_id() {
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(NullPassSink);
-    let manifest = run_stack_loops(&cfg, &NullSink, true, sink)
-        .await
-        .unwrap();
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
     let backend = manifest
         .layers
         .iter()

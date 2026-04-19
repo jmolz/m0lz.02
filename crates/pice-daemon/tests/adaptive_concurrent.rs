@@ -263,9 +263,7 @@ async fn concurrent_evaluations_on_shared_db_have_disjoint_pass_events() {
             workflow: &wf_a,
             merged_seams: &seams_a,
         };
-        run_stack_loops(&cfg, &NullSink, true, sink)
-            .await
-            .unwrap()
+        run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap()
     });
 
     let handle_b = tokio::spawn(async move {
@@ -285,9 +283,7 @@ async fn concurrent_evaluations_on_shared_db_have_disjoint_pass_events() {
             workflow: &wf_b,
             merged_seams: &seams_b,
         };
-        run_stack_loops(&cfg, &NullSink, true, sink)
-            .await
-            .unwrap()
+        run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap()
     });
 
     let manifest_a = handle_a.await.unwrap();
