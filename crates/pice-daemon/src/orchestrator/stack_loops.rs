@@ -638,11 +638,7 @@ pub async fn run_stack_loops_with_cancel(
         if gate_check.any() {
             // Transition the named layers Passed → PendingReview.
             for name in &gate_check.layers_pending_review {
-                if let Some(layer) = manifest
-                    .layers
-                    .iter_mut()
-                    .find(|l| l.name == *name)
-                {
+                if let Some(layer) = manifest.layers.iter_mut().find(|l| l.name == *name) {
                     layer.status = LayerStatus::PendingReview;
                 }
             }
@@ -2068,6 +2064,142 @@ mod tests {
         assert_eq!(
             effective_adaptive_algo_for(&wf, "frontend"),
             pice_core::workflow::schema::AdaptiveAlgo::BayesianSprt
+        );
+    }
+
+    /// Phase 6 cohort-boundary gate check — orchestrator-side test that
+    /// exercises the same pure `pice_core::gate::check_gates_for_cohort`
+    /// helper the orchestrator calls at the cohort boundary. Contract
+    /// criterion #1 names this exact test location (the pure helper's
+    /// deep tests live in `pice-core::gate::tests`; this alias pins the
+    /// orchestrator-side integration to the same named assertion).
+    #[test]
+    fn check_gates_for_cohort_with_matching_trigger_enqueues_gate_with_pinned_fields() {
+        use pice_core::layers::manifest::{LayerResult, LayerStatus};
+        use pice_core::workflow::schema::{OnTimeout, ReviewConfig};
+        use std::collections::BTreeMap;
+
+        let workflow = pice_core::workflow::WorkflowConfig {
+            schema_version: "0.2".to_string(),
+            defaults: pice_core::workflow::schema::Defaults {
+                tier: 2,
+                min_confidence: 0.9,
+                max_passes: 5,
+                model: "sonnet".to_string(),
+                budget_usd: 0.0,
+                cost_cap_behavior: pice_core::workflow::schema::CostCapBehavior::Halt,
+                max_parallelism: None,
+            },
+            phases: pice_core::workflow::schema::Phases::default(),
+            layer_overrides: BTreeMap::new(),
+            review: Some(ReviewConfig {
+                enabled: true,
+                trigger: Some("layer == infrastructure".to_string()),
+                timeout_hours: 24,
+                on_timeout: OnTimeout::Reject,
+                notification: "stdout".to_string(),
+                retry_on_reject: 1,
+            }),
+            seams: None,
+        };
+        let layers = vec![LayerResult {
+            name: "infrastructure".to_string(),
+            status: LayerStatus::Passed,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: None,
+            final_confidence: Some(0.95),
+            total_cost_usd: Some(0.01),
+            escalation_events: None,
+        }];
+        let now: chrono::DateTime<chrono::Utc> = "2026-04-20T00:00:00Z".parse().unwrap();
+        let out = pice_core::gate::check_gates_for_cohort(
+            &workflow,
+            &layers,
+            &[],
+            &["infrastructure".to_string()],
+            "feat-6",
+            2,
+            "",
+            now,
+        );
+        assert_eq!(out.new_gates.len(), 1);
+        assert_eq!(out.layers_pending_review, vec!["infrastructure"]);
+        let g = &out.new_gates[0];
+        assert_eq!(g.layer, "infrastructure");
+        assert_eq!(g.reject_attempts_remaining, 1);
+        assert_eq!(g.on_timeout_action, OnTimeout::Reject);
+    }
+
+    /// Phase 6: cohort-boundary check preserves the reject counter
+    /// across re-gate events within one feature run. Contract
+    /// criterion #7 names this exact test location.
+    #[test]
+    fn check_gates_for_cohort_reuses_reject_counter_from_prior_gate() {
+        use pice_core::layers::manifest::{GateEntry, GateStatus, LayerResult, LayerStatus};
+        use pice_core::workflow::schema::{OnTimeout, ReviewConfig};
+        use std::collections::BTreeMap;
+
+        let workflow = pice_core::workflow::WorkflowConfig {
+            schema_version: "0.2".to_string(),
+            defaults: pice_core::workflow::schema::Defaults {
+                tier: 2,
+                min_confidence: 0.9,
+                max_passes: 5,
+                model: "sonnet".to_string(),
+                budget_usd: 0.0,
+                cost_cap_behavior: pice_core::workflow::schema::CostCapBehavior::Halt,
+                max_parallelism: None,
+            },
+            phases: pice_core::workflow::schema::Phases::default(),
+            layer_overrides: BTreeMap::new(),
+            review: Some(ReviewConfig {
+                enabled: true,
+                trigger: Some("layer == infrastructure".to_string()),
+                timeout_hours: 24,
+                on_timeout: OnTimeout::Reject,
+                notification: "stdout".to_string(),
+                retry_on_reject: 2,
+            }),
+            seams: None,
+        };
+        let layers = vec![LayerResult {
+            name: "infrastructure".to_string(),
+            status: LayerStatus::Passed,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: None,
+            final_confidence: Some(0.95),
+            total_cost_usd: Some(0.01),
+            escalation_events: None,
+        }];
+        let prior = GateEntry {
+            id: "feat-6:infrastructure:aaaa".to_string(),
+            layer: "infrastructure".to_string(),
+            status: GateStatus::Rejected,
+            trigger_expression: "layer == infrastructure".to_string(),
+            requested_at: "2026-04-20T00:00:00Z".to_string(),
+            timeout_at: "2026-04-21T00:00:00Z".to_string(),
+            on_timeout_action: OnTimeout::Reject,
+            reject_attempts_remaining: 0,
+            decision: Some("reject".to_string()),
+            decided_at: Some("2026-04-20T00:05:00Z".to_string()),
+        };
+        let now: chrono::DateTime<chrono::Utc> = "2026-04-20T00:10:00Z".parse().unwrap();
+        let out = pice_core::gate::check_gates_for_cohort(
+            &workflow,
+            &layers,
+            &[prior],
+            &["infrastructure".to_string()],
+            "feat-6",
+            2,
+            "",
+            now,
+        );
+        assert_eq!(out.new_gates.len(), 1);
+        assert_eq!(
+            out.new_gates[0].reject_attempts_remaining, 0,
+            "reject budget must persist from prior gate (0), not reset to 2"
         );
     }
 }

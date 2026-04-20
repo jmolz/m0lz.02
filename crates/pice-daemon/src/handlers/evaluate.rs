@@ -47,7 +47,10 @@ fn review_gate_pending_response(
                 "status".to_string(),
                 serde_json::json!(ExitJsonStatus::ReviewGatePending.as_str()),
             );
-            obj.insert("pending_gates".to_string(), serde_json::json!(pending_gates));
+            obj.insert(
+                "pending_gates".to_string(),
+                serde_json::json!(pending_gates),
+            );
         }
         return CommandResponse::ExitJson { code: 3, value };
     }
@@ -495,8 +498,7 @@ pub async fn run(
             project_root,
         ) {
             if path.exists() {
-                if let Ok(existing) =
-                    pice_core::layers::manifest::VerificationManifest::load(&path)
+                if let Ok(existing) = pice_core::layers::manifest::VerificationManifest::load(&path)
                 {
                     if existing.overall_status
                         == pice_core::layers::manifest::ManifestStatus::PendingReview
@@ -518,9 +520,7 @@ pub async fn run(
         // non-TTY / JSON callers can loop on the structured status
         // discriminant. TTY callers in the CLI detect the same payload
         // to drive the prompt loop.
-        if manifest.overall_status
-            == pice_core::layers::manifest::ManifestStatus::PendingReview
-        {
+        if manifest.overall_status == pice_core::layers::manifest::ManifestStatus::PendingReview {
             return Ok(review_gate_pending_response(&manifest, req.json));
         }
 
