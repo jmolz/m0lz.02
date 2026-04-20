@@ -219,21 +219,13 @@ pub async fn run_stack_loops_with_cancel(
     // Build DAG for ordering
     let dag = config.build_dag().context("failed to build layer DAG")?;
 
-    // Create manifest and persist initial state
-    let mut manifest = VerificationManifest::new(&feature_id, project_root);
-    manifest.overall_status = ManifestStatus::InProgress;
-
-    // Ensure state directory exists and persist the in-progress manifest.
-    // On crash/retry, the daemon can resume from this checkpoint.
+    // Compute manifest path up front so we can attempt to resume from disk.
     let manifest_path = match VerificationManifest::manifest_path_for(&feature_id, project_root) {
         Ok(path) => {
             if let Some(parent) = path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     warn!("failed to create manifest state dir: {e}");
                 }
-            }
-            if let Err(e) = manifest.save(&path) {
-                warn!("failed to persist initial manifest: {e}");
             }
             Some(path)
         }
@@ -242,6 +234,50 @@ pub async fn run_stack_loops_with_cancel(
             None
         }
     };
+
+    // Resume-from-disk (Phase 6): if a manifest already exists on disk for
+    // this feature, load it so previously decided layers (Passed / Failed /
+    // Skipped / PendingReview) and prior gates (including reject counters)
+    // survive across `pice evaluate` re-invocations driven by the CLI auto-
+    // resume loop. Without this, every re-invocation would start from a
+    // fresh manifest, wipe all reviewer decisions, and re-fire the same
+    // gates indefinitely. Pending/InProgress layer entries are stale (a
+    // retry-after-reject, or a crash-interrupted run) and get re-evaluated
+    // in this invocation — their stale entries are dropped in the per-
+    // cohort layer loop below.
+    let mut manifest = manifest_path
+        .as_ref()
+        .filter(|p| p.exists())
+        .and_then(|p| match VerificationManifest::load(p) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                warn!(
+                    path = %p.display(),
+                    error = %e,
+                    "failed to load existing manifest; starting fresh"
+                );
+                None
+            }
+        })
+        .inspect(|loaded| {
+            info!(
+                feature_id = %feature_id,
+                existing_layers = loaded.layers.len(),
+                existing_gates = loaded.gates.len(),
+                prior_status = ?loaded.overall_status,
+                "resuming from existing manifest"
+            );
+        })
+        .unwrap_or_else(|| VerificationManifest::new(&feature_id, project_root));
+    manifest.overall_status = ManifestStatus::InProgress;
+
+    // Persist the in-progress checkpoint (fresh or resumed) so that a
+    // mid-run crash leaves the manifest discoverable by the next evaluate.
+    if let Some(ref path) = manifest_path {
+        if let Err(e) = manifest.save(path) {
+            warn!("failed to persist initial manifest: {e}");
+        }
+    }
 
     // Phase 5 cohort parallelism: compute the concurrency cap once per
     // evaluation. `defaults.max_parallelism: None` → `num_cpus::get()`
@@ -296,6 +332,44 @@ pub async fn run_stack_loops_with_cancel(
         let mut work_inputs: Vec<LayerInputs> = Vec::new();
 
         for layer_name in cohort {
+            // Resume-preserve: if a prior run's manifest already carries a
+            // decided result for this layer (Passed / Failed / Skipped /
+            // PendingReview), move it into `immediate_results` so the DAG-
+            // order emission carries it forward unchanged. We do NOT re-
+            // evaluate. Pending/InProgress entries are stale (retry path
+            // or crash-interrupted) and are dropped here so the cohort
+            // processes them as new work.
+            if let Some(idx) = manifest.layers.iter().position(|l| &l.name == layer_name) {
+                let existing_status = manifest.layers[idx].status.clone();
+                if matches!(
+                    existing_status,
+                    LayerStatus::Passed
+                        | LayerStatus::Failed
+                        | LayerStatus::Skipped
+                        | LayerStatus::PendingReview
+                ) {
+                    debug!(
+                        layer = %layer_name,
+                        status = ?existing_status,
+                        "resume: preserving decided layer result"
+                    );
+                    let preserved = manifest.layers.remove(idx);
+                    immediate_results.insert(layer_name.clone(), preserved);
+                    immediate_chunks.insert(
+                        layer_name.clone(),
+                        vec![format!("  [{layer_name}] resumed ({existing_status:?})\n")],
+                    );
+                    continue;
+                }
+                // Stale Pending/InProgress — drop it; we're about to re-run.
+                debug!(
+                    layer = %layer_name,
+                    status = ?existing_status,
+                    "resume: dropping stale non-terminal layer entry; will re-evaluate"
+                );
+                manifest.layers.remove(idx);
+            }
+
             if !active.contains(layer_name) {
                 debug!(layer = %layer_name, "skipping inactive layer");
                 immediate_results.insert(

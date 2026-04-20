@@ -1525,6 +1525,48 @@ pub fn insert_gate_decision(
     }
 }
 
+/// Fetch a single `gate_decisions` row by `gate_id`. Used for crash-
+/// recovery: after the audit insert succeeds but before the manifest
+/// mutation lands, the process can die. On the next decide attempt the
+/// UNIQUE(gate_id) violation fires; the handler then calls this helper
+/// to recover the recorded decision and complete the manifest mutation
+/// idempotently. Returns `Ok(None)` when no row matches — the gate_id
+/// truly does not exist yet (distinct from the resumable case).
+pub fn find_gate_decision_by_id(
+    db: &MetricsDb,
+    gate_id: &str,
+) -> anyhow::Result<Option<GateDecisionRecord>> {
+    use anyhow::Context;
+    let mut stmt = db
+        .conn()
+        .prepare(
+            "SELECT id, gate_id, feature_id, layer, trigger_expression, \
+             decision, reviewer, reason, requested_at, decided_at, elapsed_seconds \
+             FROM gate_decisions WHERE gate_id = ?1 LIMIT 1",
+        )
+        .context("prepare find_gate_decision_by_id")?;
+    let mut rows = stmt
+        .query(rusqlite::params![gate_id])
+        .context("execute find_gate_decision_by_id")?;
+    if let Some(row) = rows.next().context("step find_gate_decision_by_id")? {
+        Ok(Some(GateDecisionRecord {
+            id: row.get(0)?,
+            gate_id: row.get(1)?,
+            feature_id: row.get(2)?,
+            layer: row.get(3)?,
+            trigger_expression: row.get(4)?,
+            decision: row.get(5)?,
+            reviewer: row.get(6)?,
+            reason: row.get(7)?,
+            requested_at: row.get(8)?,
+            decided_at: row.get(9)?,
+            elapsed_seconds: row.get(10)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Query helpers share the UNIQUE-violation classifier so downstream
 /// callers can't regress by inlining their own `e.to_string().contains(...)`.
 fn is_gate_id_unique_violation(err: &rusqlite::Error) -> bool {
