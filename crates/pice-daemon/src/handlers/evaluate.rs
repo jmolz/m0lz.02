@@ -245,11 +245,7 @@ fn reconcile_expired_gates_inline(
         gate_mut.decision = Some(decision_str.to_string());
         gate_mut.decided_at = Some(decided_at_str.clone());
         gate_mut.reject_attempts_remaining = new_reject_budget;
-        if let Some(layer) = manifest
-            .layers
-            .iter_mut()
-            .find(|l| l.name == action.layer)
-        {
+        if let Some(layer) = manifest.layers.iter_mut().find(|l| l.name == action.layer) {
             layer.status = new_layer_status;
             if let Some(halted) = &new_halted_by {
                 layer.halted_by = Some(halted.clone());
@@ -1468,8 +1464,7 @@ mod tests {
                 layer: "infrastructure".to_string(),
                 status: GateStatus::Pending,
                 trigger_expression: "layer == infrastructure".to_string(),
-                requested_at: chrono::Utc::now()
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                requested_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 timeout_at: (chrono::Utc::now() + chrono::Duration::hours(24))
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
                 on_timeout_action: pice_core::workflow::schema::OnTimeout::Reject,
