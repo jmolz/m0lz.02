@@ -1290,6 +1290,78 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_rfc3339_normalizes_plus_zero_to_z() {
+        // Same instant, two encodings → one canonical form.
+        assert_eq!(
+            canonicalize_rfc3339("2026-04-20T12:00:00+00:00"),
+            canonicalize_rfc3339("2026-04-20T12:00:00Z"),
+        );
+    }
+
+    #[test]
+    fn canonicalize_rfc3339_passes_through_unparseable_with_warn() {
+        // Don't reject — legacy rows stay loadable.
+        assert_eq!(canonicalize_rfc3339("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    #[test]
+    fn query_gate_decisions_since_matches_mixed_utc_encodings() {
+        // Phase 6 Codex review finding #5: filter bound in `+00:00` form
+        // must match rows stored in `Z` form. Without canonicalization
+        // the ASCII compare '+' (0x2B) < 'Z' (0x5A) would make the row
+        // sort-compare as earlier and fall outside a `+00:00` bound.
+        let db = MetricsDb::open_in_memory().unwrap();
+        insert_gate_decision(
+            &db,
+            &GateDecisionRow {
+                gate_id: "z_form",
+                requested_at: "2026-04-20T12:00:00Z",
+                ..sample_row()
+            },
+        )
+        .unwrap();
+        let rows = query_gate_decisions(
+            &db,
+            &GateDecisionsFilter {
+                since: Some("2026-04-20T12:00:00+00:00".to_string()),
+                ..GateDecisionsFilter::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "since-filter must match across encodings");
+    }
+
+    #[test]
+    fn query_gate_decisions_orders_deterministically_across_mixed_encodings() {
+        // Same instant different encoding → canonical form sorts stably.
+        let db = MetricsDb::open_in_memory().unwrap();
+        insert_gate_decision(
+            &db,
+            &GateDecisionRow {
+                gate_id: "plus_form",
+                requested_at: "2026-04-20T12:00:00+00:00",
+                ..sample_row()
+            },
+        )
+        .unwrap();
+        insert_gate_decision(
+            &db,
+            &GateDecisionRow {
+                gate_id: "z_form",
+                requested_at: "2026-04-20T12:00:01Z",
+                ..sample_row()
+            },
+        )
+        .unwrap();
+        let rows = query_gate_decisions(&db, &GateDecisionsFilter::default()).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.gate_id.as_str()).collect::<Vec<_>>(),
+            vec!["plus_form", "z_form"],
+            "canonical Z-form sorts by instant, not lexicographic encoding"
+        );
+    }
+
+    #[test]
     fn query_gate_decisions_orders_by_requested_at_ascending() {
         // Ascending order is deterministic for CSV output. A later
         // phase may add a `--reverse` flag; the default orientation
@@ -1383,13 +1455,48 @@ pub enum GateInsertError {
     Other(#[from] anyhow::Error),
 }
 
+/// Canonicalize an RFC3339 timestamp to `YYYY-MM-DDTHH:MM:SS[.fff]Z`
+/// (UTC, `Z` suffix). Storing timestamps as raw TEXT with mixed
+/// `+00:00` and `Z` encodings breaks lexicographic ORDER BY and
+/// inclusive range filters — the same instant sorts before or after
+/// depending on encoding. Parsing + re-emitting with `SecondsFormat::Secs`
+/// normalizes everything to one canonical form at the write boundary.
+///
+/// If parsing fails, return the original string unchanged — the CHECK
+/// constraints on `requested_at`/`decided_at` are NOT NULL only, not
+/// format-specific, so we don't want to reject a legacy row. Log the
+/// parse failure so the operator can catch drift.
+///
+/// Phase 6 Codex review finding #5.
+pub(crate) fn canonicalize_rfc3339(s: &str) -> String {
+    use chrono::{DateTime, SecondsFormat, Utc};
+    match DateTime::parse_from_rfc3339(s) {
+        Ok(dt) => dt
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        Err(e) => {
+            tracing::warn!(
+                input = %s,
+                error = %e,
+                "gate_decisions: non-RFC3339 timestamp stored verbatim"
+            );
+            s.to_string()
+        }
+    }
+}
+
 /// Insert a gate_decisions row. The `UNIQUE(gate_id)` constraint turns
 /// a concurrent double-decide into a typed `DuplicateGateId` error at
-/// the first SQLite call — no in-process CAS needed.
+/// the first SQLite call — no in-process CAS needed. Timestamps are
+/// canonicalized to RFC3339-Z at write time so `ORDER BY requested_at`
+/// and `requested_at >= ?` work correctly regardless of whether the
+/// caller supplied `Z` or `+00:00`.
 pub fn insert_gate_decision(
     db: &MetricsDb,
     row: &GateDecisionRow<'_>,
 ) -> std::result::Result<i64, GateInsertError> {
+    let requested_at = canonicalize_rfc3339(row.requested_at);
+    let decided_at = canonicalize_rfc3339(row.decided_at);
     let result = db.conn().execute(
         "INSERT INTO gate_decisions (gate_id, feature_id, layer, trigger_expression, \
          decision, reviewer, reason, requested_at, decided_at, elapsed_seconds) \
@@ -1402,8 +1509,8 @@ pub fn insert_gate_decision(
             row.decision,
             row.reviewer,
             row.reason,
-            row.requested_at,
-            row.decided_at,
+            requested_at,
+            decided_at,
             row.elapsed_seconds,
         ],
     );
@@ -1457,8 +1564,12 @@ pub fn query_gate_decisions(
         params.push(Box::new(fid.clone()));
     }
     if let Some(since) = &filter.since {
+        // Canonicalize the filter bound to match the stored form
+        // (insert_gate_decision canonicalizes at write time). Without
+        // this, a caller passing "2026-04-20T00:00:00+00:00" would miss
+        // rows stored as "2026-04-20T00:00:00Z" and vice versa.
         sql.push_str(" AND requested_at >= ?");
-        params.push(Box::new(since.clone()));
+        params.push(Box::new(canonicalize_rfc3339(since)));
     }
     sql.push_str(" ORDER BY requested_at ASC");
     if let Some(limit) = filter.limit {

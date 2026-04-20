@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod plan;
 pub mod prime;
 pub mod review;
+pub mod review_gate;
 pub mod status;
 pub mod validate;
 

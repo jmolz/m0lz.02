@@ -612,6 +612,56 @@ pub async fn run_stack_loops_with_cancel(
             warn!("cancellation observed between cohorts; aborting remaining cohorts");
             break;
         }
+
+        // Phase 6 review-gate cohort-boundary check (Task 5):
+        // For every layer in this cohort that just graded Passed, consult
+        // the workflow's review trigger and any per-layer override. If any
+        // gate fires, record it on the manifest, transition the affected
+        // layer(s) to `PendingReview`, set `overall_status = PendingReview`,
+        // persist the manifest, and break out of the cohort loop so the
+        // evaluate handler returns control to the caller. The per-manifest
+        // locks (tokio mutex + fs2 flock) are released naturally when the
+        // handler returns — subsequent `ReviewGate::Decide` RPCs acquire
+        // them without contention. This is the "lock release between
+        // cohorts" invariant from plan Task 5, implemented via handler
+        // early-return rather than intra-run lock juggling.
+        let gate_check = pice_core::gate::check_gates_for_cohort(
+            cfg.workflow,
+            &manifest.layers,
+            &manifest.gates,
+            cohort,
+            &feature_id,
+            cfg.workflow.defaults.tier,
+            "", // change_scope — filled by a later phase when real scope detection lands.
+            chrono::Utc::now(),
+        );
+        if gate_check.any() {
+            // Transition the named layers Passed → PendingReview.
+            for name in &gate_check.layers_pending_review {
+                if let Some(layer) = manifest
+                    .layers
+                    .iter_mut()
+                    .find(|l| l.name == *name)
+                {
+                    layer.status = LayerStatus::PendingReview;
+                }
+            }
+            // Append gates and recompute overall status.
+            manifest.gates.extend(gate_check.new_gates);
+            manifest.compute_overall_status();
+            // Persist so the decide handler sees the gates.
+            if let Some(ref path) = manifest_path {
+                if let Err(e) = manifest.save(path) {
+                    warn!("failed to persist pending-review manifest: {e}");
+                }
+            }
+            info!(
+                cohort_index = cohort_idx,
+                pending_layers = ?gate_check.layers_pending_review,
+                "review gate(s) fired; pausing evaluation"
+            );
+            return Ok(manifest);
+        }
     }
 
     // Post-process: propagate seam findings to inactive layers. When one

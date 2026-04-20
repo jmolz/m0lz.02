@@ -15,6 +15,60 @@ use crate::server::router::DaemonContext;
 /// Shared by the startup DB-open / header-insert paths (Pass-7) and the
 /// post-evaluation finalize / seam-finding paths (Pass-6). Exit code is
 /// 1 — this is a persistence failure, not a contract failure (exit 2).
+/// Build the `ReviewGatePending` response when the orchestrator halted
+/// at a cohort boundary awaiting a human decision. Phase 6 Task 5 +
+/// Task 18 contract: exit code **3** (not 1, not 2), JSON payload carries
+/// `status: "review-gate-pending"` + the full manifest + a pending-gates
+/// summary so CLI loops and CI scripts can trigger the right `pice
+/// review-gate` call.
+fn review_gate_pending_response(
+    manifest: &pice_core::layers::manifest::VerificationManifest,
+    json_mode: bool,
+) -> CommandResponse {
+    use pice_core::layers::manifest::GateStatus;
+    let pending_gates: Vec<serde_json::Value> = manifest
+        .gates
+        .iter()
+        .filter(|g| g.status == GateStatus::Pending)
+        .map(|g| {
+            serde_json::json!({
+                "id": g.id,
+                "layer": g.layer,
+                "trigger_expression": g.trigger_expression,
+                "timeout_at": g.timeout_at,
+                "reject_attempts_remaining": g.reject_attempts_remaining,
+            })
+        })
+        .collect();
+    if json_mode {
+        let mut value = serde_json::to_value(manifest).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "status".to_string(),
+                serde_json::json!(ExitJsonStatus::ReviewGatePending.as_str()),
+            );
+            obj.insert("pending_gates".to_string(), serde_json::json!(pending_gates));
+        }
+        return CommandResponse::ExitJson { code: 3, value };
+    }
+    let mut message = String::from("\nEvaluation paused — review gate(s) pending:\n\n");
+    for g in &manifest.gates {
+        if g.status != GateStatus::Pending {
+            continue;
+        }
+        message.push_str(&format!(
+            "  ⏸ {} (layer: {}, trigger: {})\n      id: {}\n      timeout: {}\n      retry budget: {}\n",
+            g.layer, g.layer, g.trigger_expression, g.id, g.timeout_at, g.reject_attempts_remaining,
+        ));
+    }
+    message.push_str(
+        "\nRun `pice review-gate --list` to see all pending gates, \
+         or `pice review-gate --gate-id <ID> --decision approve|reject|skip` \
+         to action one.\n",
+    );
+    CommandResponse::Exit { code: 3, message }
+}
+
 fn metrics_persist_failed_response(json_mode: bool, errors: Vec<String>) -> CommandResponse {
     if json_mode {
         let value = json!({
@@ -429,10 +483,46 @@ pub async fn run(
                 }),
                 _ => std::sync::Arc::new(crate::orchestrator::NullPassSink),
             };
+        // Phase 6 auto-resume: if an existing manifest for this feature
+        // is already in `PendingReview`, return immediately with
+        // `ReviewGatePending` — the user must action the gates before
+        // another cohort advances. Without this short-circuit, a fresh
+        // `pice evaluate plan.md` on a pending-review feature would run
+        // the cohort loop from scratch and stomp on the pending gates.
+        let manifest_feature_id_for_resume = &manifest_feature_id;
+        if let Ok(path) = pice_core::layers::manifest::VerificationManifest::manifest_path_for(
+            manifest_feature_id_for_resume,
+            project_root,
+        ) {
+            if path.exists() {
+                if let Ok(existing) =
+                    pice_core::layers::manifest::VerificationManifest::load(&path)
+                {
+                    if existing.overall_status
+                        == pice_core::layers::manifest::ManifestStatus::PendingReview
+                    {
+                        return Ok(review_gate_pending_response(&existing, req.json));
+                    }
+                }
+            }
+        }
+
         let manifest = crate::orchestrator::stack_loops::run_stack_loops(
             &stack_cfg, sink, req.json, pass_sink,
         )
         .await?;
+
+        // Phase 6: if the stack-loops run returned with at least one gate
+        // in `Pending` state (fired during this evaluation), convert the
+        // manifest response to a `ReviewGatePending` exit-3 payload so
+        // non-TTY / JSON callers can loop on the structured status
+        // discriminant. TTY callers in the CLI detect the same payload
+        // to drive the prompt loop.
+        if manifest.overall_status
+            == pice_core::layers::manifest::ManifestStatus::PendingReview
+        {
+            return Ok(review_gate_pending_response(&manifest, req.json));
+        }
 
         // Seam-aware exit code: if any layer is Failed (including via a
         // seam finding), we exit 2. Overall status being InProgress from

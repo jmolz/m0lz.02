@@ -70,6 +70,10 @@ enum Commands {
     /// Export audit trails (gate decisions, later: seam findings)
     Audit(commands::audit::AuditArgs),
 
+    /// List or decide pending review gates (Phase 6)
+    #[command(name = "review-gate")]
+    ReviewGate(commands::review_gate::ReviewGateArgs),
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
@@ -106,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Validate(args) => commands::validate::run(args).await,
         Commands::Daemon(args) => commands::daemon::run(args).await,
         Commands::Audit(args) => commands::audit::run(args).await,
+        Commands::ReviewGate(args) => commands::review_gate::run(args).await,
         Commands::Completions { shell } => {
             let mut cmd = <Cli as clap::CommandFactory>::command();
             generate(*shell, &mut cmd, "pice", &mut std::io::stdout());
