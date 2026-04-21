@@ -33,6 +33,7 @@ use super::adaptive_loop::{
     run_adaptive_passes, AdaptiveContext, AdaptiveOutcome, PassMetricsSink,
 };
 use super::{run_seams_for_layer, ProviderOrchestrator, StreamSink};
+use crate::events::{ManifestSaver, SaveIntent};
 use crate::prompt::layer_builder::build_layer_evaluation_prompt;
 
 /// Hard cap on parallel cohort tasks. Rate-limit-friendly against Anthropic /
@@ -75,6 +76,15 @@ pub struct StackLoopsConfig<'a> {
     /// violations BEFORE invoking the orchestrator. This field is the
     /// execution-time source of truth; the orchestrator does not re-merge.
     pub merged_seams: &'a BTreeMap<String, Vec<String>>,
+    /// Phase 7: manifest persistence + event-bus publication handle. Every
+    /// manifest state transition in the orchestrator goes through this
+    /// saver so the save + event emission are atomic. Inline mode and
+    /// test fixtures pass `&NullSaver`; background jobs pass
+    /// `&EventEmittingSaver::new(&ctx.events())`. The grep-coverage test
+    /// (`zero_raw_manifest_save_calls_in_orchestrator`) enforces that no
+    /// call site bypasses this trait to reach the low-level save path
+    /// directly.
+    pub saver: &'a dyn ManifestSaver,
 }
 
 /// Empty seam-check slot for layer results that never ran a seam check
@@ -273,9 +283,27 @@ pub async fn run_stack_loops_with_cancel(
 
     // Persist the in-progress checkpoint (fresh or resumed) so that a
     // mid-run crash leaves the manifest discoverable by the next evaluate.
+    // Phase 7: the per-cohort LayerStarted loop below is the canonical
+    // place for the "layer is starting" event. The initial checkpoint
+    // here predates any specific layer transition — it just locks in the
+    // resumed/fresh manifest so crash discovery works. We classify its
+    // intent as the first cohort's first layer going LayerStarted when a
+    // cohort exists; otherwise we skip the save (an empty DAG has nothing
+    // to checkpoint beyond what the dispatcher's `Queued` write already
+    // captured).
     if let Some(ref path) = manifest_path {
-        if let Err(e) = manifest.save(path) {
-            warn!("failed to persist initial manifest: {e}");
+        if let Some(first_cohort) = dag.cohorts.first() {
+            if let Some(first_layer) = first_cohort.first() {
+                if let Err(e) = cfg.saver.save_and_emit(
+                    &manifest,
+                    path,
+                    SaveIntent::LayerStarted {
+                        layer: first_layer.clone(),
+                    },
+                ) {
+                    warn!("failed to persist initial manifest: {e}");
+                }
+            }
         }
     }
 
@@ -664,10 +692,17 @@ pub async fn run_stack_loops_with_cancel(
                 }
             }
 
+            let completed_layer_name = layer_result.name.clone();
             manifest.add_layer_result(layer_result);
 
             if let Some(ref path) = manifest_path {
-                if let Err(e) = manifest.save(path) {
+                if let Err(e) = cfg.saver.save_and_emit(
+                    &manifest,
+                    path,
+                    SaveIntent::LayerCompleted {
+                        layer: completed_layer_name,
+                    },
+                ) {
                     warn!("failed to checkpoint manifest: {e}");
                 }
             }
@@ -716,13 +751,35 @@ pub async fn run_stack_loops_with_cancel(
                     layer.status = LayerStatus::PendingReview;
                 }
             }
-            // Append gates and recompute overall status.
+            // Append gates and recompute overall status. Capture the
+            // appended gate metadata so each GateAppended event carries
+            // its {gate_id, layer, trigger_expression} payload.
+            let appended_gates: Vec<(String, String, String)> = gate_check
+                .new_gates
+                .iter()
+                .map(|g| (g.id.clone(), g.layer.clone(), g.trigger_expression.clone()))
+                .collect();
             manifest.gates.extend(gate_check.new_gates);
             manifest.compute_overall_status();
-            // Persist so the decide handler sees the gates.
+            // Persist so the decide handler sees the gates. One
+            // save_and_emit per gate so subscribers see each gate's
+            // `trigger_expression` individually; the actual manifest
+            // write is identical across the loop iterations but the
+            // event stream carries per-gate context.
             if let Some(ref path) = manifest_path {
-                if let Err(e) = manifest.save(path) {
-                    warn!("failed to persist pending-review manifest: {e}");
+                for (gate_id, layer, trigger_expression) in appended_gates {
+                    if let Err(e) = cfg.saver.save_and_emit(
+                        &manifest,
+                        path,
+                        SaveIntent::GateAppended {
+                            gate_id,
+                            layer,
+                            trigger_expression,
+                        },
+                    ) {
+                        warn!("failed to persist pending-review manifest: {e}");
+                        break;
+                    }
                 }
             }
             info!(
@@ -779,9 +836,16 @@ pub async fn run_stack_loops_with_cancel(
     // Compute overall status and persist final manifest
     manifest.compute_overall_status();
 
-    // Persist final manifest state
+    // Persist final manifest state. Phase 7 couples the final save with
+    // a `FeatureCompleted` event; subscribers observe the terminal
+    // `overall_status` in the event's `data` payload. A follow-up
+    // `LogChunk { terminal: true }` is emitted by the dispatch wrapper
+    // (Task 10) — the orchestrator itself does not own the LogStore.
     if let Some(ref path) = manifest_path {
-        if let Err(e) = manifest.save(path) {
+        if let Err(e) = cfg
+            .saver
+            .save_and_emit(&manifest, path, SaveIntent::FeatureCompleted)
+        {
             warn!("failed to persist final manifest: {e}");
         }
     }
@@ -1585,6 +1649,12 @@ async fn try_run_layer_adaptive_owned(
     let empty_layers = LayersConfig::default();
     let dummy_plan = std::path::PathBuf::from("/dev/null");
     let dummy_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Placeholder saver: the owned wrapper calls `try_run_layer_adaptive`,
+    // which runs the adaptive loop only — it does NOT persist the manifest
+    // (the outer `run_stack_loops_with_cancel` owns all manifest writes).
+    // A `NullSaver` therefore never receives a `save_and_emit` call on
+    // this path; it's a typechecker placeholder.
+    let saver = crate::events::NullSaver;
     let cfg = StackLoopsConfig {
         layers: &empty_layers,
         plan_path: &dummy_plan,
@@ -1594,6 +1664,7 @@ async fn try_run_layer_adaptive_owned(
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &dummy_seams,
+        saver: &saver,
     };
     try_run_layer_adaptive(
         &cfg,
@@ -1753,6 +1824,7 @@ mod tests {
         let pice_config = PiceConfig::default();
         let workflow = test_workflow();
         let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -1762,6 +1834,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
+            saver: &saver,
         };
 
         let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
@@ -1854,6 +1927,7 @@ mod tests {
         let pice_config = PiceConfig::default();
         let workflow = test_workflow();
         let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -1863,6 +1937,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
+            saver: &saver,
         };
 
         let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
@@ -1993,6 +2068,7 @@ mod tests {
         let plan_path = dir.path().join("plan.md");
         std::fs::write(&plan_path, "# Plan").unwrap();
         let pice_config = PiceConfig::default();
+        let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers,
             plan_path: &plan_path,
@@ -2002,6 +2078,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &seams,
+            saver: &saver,
         };
 
         let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =

@@ -324,6 +324,11 @@ fn setup_two_layer_repo(dir: &Path) -> std::path::PathBuf {
     plan_path
 }
 
+/// Phase 7: `'static` null saver so test helpers constructing a
+/// `StackLoopsConfig<'a>` can satisfy the `saver: &'a dyn ManifestSaver`
+/// field without threading an extra lifetime through each fixture.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
+
 fn make_cfg<'a>(
     layers: &'a LayersConfig,
     plan_path: &'a Path,
@@ -341,6 +346,7 @@ fn make_cfg<'a>(
         pice_config,
         workflow: wf,
         merged_seams: seams,
+        saver: &NULL_SAVER,
     }
 }
 

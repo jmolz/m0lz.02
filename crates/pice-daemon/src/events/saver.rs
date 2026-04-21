@@ -223,6 +223,32 @@ impl<'a> ManifestSaver for EventEmittingSaver<'a> {
     }
 }
 
+/// No-event saver for inline mode + test fixtures.
+///
+/// Writes the manifest to disk but does NOT publish an event. Used
+/// wherever the orchestrator runs without a live `EventBus` — inline
+/// evaluation (`PICE_DAEMON_INLINE=1`) and unit tests that don't need
+/// event-stream assertions.
+///
+/// This is THE reason the production grep-coverage test
+/// (`zero_raw_manifest_save_calls_in_orchestrator`) can pass while
+/// orchestrator + handler code remains transport-agnostic: every call
+/// site goes through `&dyn ManifestSaver`, and test fixtures supply a
+/// `NullSaver` when they don't care about events.
+pub struct NullSaver;
+
+impl ManifestSaver for NullSaver {
+    fn save_and_emit(
+        &self,
+        manifest: &VerificationManifest,
+        path: &Path,
+        _intent: SaveIntent,
+    ) -> anyhow::Result<()> {
+        manifest.save(path)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

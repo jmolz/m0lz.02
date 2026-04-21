@@ -535,6 +535,7 @@ async fn scenario_8_cancellation_during_pending_review() {
         seams: None,
     };
     let merged_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let null_saver = pice_daemon::events::NullSaver;
     let cfg = StackLoopsConfig {
         layers: &layers,
         plan_path: &plan_path,
@@ -544,6 +545,7 @@ async fn scenario_8_cancellation_during_pending_review() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &merged_seams,
+        saver: &null_saver,
     };
 
     let pass_sink: Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = Arc::new(NullPassSink);

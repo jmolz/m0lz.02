@@ -359,6 +359,11 @@ fn setup_minimal_repo(dir: &Path) -> std::path::PathBuf {
     plan_path
 }
 
+/// Phase 7: `'static` null saver so test helpers constructing a
+/// `StackLoopsConfig<'a>` can satisfy the `saver: &'a dyn ManifestSaver`
+/// field without threading an extra lifetime through each fixture.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
+
 /// Construct a `StackLoopsConfig` with the supplied workflow and pice config.
 fn make_cfg<'a>(
     layers: &'a LayersConfig,
@@ -377,6 +382,7 @@ fn make_cfg<'a>(
         pice_config,
         workflow,
         merged_seams: seams,
+        saver: &NULL_SAVER,
     }
 }
 
@@ -2282,6 +2288,7 @@ async fn unresolvable_provider_remains_phase1_pending_not_failed() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        saver: &NULL_SAVER,
     };
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =

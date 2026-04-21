@@ -495,6 +495,17 @@ pub async fn run(
             return Ok(CommandResponse::Exit { code: 1, message });
         }
 
+        // Phase 7: construct an `EventEmittingSaver` borrowed from the
+        // daemon context's `EventBus`. Background-mode dispatches (Task
+        // 10) publish events to the wildcard channel so
+        // `manifest/subscribe` consumers see layer/gate/feature
+        // transitions in real time. Inline foreground evaluate also
+        // emits events — there are simply no subscribers in inline mode,
+        // so the per-feature channel drops them. The saver trait is the
+        // single compile-time choke point that guarantees every state
+        // transition produces a matching event (see Task 9 coverage
+        // test).
+        let saver = crate::events::EventEmittingSaver::new(ctx.events());
         let stack_cfg = crate::orchestrator::stack_loops::StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -504,6 +515,7 @@ pub async fn run(
             pice_config: config,
             workflow: &workflow,
             merged_seams: &merged_seams,
+            saver: &saver,
         };
 
         // Phase 4.1 Pass-6 Codex High #2: acquire the per-manifest
@@ -705,7 +717,26 @@ pub async fn run(
                             reconcile_expired_gates_inline(&mut existing, now, project_root);
                         if reconciled > 0 {
                             existing.compute_overall_status();
-                            if let Err(e) = existing.save(&path) {
+                            // Route through the saver so subscribers see
+                            // the gate-decision events for every
+                            // timed-out gate. Reconciliation applies the
+                            // pinned `on_timeout_action`; we treat each
+                            // reconciled gate as a `GateDecided` event
+                            // regardless of variant (approve / skip /
+                            // reject) — the decision string carries the
+                            // flavor in the event payload.
+                            let reconcile_saver =
+                                crate::events::EventEmittingSaver::new(ctx.events());
+                            if let Err(e) = crate::events::ManifestSaver::save_and_emit(
+                                &reconcile_saver,
+                                &existing,
+                                &path,
+                                crate::events::SaveIntent::GateDecided {
+                                    gate_id: String::new(),
+                                    layer: String::new(),
+                                    decision: "timeout".to_string(),
+                                },
+                            ) {
                                 tracing::warn!(
                                     path = %path.display(),
                                     error = %e,

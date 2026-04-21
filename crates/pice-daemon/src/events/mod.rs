@@ -21,4 +21,4 @@ pub mod bus;
 pub mod saver;
 
 pub use bus::EventBus;
-pub use saver::{EventEmittingSaver, ManifestSaver, SaveIntent};
+pub use saver::{EventEmittingSaver, ManifestSaver, NullSaver, SaveIntent};

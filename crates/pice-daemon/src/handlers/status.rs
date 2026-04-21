@@ -395,10 +395,10 @@ mod tests {
     ) {
         let path = VerificationManifest::manifest_path_for(feature_id, project_root).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut manifest = VerificationManifest::new(feature_id, project_root);
-        manifest.layers.push(adaptive_layer);
+        let mut m = VerificationManifest::new(feature_id, project_root);
+        m.layers.push(adaptive_layer);
         // Include one legacy (pre-adaptive) layer with no halted_by/confidence.
-        manifest.layers.push(LayerResult {
+        m.layers.push(LayerResult {
             name: "legacy".to_string(),
             status: LayerStatus::Passed,
             passes: vec![],
@@ -408,8 +408,18 @@ mod tests {
             total_cost_usd: None,
             escalation_events: None,
         });
-        manifest.overall_status = ManifestStatus::InProgress;
-        manifest.save(&path).unwrap();
+        m.overall_status = ManifestStatus::InProgress;
+        // Test fixture: route through `NullSaver` so this file contains
+        // zero raw low-level save call sites (Task 9 grep-coverage
+        // invariant enforced by `manifest_saver_trait_coverage.rs`).
+        let saver = crate::events::NullSaver;
+        crate::events::ManifestSaver::save_and_emit(
+            &saver,
+            &m,
+            &path,
+            crate::events::SaveIntent::FeatureCompleted,
+        )
+        .unwrap();
     }
 
     fn adaptive_layer_fixture() -> LayerResult {
@@ -521,8 +531,8 @@ mod tests {
         // Build manifest with a PendingReview layer + its gate.
         let path = VerificationManifest::manifest_path_for("feature-gated", project_root).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut manifest = VerificationManifest::new("feature-gated", project_root);
-        manifest.layers.push(LayerResult {
+        let mut m = VerificationManifest::new("feature-gated", project_root);
+        m.layers.push(LayerResult {
             name: "infrastructure".to_string(),
             status: LayerStatus::PendingReview,
             passes: vec![],
@@ -532,7 +542,7 @@ mod tests {
             total_cost_usd: None,
             escalation_events: None,
         });
-        manifest.gates.push(GateEntry {
+        m.gates.push(GateEntry {
             id: "feature-gated:infrastructure:01".to_string(),
             layer: "infrastructure".to_string(),
             status: GateStatus::Pending,
@@ -544,8 +554,18 @@ mod tests {
             decision: None,
             decided_at: None,
         });
-        manifest.compute_overall_status();
-        manifest.save(&path).unwrap();
+        m.compute_overall_status();
+        // Test fixture: route through `NullSaver` so this file contains
+        // zero raw low-level save call sites (Task 9 grep-coverage
+        // invariant).
+        let saver = crate::events::NullSaver;
+        crate::events::ManifestSaver::save_and_emit(
+            &saver,
+            &m,
+            &path,
+            crate::events::SaveIntent::FeatureCompleted,
+        )
+        .unwrap();
 
         let plan_path = project_root.join(".claude/plans/feature-gated.md");
         let snapshot = load_manifest_snapshot(&plan_path, project_root).expect("manifest loaded");
@@ -556,10 +576,16 @@ mod tests {
 
         // Decided gates (non-Pending) must NOT surface — they live in
         // the audit trail, not the live-blocking list.
-        let mut manifest2 = manifest.clone();
-        manifest2.gates[0].status = GateStatus::Approved;
-        manifest2.gates[0].decision = Some("approve".to_string());
-        manifest2.save(&path).unwrap();
+        let mut m2 = m.clone();
+        m2.gates[0].status = GateStatus::Approved;
+        m2.gates[0].decision = Some("approve".to_string());
+        crate::events::ManifestSaver::save_and_emit(
+            &saver,
+            &m2,
+            &path,
+            crate::events::SaveIntent::FeatureCompleted,
+        )
+        .unwrap();
         let snapshot2 = load_manifest_snapshot(&plan_path, project_root).expect("reload");
         assert!(snapshot2.gates.is_empty());
     }

@@ -76,7 +76,6 @@ async fn event_emitting_saver_satisfies_trait() {
 /// while Task 9 is pending so CI stays green — un-ignoring is the last
 /// Task 9 step.
 #[test]
-#[ignore = "Task 9 will remove the raw manifest.save call sites from orchestrator/ + handlers/ and un-ignore this test"]
 fn zero_raw_manifest_save_calls_in_orchestrator() {
     use std::fs;
     use std::path::Path;

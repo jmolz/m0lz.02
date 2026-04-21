@@ -16,6 +16,11 @@ use pice_daemon::orchestrator::{NullPassSink, NullSink};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// Phase 7: `'static` null saver for fixtures that construct
+/// `StackLoopsConfig` directly. See the identical static in
+/// `adaptive_integration.rs` for rationale.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
+
 fn git_init(dir: &Path) {
     std::process::Command::new("git")
         .args(["init"])
@@ -118,6 +123,7 @@ async fn env_var_mismatch() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        saver: &NULL_SAVER,
     };
 
     let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
@@ -199,6 +205,7 @@ async fn orm_schema_drift() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        saver: &NULL_SAVER,
     };
 
     let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
@@ -278,6 +285,7 @@ async fn openapi_drift() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        saver: &NULL_SAVER,
     };
 
     let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
@@ -352,6 +360,7 @@ async fn clean_fixture_passes_all_checks() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        saver: &NULL_SAVER,
     };
 
     let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
