@@ -1,8 +1,22 @@
 //! `pice status` handler — show project state and recent evaluations.
+//!
+//! Phase 7 Task 12 extends the handler to branch on [`StatusMode`]:
+//!
+//! - [`StatusMode::List`] (default): scans `.claude/plans/` for plan files,
+//!   decorates each with the latest evaluation + verification manifest
+//!   snapshot. Historical behavior — unchanged so existing tests pass.
+//! - [`StatusMode::Detail`]: looks up a single feature's
+//!   [`VerificationManifest`] by `feature_id` from the project-namespaced
+//!   state directory and returns it verbatim (JSON) or pretty-printed (text).
+//! - [`StatusMode::Follow`] / [`StatusMode::Wait`]: rejected here — the CLI
+//!   is expected to bypass `cli/dispatch` and call `manifest/subscribe`
+//!   directly. If one of these reaches the dispatch handler it is a CLI
+//!   routing bug; the handler surfaces it with a structured `Exit` so the
+//!   mis-routing is debuggable rather than silent.
 
 use anyhow::Result;
-use pice_core::cli::{CommandResponse, StatusRequest};
-use pice_core::layers::manifest::VerificationManifest;
+use pice_core::cli::{CommandResponse, ExitJsonStatus, StatusMode, StatusRequest};
+use pice_core::layers::manifest::{manifest_project_namespace, VerificationManifest};
 use pice_core::plan_parser::ParsedPlan;
 use serde_json::{json, Value};
 
@@ -15,6 +29,127 @@ pub async fn run(
     ctx: &DaemonContext,
     _sink: &dyn StreamSink,
 ) -> Result<CommandResponse> {
+    match req.mode {
+        StatusMode::Detail => run_detail(req, ctx).await,
+        StatusMode::Follow | StatusMode::Wait => Ok(CommandResponse::Exit {
+            code: 1,
+            message: format!(
+                "pice status {:?} must route via manifest/subscribe, not cli/dispatch \
+                 (CLI routing bug)",
+                req.mode
+            ),
+        }),
+        StatusMode::List => run_list(req, ctx).await,
+    }
+}
+
+/// `StatusMode::Detail` — return one manifest by feature_id.
+///
+/// Resolves `state_dir/{project_hash}/{feature_id}.manifest.json`. Missing
+/// or unreadable manifests surface as [`ExitJsonStatus::FeatureNotFound`]
+/// (JSON mode) or `Exit { code: 1, message }` (text mode) — the Phase 7
+/// structured-failure discriminant the CLI tests pin against.
+async fn run_detail(req: StatusRequest, ctx: &DaemonContext) -> Result<CommandResponse> {
+    let feature_id = match req.feature_id.as_deref() {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            return Ok(CommandResponse::Exit {
+                code: 1,
+                message: "pice status <feature_id>: feature_id positional required for detail mode"
+                    .to_string(),
+            });
+        }
+    };
+    let project_root = ctx.project_root();
+    let manifest_path = VerificationManifest::manifest_path_for(feature_id, project_root)?;
+    if !manifest_path.exists() {
+        if req.json {
+            return Ok(CommandResponse::ExitJson {
+                code: ExitJsonStatus::FeatureNotFound.exit_code(),
+                value: json!({
+                    "status": ExitJsonStatus::FeatureNotFound.as_str(),
+                    "feature_id": feature_id,
+                }),
+            });
+        }
+        return Ok(CommandResponse::Exit {
+            code: ExitJsonStatus::FeatureNotFound.exit_code(),
+            message: format!("no manifest found for feature_id '{feature_id}'"),
+        });
+    }
+    let manifest = VerificationManifest::load(&manifest_path)?;
+    if req.json {
+        return Ok(CommandResponse::Json {
+            value: serde_json::to_value(&manifest)?,
+        });
+    }
+    Ok(CommandResponse::Text {
+        content: render_manifest_detail(&manifest),
+    })
+}
+
+/// Pretty-print a [`VerificationManifest`] for text-mode `pice status <id>`.
+///
+/// Matches the summary-table aesthetic of list mode — header with feature
+/// id + overall status, one line per layer with key adaptive fields, plus
+/// a pending-gates block when applicable.
+fn render_manifest_detail(m: &VerificationManifest) -> String {
+    use pice_core::layers::manifest::GateStatus;
+    let mut out = String::new();
+    out.push_str(&format!("Feature: {}\n", m.feature_id));
+    let overall = serde_json::to_value(&m.overall_status)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "?".to_string());
+    out.push_str(&format!("Overall: {overall}\n"));
+    out.push_str(&format!("Layers ({}):\n", m.layers.len()));
+    for layer in &m.layers {
+        let status = serde_json::to_value(&layer.status)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "?".to_string());
+        let passes = layer.passes.len();
+        let conf = layer
+            .final_confidence
+            .map(|c| format!("{c:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        out.push_str(&format!(
+            "  {:<16} {:<14} passes={passes:<2}  conf={conf}\n",
+            layer.name, status,
+        ));
+        if let Some(halted) = &layer.halted_by {
+            out.push_str(&format!("    halted_by: {halted}\n"));
+        }
+    }
+    let pending: Vec<_> = m
+        .gates
+        .iter()
+        .filter(|g| g.status == GateStatus::Pending)
+        .collect();
+    if !pending.is_empty() {
+        out.push_str(&format!("\nPending review gates ({}):\n", pending.len()));
+        for g in pending {
+            out.push_str(&format!(
+                "  {} (layer: {}, timeout_at: {})\n",
+                g.id, g.layer, g.timeout_at
+            ));
+        }
+        out.push_str("Run `pice review-gate --list` to act.\n");
+    }
+    out
+}
+
+/// `StatusMode::List` — historical plan-scan behavior. Preserves the
+/// pre-Phase-7 rendering so existing CLI integration and inline tests pass
+/// unchanged.
+async fn run_list(req: StatusRequest, ctx: &DaemonContext) -> Result<CommandResponse> {
+    // Phase 7 list-mode augmentation: gather ManifestSummary for every
+    // manifest under the project's state directory so the list view can
+    // surface cross-project state (features with no plan file, live runs
+    // from `pice evaluate --background`). Appended under `summaries` in
+    // JSON mode; text mode is unchanged.
+    let summaries = collect_project_summaries(ctx);
+
     let project_root = ctx.project_root();
 
     // Scan .claude/plans/ for plan files
@@ -104,6 +239,7 @@ pub async fn run(
             value: json!({
                 "plans": plans,
                 "git": git_info,
+                "summaries": summaries,
             }),
         })
     } else {
@@ -333,6 +469,50 @@ fn truncate(s: &str, max: usize) -> String {
         let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{truncated}\u{2026}")
     }
+}
+
+/// Scan `state_dir/{project_hash}/*.manifest.json` and build a
+/// [`ManifestSummary`] for every manifest. Enriches each with its live
+/// `run_id` from the daemon's [`FeatureJobManager`] when one exists.
+///
+/// Best-effort: a single unreadable manifest is skipped with a `warn!`;
+/// a missing state dir returns an empty vec. The list view must always
+/// render, even when the state tree is empty or partially corrupt.
+fn collect_project_summaries(ctx: &DaemonContext) -> Vec<serde_json::Value> {
+    use pice_core::protocol::subscribe::ManifestSummary;
+    let mut out = Vec::new();
+    let Ok(state_root) = VerificationManifest::state_dir() else {
+        return out;
+    };
+    let namespace = manifest_project_namespace(ctx.project_root());
+    let project_dir = state_root.join(&namespace);
+    let Ok(entries) = std::fs::read_dir(&project_dir) else {
+        return out;
+    };
+    let live_runs = ctx.jobs().live_runs();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(manifest) = VerificationManifest::load(&path) else {
+            tracing::warn!(path = %path.display(), "skipping unreadable manifest");
+            continue;
+        };
+        let run_id = live_runs.get(&manifest.feature_id).cloned();
+        let summary = ManifestSummary::from_manifest(&manifest, run_id);
+        if let Ok(v) = serde_json::to_value(&summary) {
+            out.push(v);
+        }
+    }
+    // Stable ordering so list output bytes are deterministic across runs.
+    out.sort_by(|a, b| {
+        a.get("feature_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("feature_id").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+    out
 }
 
 fn get_git_info(project_root: &std::path::Path) -> serde_json::Value {

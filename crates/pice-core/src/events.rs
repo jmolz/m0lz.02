@@ -30,7 +30,36 @@
 //! pattern-matching consumers (dashboard, CLI renderer) can route on a
 //! single field without inspecting `data`.
 
+use crate::protocol::subscribe::SubscribeManifestResponse;
 use serde::{Deserialize, Serialize};
+
+/// Phase 7 NDJSON envelope emitted by `pice status --follow --stream-json`
+/// (and by `pice logs --follow --stream-json` — same envelope, different
+/// payloads in the `event` variant).
+///
+/// Each line of stdout in `--stream-json` mode is one `StreamJsonFrame`.
+/// The envelope is heterogeneous so consumers pattern-match on `kind`:
+///
+/// - First line: `snapshot` — initial state at subscribe time.
+/// - Middle lines: `event` — live manifest events.
+/// - Last line before exit: `terminal` — exit code signalling stream close.
+///
+/// Callers that want a homogeneous stream can filter on `kind == "event"`.
+/// See `.claude/rules/daemon.md` → "Streaming and JSON mode" for the
+/// channel-ownership rule (stdout for frames, stderr for prompts).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum StreamJsonFrame {
+    /// The initial subscribe-response snapshot. Emitted exactly once per
+    /// stream, as the first line.
+    Snapshot { snapshot: SubscribeManifestResponse },
+    /// A live manifest event forwarded from the subscribe stream.
+    Event { event: ManifestEventPayload },
+    /// End-of-stream marker. Carries the process exit code the CLI will
+    /// return after the stream closes (0 / 2 / 3 / 4 / 5 per
+    /// `ExitJsonStatus::exit_code`). Exactly one terminal frame per stream.
+    Terminal { exit_code: i32 },
+}
 
 /// Eight-variant enum covering every real manifest state transition emitted
 /// during a Stack Loops run. Consumed by `pice status --follow`, the future
@@ -319,5 +348,50 @@ mod tests {
             err.to_string().contains("bogusField") || err.to_string().contains("unknown field"),
             "expected unknown-field error, got: {err}"
         );
+    }
+
+    #[test]
+    fn stream_json_frame_snapshot_serializes_with_kind_tag() {
+        use crate::protocol::subscribe::SubscribeManifestResponse;
+        use std::collections::BTreeMap;
+        let frame = StreamJsonFrame::Snapshot {
+            snapshot: SubscribeManifestResponse {
+                snapshots: vec![],
+                run_ids: BTreeMap::new(),
+            },
+        };
+        let wire = serde_json::to_string(&frame).unwrap();
+        assert!(wire.starts_with(r#"{"kind":"snapshot""#), "got: {wire}");
+        let back: StreamJsonFrame = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(back, StreamJsonFrame::Snapshot { .. }));
+    }
+
+    #[test]
+    fn stream_json_frame_event_roundtrip() {
+        let payload = ManifestEventPayload {
+            feature_id: "f".to_string(),
+            run_id: "r-1".to_string(),
+            event: ManifestEvent::LayerStarted,
+            layer: Some("backend".to_string()),
+            data: json!({}),
+            timestamp: "2026-04-21T10:00:00Z".to_string(),
+        };
+        let frame = StreamJsonFrame::Event { event: payload };
+        let wire = serde_json::to_string(&frame).unwrap();
+        assert!(wire.starts_with(r#"{"kind":"event""#), "got: {wire}");
+        let back: StreamJsonFrame = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(back, StreamJsonFrame::Event { .. }));
+    }
+
+    #[test]
+    fn stream_json_frame_terminal_carries_exit_code() {
+        let frame = StreamJsonFrame::Terminal { exit_code: 2 };
+        let wire = serde_json::to_string(&frame).unwrap();
+        assert_eq!(wire, r#"{"kind":"terminal","exit_code":2}"#);
+        let back: StreamJsonFrame = serde_json::from_str(&wire).unwrap();
+        match back {
+            StreamJsonFrame::Terminal { exit_code } => assert_eq!(exit_code, 2),
+            other => panic!("expected Terminal frame, got {other:?}"),
+        }
     }
 }
