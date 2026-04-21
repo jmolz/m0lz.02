@@ -1460,11 +1460,8 @@ async fn run_background(
                 .and_then(|cfg| cfg.layers.order.first().cloned())
                 .unwrap_or_else(|| args.feature_id.clone());
 
-            let mut manifest = transition_queued_to_in_progress(
-                &args,
-                &events_for_spawn,
-                &first_layer_hint,
-            )?;
+            let mut manifest =
+                transition_queued_to_in_progress(&args, &events_for_spawn, &first_layer_hint)?;
 
             // Honor cancel fired between dispatch and the transition.
             if cancel.is_cancelled() {
@@ -1481,11 +1478,7 @@ async fn run_background(
                         total_cost_usd: None,
                         escalation_events: None,
                     });
-                finalize_terminal_manifest(
-                    &manifest,
-                    &args.manifest_path,
-                    &events_for_spawn,
-                )?;
+                finalize_terminal_manifest(&manifest, &args.manifest_path, &events_for_spawn)?;
                 logs_for_spawn
                     .append_terminal_frame(&args.feature_id, &args.run_id, "cancelled")
                     .await;

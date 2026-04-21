@@ -121,11 +121,8 @@ async fn run_background(
             // Step 1: Queued → InProgress. `layer_hint = feature_id` —
             // `execute` does not have per-layer cohorts, so the event
             // acts as the "feature started" marker.
-            let mut manifest = transition_queued_to_in_progress(
-                &args,
-                &events_for_spawn,
-                &args.feature_id,
-            )?;
+            let mut manifest =
+                transition_queued_to_in_progress(&args, &events_for_spawn, &args.feature_id)?;
 
             // Step 2: run the provider session under a cancel token.
             // The plan parse / prompt build / provider start happen
