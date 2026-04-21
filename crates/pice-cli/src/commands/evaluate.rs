@@ -33,6 +33,7 @@ impl From<EvaluateArgs> for EvaluateRequest {
         EvaluateRequest {
             plan_path: args.plan_path,
             json: args.json,
+            ..Default::default()
         }
     }
 }

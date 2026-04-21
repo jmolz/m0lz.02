@@ -1467,6 +1467,7 @@ mod tests {
                 decided_at: None,
             }],
             overall_status: ManifestStatus::PendingReview,
+            run_id: None,
         };
         match review_gate_pending_response(&manifest, true) {
             CommandResponse::ExitJson { code, .. } => assert_eq!(code, 3),

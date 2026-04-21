@@ -601,6 +601,7 @@ mod tests {
                 budget_usd: 2.0,
                 cost_cap_behavior: CostCapBehavior::Halt,
                 max_parallelism: None,
+                max_global_provider_concurrency: None,
             },
             phases: Default::default(),
             layer_overrides: BTreeMap::new(),

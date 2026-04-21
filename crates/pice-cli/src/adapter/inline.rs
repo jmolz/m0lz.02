@@ -55,7 +55,10 @@ mod tests {
 
     #[tokio::test]
     async fn inline_dispatch_returns_text_response() {
-        let req = CommandRequest::Status(StatusRequest { json: false });
+        let req = CommandRequest::Status(StatusRequest {
+            json: false,
+            ..Default::default()
+        });
         let resp = dispatch_inline(req).await.expect("dispatch_inline");
         match resp {
             CommandResponse::Text { content } => {
@@ -70,7 +73,10 @@ mod tests {
 
     #[tokio::test]
     async fn inline_dispatch_json_mode() {
-        let req = CommandRequest::Status(StatusRequest { json: true });
+        let req = CommandRequest::Status(StatusRequest {
+            json: true,
+            ..Default::default()
+        });
         let resp = dispatch_inline(req).await.expect("dispatch_inline");
         match resp {
             CommandResponse::Json { value } => {

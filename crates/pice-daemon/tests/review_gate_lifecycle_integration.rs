@@ -84,6 +84,7 @@ fn seed_pending_gate_fixture(
             decided_at: None,
         }],
         overall_status: ManifestStatus::PendingReview,
+        run_id: None,
     };
     manifest.save(&manifest_path).unwrap();
     let ctx = DaemonContext::new("tok".to_string(), project_root);
@@ -275,6 +276,7 @@ async fn scenario_1_trigger_fires() {
             budget_usd: 0.0,
             cost_cap_behavior: CostCapBehavior::Halt,
             max_parallelism: None,
+            max_global_provider_concurrency: None,
         },
         phases: Phases::default(),
         layer_overrides: std::collections::BTreeMap::new(),
@@ -525,6 +527,7 @@ async fn scenario_8_cancellation_during_pending_review() {
             budget_usd: 0.0,
             cost_cap_behavior: pice_core::workflow::schema::CostCapBehavior::Halt,
             max_parallelism: None,
+            max_global_provider_concurrency: None,
         },
         phases: pice_core::workflow::schema::Phases::default(),
         layer_overrides: BTreeMap::new(),

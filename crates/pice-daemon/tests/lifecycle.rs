@@ -96,7 +96,10 @@ async fn full_lifecycle_multiple_rpcs_on_one_connection() {
     assert!(result["uptime_seconds"].as_u64().is_some());
 
     // 2. Dispatch a status command (no provider needed).
-    let status_req = CommandRequest::Status(StatusRequest { json: true });
+    let status_req = CommandRequest::Status(StatusRequest {
+        json: true,
+        ..Default::default()
+    });
     let params = serde_json::to_value(&status_req).expect("serialize");
     let dispatch_req = DaemonRequest::new(2, methods::CLI_DISPATCH, &token, params);
     conn.write_message(&dispatch_req).await.expect("write");
@@ -118,6 +121,7 @@ async fn full_lifecycle_multiple_rpcs_on_one_connection() {
     let eval_req = CommandRequest::Evaluate(pice_core::cli::EvaluateRequest {
         plan_path: "nonexistent.md".into(),
         json: false,
+        ..Default::default()
     });
     let params = serde_json::to_value(&eval_req).expect("serialize");
     let dispatch_req = DaemonRequest::new(3, methods::CLI_DISPATCH, &token, params);
@@ -148,7 +152,10 @@ async fn concurrent_clients_complete_independently() {
 
     // Dispatch on both concurrently.
     let a = tokio::spawn(async move {
-        let req = CommandRequest::Status(StatusRequest { json: false });
+        let req = CommandRequest::Status(StatusRequest {
+            json: false,
+            ..Default::default()
+        });
         let params = serde_json::to_value(&req).unwrap();
         let daemon_req = DaemonRequest::new(1, methods::CLI_DISPATCH, &token_a, params);
         conn_a.write_message(&daemon_req).await.unwrap();
@@ -157,7 +164,10 @@ async fn concurrent_clients_complete_independently() {
         conn_a
     });
     let b = tokio::spawn(async move {
-        let req = CommandRequest::Status(StatusRequest { json: true });
+        let req = CommandRequest::Status(StatusRequest {
+            json: true,
+            ..Default::default()
+        });
         let params = serde_json::to_value(&req).unwrap();
         let daemon_req = DaemonRequest::new(2, methods::CLI_DISPATCH, &token_b, params);
         conn_b.write_message(&daemon_req).await.unwrap();
@@ -230,6 +240,7 @@ async fn all_command_types_dispatch_successfully() {
             CommandRequest::Execute(ExecuteRequest {
                 plan_path: "nonexistent.md".into(),
                 json: false,
+                ..Default::default()
             }),
         ),
         (
@@ -237,6 +248,7 @@ async fn all_command_types_dispatch_successfully() {
             CommandRequest::Evaluate(EvaluateRequest {
                 plan_path: "nonexistent.md".into(),
                 json: false,
+                ..Default::default()
             }),
         ),
         (
@@ -249,7 +261,10 @@ async fn all_command_types_dispatch_successfully() {
         ),
         (
             "status",
-            CommandRequest::Status(StatusRequest { json: false }),
+            CommandRequest::Status(StatusRequest {
+                json: false,
+                ..Default::default()
+            }),
         ),
         (
             "metrics",

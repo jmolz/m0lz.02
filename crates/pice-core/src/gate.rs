@@ -757,6 +757,7 @@ mod tests {
                 budget_usd: 0.0,
                 cost_cap_behavior: crate::workflow::schema::CostCapBehavior::Halt,
                 max_parallelism: None,
+                max_global_provider_concurrency: None,
             },
             phases: Phases::default(),
             layer_overrides: BTreeMap::new(),

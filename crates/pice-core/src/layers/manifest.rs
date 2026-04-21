@@ -51,6 +51,17 @@ pub struct VerificationManifest {
     pub layers: Vec<LayerResult>,
     pub gates: Vec<GateEntry>,
     pub overall_status: ManifestStatus,
+    /// Phase 7: daemon-allocated run identifier. Written on the
+    /// `Queued → InProgress` transition inside the spawned orchestrator
+    /// future (never at `Pending`-creation time for inline mode).
+    /// Preserved by startup reconciliation of interrupted `InProgress`
+    /// manifests. Read by the `manifest/subscribe` handler to populate
+    /// `SubscribeManifestResponse.run_ids` when the live
+    /// `FeatureJobManager` has no entry (post-daemon-restart
+    /// observations). `None` for pre-Phase-7 manifests + inline-mode
+    /// evaluations (which do not go through `FeatureJobManager`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 /// Per-layer evaluation result.
@@ -161,6 +172,18 @@ pub enum ManifestStatus {
     /// the feature cannot advance until a reviewer actions the gate(s).
     /// Serializes as `"pending-review"`.
     PendingReview,
+    /// Phase 7: dispatched via `pice {evaluate,execute} --background` but
+    /// the spawned orchestrator task has not yet acquired the global
+    /// provider permit to transition to `InProgress`. Only observed on
+    /// disk; the orchestrator's FIRST action after acquiring the permit
+    /// is `Queued → InProgress` + `ManifestEvent::LayerStarted` emission.
+    ///
+    /// Startup reconciliation DELETES `Queued` manifests (a `Queued`
+    /// manifest represents a dispatch that never produced work; rewriting
+    /// it to `Failed` would falsely imply the feature ran). `InProgress`
+    /// manifests are instead rewritten as `Failed` + `halted_by =
+    /// failed-interrupted`. Serializes as `"queued"`.
+    Queued,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -230,6 +253,11 @@ fn home_dir() -> Result<PathBuf> {
 
 impl VerificationManifest {
     /// Create a new manifest with all layers pending.
+    ///
+    /// `run_id` is initialized to `None` — the Phase 7 background dispatch
+    /// path writes it on the `Queued → InProgress` transition (after
+    /// acquiring the global provider permit), never at construction time.
+    /// Foreground / inline-mode manifests leave `run_id` as `None`.
     pub fn new(feature_id: &str, project_root: &Path) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_string(),
@@ -238,6 +266,7 @@ impl VerificationManifest {
             layers: Vec::new(),
             gates: Vec::new(),
             overall_status: ManifestStatus::Pending,
+            run_id: None,
         }
     }
 

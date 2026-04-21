@@ -11,7 +11,10 @@ pub struct StatusArgs {
 
 impl From<StatusArgs> for StatusRequest {
     fn from(args: StatusArgs) -> Self {
-        StatusRequest { json: args.json }
+        StatusRequest {
+            json: args.json,
+            ..Default::default()
+        }
     }
 }
 

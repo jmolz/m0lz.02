@@ -39,40 +39,74 @@ pub const CLI_STREAM_EVENT: &str = "cli/stream-event";
 /// so the CLI can render the response synchronously.
 pub const CLI_STREAM_DONE: &str = "cli/stream-done";
 
+// ─── Phase 7 subscribe RPCs (router-level, not `cli/dispatch`) ──────────────
+
+/// Subscribe to `manifest/event` notifications. The RPC response body carries
+/// the initial snapshot; subsequent `manifest/event` notifications stream on
+/// the same connection until the client closes it. There is NO
+/// `manifest/unsubscribe` RPC — connection close IS unsubscribe.
+///
+/// Request params: `SubscribeManifestRequest`. Response result:
+/// `SubscribeManifestResponse`. After the response, notifications are sent
+/// as `MANIFEST_EVENT`.
+pub const MANIFEST_SUBSCRIBE: &str = "manifest/subscribe";
+
+/// Subscribe to `logs/chunk` notifications (when `follow: true`) or request
+/// a one-shot log history snapshot (when `follow: false`). The RPC response
+/// body carries the history vector; if `follow: true`, subsequent
+/// `logs/chunk` notifications stream on the same connection until a terminal
+/// frame (`LogChunk { terminal: true }`) is broadcast or the client closes.
+pub const LOGS_STREAM: &str = "logs/stream";
+
+// ─── Phase 7 notifications (daemon → CLI, no `id` field) ────────────────────
+
+/// A structured manifest state-transition event (layer started, pass
+/// complete, gate requested, etc.). Params: `ManifestEventPayload`.
+pub const MANIFEST_EVENT: &str = "manifest/event";
+
+/// A captured provider session log chunk. Params: `LogChunk`. `terminal: true`
+/// marks the end-of-stream frame; follow subscribers observe it and exit.
+pub const LOGS_CHUNK: &str = "logs/chunk";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// All method-name constants — used by both uniqueness + kebab-case tests.
+    /// Extending this list also extends both parity tests automatically, so a
+    /// typo in a new constant cannot silently pass CI.
+    const ALL_METHODS: &[&str] = &[
+        DAEMON_HEALTH,
+        DAEMON_SHUTDOWN,
+        CLI_DISPATCH,
+        CLI_STREAM_CHUNK,
+        CLI_STREAM_EVENT,
+        CLI_STREAM_DONE,
+        MANIFEST_SUBSCRIBE,
+        LOGS_STREAM,
+        MANIFEST_EVENT,
+        LOGS_CHUNK,
+    ];
 
     #[test]
     fn method_names_are_unique() {
         // Sanity check — catches typos where a new constant accidentally shares
         // a value with an existing one.
-        let all = [
-            DAEMON_HEALTH,
-            DAEMON_SHUTDOWN,
-            CLI_DISPATCH,
-            CLI_STREAM_CHUNK,
-            CLI_STREAM_EVENT,
-            CLI_STREAM_DONE,
-        ];
-        let mut sorted = all.to_vec();
+        let mut sorted = ALL_METHODS.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
-        assert_eq!(sorted.len(), all.len(), "duplicate method name constant");
+        assert_eq!(
+            sorted.len(),
+            ALL_METHODS.len(),
+            "duplicate method name constant"
+        );
     }
 
     #[test]
     fn method_names_use_kebab_case_segments() {
         // Enforce naming convention: `namespace/kebab-case-method`.
         // Rejects underscores and CamelCase at the method level.
-        for name in [
-            DAEMON_HEALTH,
-            DAEMON_SHUTDOWN,
-            CLI_DISPATCH,
-            CLI_STREAM_CHUNK,
-            CLI_STREAM_EVENT,
-            CLI_STREAM_DONE,
-        ] {
+        for name in ALL_METHODS {
             assert!(
                 name.contains('/'),
                 "method {name} missing namespace/ prefix"
@@ -85,6 +119,27 @@ mod tests {
                 name.chars()
                     .all(|c| c.is_ascii_lowercase() || c == '/' || c == '-'),
                 "method {name} has unexpected characters"
+            );
+        }
+    }
+
+    /// Phase 7 sanity: MANIFEST_SUBSCRIBE / LOGS_STREAM are router-level
+    /// methods, NOT `cli/dispatch` variants. They live in the router
+    /// second-level branch (see `handlers/subscribe.rs`). This test pins
+    /// that the names are NOT `cli/*`-prefixed — if someone refactors them
+    /// into the `cli/dispatch` funnel by accident, the test catches it.
+    #[test]
+    fn phase_7_subscribe_methods_are_router_level() {
+        for name in &[
+            MANIFEST_SUBSCRIBE,
+            LOGS_STREAM,
+            MANIFEST_EVENT,
+            LOGS_CHUNK,
+        ] {
+            assert!(
+                !name.starts_with("cli/"),
+                "Phase 7 method {name} must NOT use the cli/ namespace — \
+                 it is a router-level RPC, not a cli/dispatch variant"
             );
         }
     }

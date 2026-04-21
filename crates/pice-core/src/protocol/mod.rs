@@ -28,6 +28,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod methods;
+pub mod subscribe;
 
 /// A daemon RPC request from the CLI adapter.
 ///

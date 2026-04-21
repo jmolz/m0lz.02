@@ -18,6 +18,7 @@ impl From<ExecuteArgs> for ExecuteRequest {
         ExecuteRequest {
             plan_path: args.plan_path,
             json: args.json,
+            ..Default::default()
         }
     }
 }

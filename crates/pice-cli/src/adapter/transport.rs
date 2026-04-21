@@ -252,7 +252,10 @@ mod tests {
         client.health_check().await.expect("health check");
 
         // Dispatch a status command.
-        let req = CommandRequest::Status(StatusRequest { json: false });
+        let req = CommandRequest::Status(StatusRequest {
+            json: false,
+            ..Default::default()
+        });
         let resp = client.dispatch(req).await.expect("dispatch");
         match resp {
             CommandResponse::Text { content } => {

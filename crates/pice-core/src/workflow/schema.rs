@@ -54,6 +54,26 @@ pub struct WorkflowConfig {
 /// `.claude/rules/stack-loops.md` "both sites" invariant asks for.
 pub const MAX_PARALLELISM_HARD_CAP: u32 = 16;
 
+/// Phase 7 global-provider-concurrency cap.
+///
+/// Bounds the daemon-wide `FeatureJobManager` semaphore that gates every
+/// provider session across every background feature. Twice the per-feature
+/// cohort cap (16 → 32) to let 2-3 concurrent features each run their
+/// cohorts at the 16-wide ceiling without serializing provider calls.
+///
+/// Beyond 32 concurrent provider sessions, Anthropic / OpenAI rate limits
+/// start throttling (empirical observation in Phase 5 stress tests). A
+/// rate-limit-aware backoff is v0.7.x scope; until then, operators cannot
+/// raise this cap.
+///
+/// Dual-surface enforcement (mirrors `MAX_PARALLELISM_HARD_CAP`):
+/// - Load-time: `pice_core::workflow::validate::validate_schema_only`
+///   emits a `ValidationWarning` when `defaults.max_global_provider_concurrency`
+///   exceeds the cap.
+/// - Dispatch-time: the daemon clamps to this value and `warn!`s if the
+///   clamp actually fires.
+pub const MAX_GLOBAL_PROVIDER_CONCURRENCY_HARD_CAP: u32 = 32;
+
 /// Pipeline-wide defaults applied when no layer override specifies otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +87,17 @@ pub struct Defaults {
     pub cost_cap_behavior: CostCapBehavior,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallelism: Option<u32>,
+    /// Phase 7: maximum concurrent provider sessions GLOBALLY across ALL
+    /// features. Bounds the daemon's `FeatureJobManager` global semaphore;
+    /// independent of [`Self::max_parallelism`] which bounds INTRA-feature
+    /// cohort concurrency. See `MAX_GLOBAL_PROVIDER_CONCURRENCY_HARD_CAP`.
+    ///
+    /// `None` (default) → the daemon uses `max_parallelism` as the global
+    /// cap (i.e., single-feature workloads behave identically to v0.6).
+    /// Operators running many concurrent background evaluations should
+    /// explicitly set this to bound total provider rate-limit pressure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_global_provider_concurrency: Option<u32>,
 }
 
 /// What to do when a per-layer evaluation would exceed `budget_usd`.

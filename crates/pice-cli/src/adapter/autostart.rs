@@ -141,8 +141,10 @@ mod tests {
             .expect("should connect to existing daemon");
 
         // Dispatch should work through the returned client.
-        let req =
-            pice_core::cli::CommandRequest::Status(pice_core::cli::StatusRequest { json: false });
+        let req = pice_core::cli::CommandRequest::Status(pice_core::cli::StatusRequest {
+            json: false,
+            ..Default::default()
+        });
         let resp = client.dispatch(req).await.expect("dispatch");
         match resp {
             pice_core::cli::CommandResponse::Text { content } => {

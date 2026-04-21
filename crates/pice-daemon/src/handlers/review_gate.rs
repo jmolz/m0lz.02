@@ -659,6 +659,7 @@ mod tests {
             }],
             gates: vec![gate.clone()],
             overall_status: MS::PendingReview,
+            run_id: None,
         };
         manifest.save(&manifest_path).unwrap();
 
