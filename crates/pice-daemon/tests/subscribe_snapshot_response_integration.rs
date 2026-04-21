@@ -214,6 +214,107 @@ async fn subscribe_wildcard_snapshot_ignores_other_projects() {
     let _ = std::fs::remove_file(&manifest_path);
 }
 
+/// Phase 7 Task 16: a dropped subscribe connection must clean up
+/// without leaving per-connection state behind. The observable proof:
+///
+/// 1. Open a subscribe, receive the snapshot (confirms active).
+/// 2. Drop the client half — the server's `tokio::select!` in the
+///    subscribe handler observes `Ok(None)` on `read_request` (clean
+///    EOF), drops its `broadcast::Receiver`, and exits.
+/// 3. Open a second subscribe on a fresh connection — must succeed
+///    within a bounded timeout. If the server were leaking state
+///    (e.g. holding a per-connection mutex that the dropped connection
+///    still owned), the second subscribe would time out.
+/// 4. Issue `daemon/shutdown`. The drain path (`FeatureJobManager::
+///    drain_on_shutdown` + connection-loop exit) must complete within
+///    the daemon's 10s budget; the outer `timeout(5s)` on the lifecycle
+///    `handle` tightens that to 5s as the assertion ceiling.
+///
+/// Rust's `broadcast::Receiver` drop-on-return semantics make this
+/// cleanup automatic — there is NO explicit registry to maintain
+/// (per the plan's "no separate `SubscriptionRegistry`" invariant).
+/// The test's purpose is to pin that invariant as a regression gate:
+/// if a future refactor introduces a registry that forgets to evict
+/// on disconnect, the second-subscribe or shutdown step fails.
+#[tokio::test]
+async fn connection_drop_cleans_up() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let _guard = StateDirGuard::new(&state_dir);
+
+    let sock_path = dir.path().join("daemon.sock");
+    let token_path = dir.path().join("daemon.token");
+    let socket_path = SocketPath::Unix(sock_path.clone());
+
+    let tp = token_path.clone();
+    let handle = tokio::spawn(lifecycle::run_with_paths(socket_path, tp));
+
+    wait_for_socket(&sock_path).await;
+    let token = auth::read_token_file(&token_path).expect("read token");
+
+    // First subscribe — read snapshot, then drop.
+    let stream = UnixStream::connect(&sock_path).await.expect("connect");
+    let mut conn = UnixConnection::new(stream);
+    let params = serde_json::to_value(&SubscribeManifestRequest {
+        feature_id: Some("drop-test".to_string()),
+    })
+    .unwrap();
+    let req = DaemonRequest::new(1, methods::MANIFEST_SUBSCRIBE, &token, params.clone());
+    conn.write_message(&req).await.expect("write 1");
+    let _resp: DaemonResponse = conn.read_message().await.expect("read 1").expect("not EOF");
+    // Drop the client side — server observes EOF on next `select!`
+    // poll, exits the subscribe loop, and drops its broadcast::Receiver.
+    drop(conn);
+
+    // Give the scheduler a tick for the server-side drop to propagate.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Second subscribe on a fresh connection — must succeed quickly.
+    // If the server were leaking a per-connection lock or holding a
+    // shard from the dropped connection, this would hang.
+    let stream = UnixStream::connect(&sock_path).await.expect("connect 2");
+    let mut conn = UnixConnection::new(stream);
+    let req = DaemonRequest::new(2, methods::MANIFEST_SUBSCRIBE, &token, params);
+    conn.write_message(&req).await.expect("write 2");
+    let resp: DaemonResponse = tokio::time::timeout(Duration::from_secs(2), conn.read_message())
+        .await
+        .expect("second subscribe within 2s after prior connection drop")
+        .expect("read 2")
+        .expect("not EOF");
+    assert_eq!(resp.id, 2);
+    assert!(
+        resp.error.is_none(),
+        "second subscribe should succeed, got {:?}",
+        resp.error
+    );
+    drop(conn);
+
+    // Shutdown the daemon. If the drain hangs on a leaked subscribe
+    // task (e.g. because the broadcast::Receiver from the dropped
+    // connection was retained somewhere), the outer `timeout(5s)` on
+    // the lifecycle handle fails the test.
+    let stream = UnixStream::connect(&sock_path).await.expect("connect 3");
+    let mut conn = UnixConnection::new(stream);
+    let shutdown_req =
+        DaemonRequest::new(3, methods::DAEMON_SHUTDOWN, &token, serde_json::json!({}));
+    conn.write_message(&shutdown_req).await.expect("write 3");
+    let _resp: DaemonResponse = conn
+        .read_message()
+        .await
+        .expect("shutdown response")
+        .expect("not EOF");
+    drop(conn);
+
+    // Ceiling: daemon must exit within 5s after shutdown RPC. If a
+    // leaked subscribe held the event bus Arc or a per-connection
+    // cancel-token, this would hang beyond 5s.
+    let result = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("daemon exits within 5s after shutdown");
+    result.expect("join ok").expect("clean exit");
+}
+
 #[tokio::test]
 async fn subscribe_unknown_method_in_subscribe_namespace_returns_error() {
     // Defensive: if a client sends a method that's NOT in
