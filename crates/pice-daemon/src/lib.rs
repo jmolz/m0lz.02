@@ -34,6 +34,7 @@
 //! prevention, graceful shutdown budget, etc.).
 
 pub mod clock;
+pub mod events;
 pub mod handlers;
 pub mod inline;
 pub mod lifecycle;

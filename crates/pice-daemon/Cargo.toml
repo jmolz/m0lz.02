@@ -54,6 +54,14 @@ num_cpus = "1.16"
 # ("tokio-util does not have that feature"). `rt` is the correct and
 # minimal feature set for this dependency.
 tokio-util = { version = "0.7", features = ["rt"] }
+# Phase 7 background execution: concurrent `FeatureId → broadcast::Sender`
+# map for the daemon's `EventBus` (per-feature fan-out) and
+# `FeatureId → JobHandle` map for `FeatureJobManager`. Picked `DashMap`
+# over `Arc<RwLock<HashMap<>>>` because the hot path is lock-free reads
+# (subscribe + publish on a steady-state feature), and broadcasters are
+# entered/removed only at dispatch + terminal transitions. `DashMap`
+# stays scoped to `pice-daemon` — `pice-core` remains sync-dep-free.
+dashmap = "6"
 # Phase 6 review gates: async trait sugar for `Clock`.
 #
 # The trait wraps `tokio::time::sleep` in production and `Arc<Notify>`
