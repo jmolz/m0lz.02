@@ -37,6 +37,7 @@ pub mod clock;
 pub mod events;
 pub mod handlers;
 pub mod inline;
+pub mod jobs;
 pub mod lifecycle;
 pub mod logging;
 pub mod logs;
