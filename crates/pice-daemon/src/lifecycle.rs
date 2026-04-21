@@ -52,6 +52,17 @@ pub async fn run_with_paths(socket_path: SocketPath, token_path: std::path::Path
     auth::write_token_file(&token_path, &token)?;
     info!(token_path = %token_path.display(), "auth token written");
 
+    // Phase 7 Task 8: reconcile any interrupted-dispatch manifests BEFORE
+    // accepting the first RPC. `Queued` manifests (dispatch that never
+    // ran) are deleted; `InProgress` manifests are rewritten to Failed
+    // with `halted_by = "failed-interrupted"`. Terminal states are
+    // preserved untouched.
+    let state_dir = pice_core::layers::manifest::VerificationManifest::state_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("~/.pice/state"));
+    if let Err(e) = crate::jobs::reconcile_on_startup(&state_dir) {
+        tracing::warn!(error = %e, "startup reconciliation failed");
+    }
+
     // Build shared context.
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let ctx = Arc::new(DaemonContext::new(token, project_root));

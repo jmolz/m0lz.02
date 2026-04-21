@@ -24,5 +24,7 @@
 //! `Queued → InProgress`.
 
 pub mod manager;
+pub mod recovery;
 
 pub use manager::{FeatureJobManager, JobHandle, RunId, SpawnError};
+pub use recovery::{reconcile_on_startup, ReconciliationReport, FAILED_INTERRUPTED};
