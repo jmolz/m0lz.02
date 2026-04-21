@@ -37,6 +37,7 @@ use serde_json::json;
 use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::adapter::autostart::ensure_daemon_running;
+use crate::input::gate_source::{GateOutcome, SubscribedGateSource};
 use crate::notifications::{
     self, Dispatcher, NotificationKind, NotificationState, NotificationsConfig,
     NotifyRustDispatcher,
@@ -146,6 +147,18 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
     let notif_state = NotificationState::new();
     let notif_cfg = NotificationsConfig::default();
     let notif_dispatcher = NotifyRustDispatcher;
+    // Task 18: `SubscribedGateSource` handles `GateRequested` events on
+    // a TTY. Under `--stream-json` (piped consumer), we SKIP the prompt
+    // — the operator runs `pice review-gate` on a separate terminal.
+    // Non-TTY is detected via `is_tty_interactive` so CI runs don't try
+    // to prompt a stdin that isn't attached.
+    let gate_source = if stream_json || !is_tty_interactive() {
+        None
+    } else {
+        Some(SubscribedGateSource::new(
+            SubscribedGateSource::resolve_reviewer(),
+        ))
+    };
     let client = ensure_daemon_running()
         .await
         .context("failed to open subscribe connection for --follow")?;
@@ -217,6 +230,35 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
                 // Terminal transitions map to Complete (passed) / Failure
                 // (failed/cancelled) per `terminal_from_event`.
                 maybe_notify_for_event(&payload, &notif_state, &notif_cfg, &notif_dispatcher);
+                // Task 18: interactive gate prompt when a TTY is
+                // attached. `--stream-json` / piped mode leaves
+                // `gate_source = None`, so this is a no-op and the
+                // reviewer is expected to run `pice review-gate`
+                // separately (channel-ownership — piped stdout stays
+                // clean of prompt bytes).
+                if payload.event == ManifestEvent::GateRequested {
+                    if let Some(src) = &gate_source {
+                        match src.handle_gate_requested(&payload).await {
+                            Ok(GateOutcome::Decided {
+                                gate_id, decision, ..
+                            }) => {
+                                eprintln!("gate {gate_id} decided: {decision:?}");
+                            }
+                            Ok(GateOutcome::PromptExhausted { gate_id }) => {
+                                eprintln!(
+                                    "gate {gate_id}: no valid decision after 5 prompts — \
+                                     leaving gate Pending, run `pice review-gate` to resume"
+                                );
+                            }
+                            Ok(GateOutcome::RpcFailure { gate_id, error }) => {
+                                eprintln!("gate {gate_id} decide RPC failed: {error}");
+                            }
+                            Err(err) => {
+                                eprintln!("gate handler error: {err:#}");
+                            }
+                        }
+                    }
+                }
                 if let Some((_, code)) = terminal_from_event(&payload) {
                     if stream_json {
                         emit_stream_terminal(code)?;
@@ -480,6 +522,15 @@ fn manifest_status_wire(status: &ManifestStatus) -> String {
         ManifestStatus::Queued => "queued",
     }
     .to_string()
+}
+
+/// Both stdin AND stderr must be TTYs for the interactive gate prompt
+/// to make sense. Piped stdin or a captured stderr disables the prompt
+/// — the follow loop still streams frames, and the operator runs
+/// `pice review-gate` on a separate terminal.
+fn is_tty_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
 /// Classify a `ManifestEvent` into a notification kind if it warrants a

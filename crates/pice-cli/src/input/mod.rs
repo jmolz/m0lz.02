@@ -7,3 +7,4 @@
 //! different channels. All interactive logic lives here.
 
 pub mod decision_source;
+pub mod gate_source;
