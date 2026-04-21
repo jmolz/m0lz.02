@@ -40,6 +40,10 @@ use serde_json::json;
 use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::adapter::autostart::ensure_daemon_running;
+use crate::notifications::{
+    self, Dispatcher, NotificationKind, NotificationState, NotificationsConfig,
+    NotifyRustDispatcher,
+};
 
 /// Outcome of the `--background`/`--wait` handshake. The caller's `run()`
 /// returns `Ok(())` after rendering, or `std::process::exit(code)` for
@@ -170,9 +174,30 @@ async fn wait_until_terminal(
         .and_then(|m| terminal_exit_code(&m.overall_status).map(|c| (m.overall_status.clone(), c)));
     if let Some((status, code)) = terminal {
         stream.close().await;
-        emit_wait_outcome(feature_id, run_id, &manifest_status_wire(&status), json);
+        let wire = manifest_status_wire(&status);
+        // Task 14: snapshot short-circuit also emits a notification —
+        // the user-facing outcome is the same as the rx-loop path.
+        let notif_state = NotificationState::new();
+        let notif_cfg = NotificationsConfig::default();
+        notify_terminal_outcome(
+            feature_id,
+            &wire,
+            &notif_state,
+            &notif_cfg,
+            &NotifyRustDispatcher,
+        );
+        emit_wait_outcome(feature_id, run_id, &wire, json);
         return Ok(code);
     }
+
+    // Task 14: fire a desktop notification on the terminal outcome. The
+    // dispatcher is a real `notify-rust` instance; failures are swallowed
+    // to tracing::debug + terminal BEL fallback per
+    // `notifications::notify`. Defaults-only config for now — a future
+    // Task 19 pass reads `[notifications]` from the user's config.
+    let notif_state = NotificationState::new();
+    let notif_cfg = NotificationsConfig::default();
+    let notif_dispatcher = NotifyRustDispatcher;
 
     let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
 
@@ -200,6 +225,18 @@ async fn wait_until_terminal(
                             parse_terminal_notification(&notif)
                         {
                             stream.close().await;
+                            // Notify BEFORE printing the outcome so the
+                            // desktop alert doesn't race the terminal
+                            // render (they race on the same scheduler
+                            // tick but the desktop path is slower; firing
+                            // first minimizes the visible gap).
+                            notify_terminal_outcome(
+                                feature_id,
+                                &status_wire,
+                                &notif_state,
+                                &notif_cfg,
+                                &notif_dispatcher,
+                            );
                             emit_wait_outcome(feature_id, run_id, &status_wire, json);
                             return Ok(code);
                         }
@@ -283,6 +320,39 @@ fn parse_terminal_notification(notif: &DaemonNotification) -> Option<(String, i3
         }
         _ => None,
     }
+}
+
+/// Map a terminal wire-status to a [`NotificationKind`] + title/body and
+/// fire a desktop notification. Handles the three `wait_until_terminal`
+/// outcomes (passed / pending-review / failed|cancelled) plus anything
+/// else that reaches the terminal branch (mapped to Failure — a defensive
+/// default since unknown statuses at this point mean the feature ended
+/// without passing).
+fn notify_terminal_outcome(
+    feature_id: &str,
+    status_wire: &str,
+    state: &NotificationState,
+    cfg: &NotificationsConfig,
+    dispatcher: &dyn Dispatcher,
+) {
+    let (kind, title, body) = match status_wire {
+        "passed" => (
+            NotificationKind::Complete,
+            format!("pice: {feature_id} passed"),
+            "evaluation completed successfully.".to_string(),
+        ),
+        "pending-review" => (
+            NotificationKind::Gate,
+            format!("pice: {feature_id} — review gate"),
+            "the feature is waiting on a reviewer decision.".to_string(),
+        ),
+        other => (
+            NotificationKind::Failure,
+            format!("pice: {feature_id} — {other}"),
+            "evaluation ended without passing.".to_string(),
+        ),
+    };
+    notifications::notify(state, cfg, kind, feature_id, &title, &body, dispatcher);
 }
 
 fn emit_wait_outcome(feature_id: &str, run_id: &str, status_wire: &str, json: bool) {

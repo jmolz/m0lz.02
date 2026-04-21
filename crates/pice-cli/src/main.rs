@@ -3,6 +3,7 @@ mod commands;
 mod engine;
 mod input;
 mod metrics;
+mod notifications;
 
 use clap::{Parser, Subcommand};
 use clap_complete::{generate, Shell};

@@ -37,6 +37,10 @@ use serde_json::json;
 use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::adapter::autostart::ensure_daemon_running;
+use crate::notifications::{
+    self, Dispatcher, NotificationKind, NotificationState, NotificationsConfig,
+    NotifyRustDispatcher,
+};
 
 #[derive(Args, Debug, Clone)]
 pub struct StatusArgs {
@@ -134,6 +138,14 @@ pub async fn run(args: &StatusArgs) -> Result<()> {
 async fn run_follow(req: StatusRequest) -> Result<()> {
     let feature_id_filter = req.feature_id.clone();
     let stream_json = req.stream_json;
+    // Task 14: Notifications state + config. Defaults to all-on; a real
+    // floor-merge against `~/.pice/config.toml` + `.pice/config.toml`
+    // lands when those config loaders expose a `[notifications]` table
+    // (deferred to Task 19). For now the defaults are correct for the
+    // common case: notify on gate + terminal.
+    let notif_state = NotificationState::new();
+    let notif_cfg = NotificationsConfig::default();
+    let notif_dispatcher = NotifyRustDispatcher;
     let client = ensure_daemon_running()
         .await
         .context("failed to open subscribe connection for --follow")?;
@@ -200,6 +212,11 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
                 } else {
                     render_follow_event(&payload);
                 }
+                // Task 14: notify on gate requests + terminal transitions.
+                // `GateRequested` → immediate notify regardless of outcome.
+                // Terminal transitions map to Complete (passed) / Failure
+                // (failed/cancelled) per `terminal_from_event`.
+                maybe_notify_for_event(&payload, &notif_state, &notif_cfg, &notif_dispatcher);
                 if let Some((_, code)) = terminal_from_event(&payload) {
                     if stream_json {
                         emit_stream_terminal(code)?;
@@ -465,6 +482,76 @@ fn manifest_status_wire(status: &ManifestStatus) -> String {
     .to_string()
 }
 
+/// Classify a `ManifestEvent` into a notification kind if it warrants a
+/// desktop alert, else `None`. Extracted for testability — the real
+/// `run_follow` path calls [`maybe_notify_for_event`] with a live
+/// dispatcher; the test runs the pure classifier.
+fn classify_notification(payload: &ManifestEventPayload) -> Option<NotificationKind> {
+    match payload.event {
+        ManifestEvent::GateRequested => Some(NotificationKind::Gate),
+        ManifestEvent::FeatureComplete => {
+            let wire = payload
+                .data
+                .get("overall_status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("failed");
+            match wire {
+                "passed" => Some(NotificationKind::Complete),
+                "pending-review" => Some(NotificationKind::Gate),
+                _ => Some(NotificationKind::Failure),
+            }
+        }
+        ManifestEvent::Cancelled => Some(NotificationKind::Failure),
+        _ => None,
+    }
+}
+
+/// Fire a desktop notification for an incoming event if its kind is
+/// enabled in `cfg` and the debouncer admits it. Non-fatal on failure —
+/// `notifications::notify` logs + terminal-fallbacks any dispatcher
+/// error.
+fn maybe_notify_for_event(
+    payload: &ManifestEventPayload,
+    state: &NotificationState,
+    cfg: &NotificationsConfig,
+    dispatcher: &dyn Dispatcher,
+) {
+    let Some(kind) = classify_notification(payload) else {
+        return;
+    };
+    let (title, body) = match kind {
+        NotificationKind::Gate => (
+            format!("pice: review gate — {}", payload.feature_id),
+            format!(
+                "layer {} requested review. Run `pice review-gate --list`.",
+                payload.layer.as_deref().unwrap_or("?")
+            ),
+        ),
+        NotificationKind::Complete => (
+            format!("pice: {} passed", payload.feature_id),
+            "evaluation completed successfully.".to_string(),
+        ),
+        NotificationKind::Failure => (
+            format!("pice: {} failed", payload.feature_id),
+            payload
+                .data
+                .get("overall_status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("failed")
+                .to_string(),
+        ),
+    };
+    notifications::notify(
+        state,
+        cfg,
+        kind,
+        &payload.feature_id,
+        &title,
+        &body,
+        dispatcher,
+    );
+}
+
 /// Inspect an event payload for a terminal `FeatureComplete` / `Cancelled`
 /// event. Returns `Some((status_wire, exit_code))` on terminal, else
 /// `None` — the follow / wait loops call this each recv.
@@ -643,6 +730,67 @@ mod tests {
                 timestamp: "2026-04-21T10:00:00Z".to_string(),
             };
             assert!(terminal_from_event(&payload).is_none(), "{ev:?}");
+        }
+    }
+
+    #[test]
+    fn classify_notification_gate_requested() {
+        let payload = ManifestEventPayload {
+            feature_id: "f".to_string(),
+            run_id: "r-1".to_string(),
+            event: ManifestEvent::GateRequested,
+            layer: Some("infrastructure".to_string()),
+            data: json!({}),
+            timestamp: "2026-04-21T10:00:00Z".to_string(),
+        };
+        assert_eq!(
+            classify_notification(&payload),
+            Some(NotificationKind::Gate)
+        );
+    }
+
+    #[test]
+    fn classify_notification_feature_complete_mapping() {
+        for (wire, expected) in [
+            ("passed", NotificationKind::Complete),
+            ("failed", NotificationKind::Failure),
+            ("pending-review", NotificationKind::Gate),
+            ("cancelled", NotificationKind::Failure),
+        ] {
+            let payload = ManifestEventPayload {
+                feature_id: "f".to_string(),
+                run_id: "r-1".to_string(),
+                event: ManifestEvent::FeatureComplete,
+                layer: None,
+                data: json!({"overall_status": wire}),
+                timestamp: "2026-04-21T10:00:00Z".to_string(),
+            };
+            assert_eq!(
+                classify_notification(&payload),
+                Some(expected),
+                "wire={wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_notification_ignores_non_terminal_non_gate_events() {
+        for ev in [
+            ManifestEvent::LayerStarted,
+            ManifestEvent::LayerComplete,
+            ManifestEvent::PassComplete,
+            ManifestEvent::GateDecided,
+            ManifestEvent::SeamFinding,
+        ] {
+            let payload = ManifestEventPayload {
+                feature_id: "f".to_string(),
+                run_id: "r-1".to_string(),
+                event: ev,
+                layer: Some("backend".to_string()),
+                data: json!({}),
+                timestamp: "2026-04-21T10:00:00Z".to_string(),
+            };
+            assert_eq!(classify_notification(&payload), None, "{ev:?}");
         }
     }
 
