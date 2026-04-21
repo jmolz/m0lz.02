@@ -57,6 +57,22 @@ impl From<ExecuteArgs> for ExecuteRequest {
 }
 
 pub async fn run(args: &ExecuteArgs) -> Result<()> {
+    // Phase 7: --background routes through the shared `run_background`
+    // helper which handles the dispatch handshake + (optional) subscribe
+    // wait. The foreground path below is unchanged.
+    if args.background {
+        let req = CommandRequest::Execute(args.clone().into());
+        let outcome = crate::adapter::background_wait::run_background(
+            req,
+            args.json,
+            args.wait,
+            args.timeout_secs,
+            "execute",
+        )
+        .await?;
+        return crate::adapter::background_wait::render_background_outcome(outcome, args.json);
+    }
+
     let req = CommandRequest::Execute(args.clone().into());
     let resp = crate::adapter::dispatch(req).await?;
     super::render_response(resp)

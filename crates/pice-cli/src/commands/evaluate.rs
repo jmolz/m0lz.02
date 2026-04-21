@@ -57,6 +57,24 @@ impl From<EvaluateArgs> for EvaluateRequest {
 }
 
 pub async fn run(args: &EvaluateArgs) -> Result<()> {
+    // Phase 7: --background bypasses the Phase 6 foreground auto-resume
+    // loop. `run_background` handles the dispatch + (optional) subscribe
+    // wait. Any non-dispatched response (inline-mode unsupported,
+    // feature-already-running, operational error) passes straight
+    // through render_response.
+    if args.background {
+        let req = CommandRequest::Evaluate(args.clone().into());
+        let outcome = crate::adapter::background_wait::run_background(
+            req,
+            args.json,
+            args.wait,
+            args.timeout_secs,
+            "evaluate",
+        )
+        .await?;
+        return crate::adapter::background_wait::render_background_outcome(outcome, args.json);
+    }
+
     // Phase 6 TTY auto-resume: loop evaluate → (on pending-review) prompt
     // → decide → evaluate, until a terminal status. In non-TTY mode a
     // pending-review response propagates as exit 3 immediately.

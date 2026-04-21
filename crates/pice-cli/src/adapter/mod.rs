@@ -18,6 +18,7 @@
 //! socket for readiness.
 //!
 pub mod autostart;
+pub mod background_wait;
 pub mod inline;
 pub mod transport;
 
