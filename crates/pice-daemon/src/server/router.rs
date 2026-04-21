@@ -36,6 +36,7 @@ use tokio::sync::Mutex as TokioMutex;
 use super::auth;
 use crate::events::EventBus;
 use crate::handlers;
+use crate::jobs::FeatureJobManager;
 use crate::logs::LogStore;
 use crate::orchestrator::NullSink;
 
@@ -121,6 +122,15 @@ pub struct DaemonContext {
     /// `logs/stream` router handler (Task 6) reads via `snapshot` +
     /// `subscribe`.
     logs: LogStore,
+
+    /// Phase 7 Task 7/10: detached-task tracker for background evaluate /
+    /// execute dispatches. Shared across every handler invocation so a
+    /// `pice evaluate --background` returning within the dispatch-SLO
+    /// leaves a running future the `manifest/subscribe` handler can
+    /// observe and `pice status --wait` can synchronize against. The
+    /// manager clamps the global provider-concurrency cap to
+    /// [`pice_core::workflow::schema::MAX_GLOBAL_PROVIDER_CONCURRENCY_HARD_CAP`].
+    jobs: FeatureJobManager,
 }
 
 impl DaemonContext {
@@ -130,6 +140,11 @@ impl DaemonContext {
     /// `project_root` is the working directory the daemon serves.
     pub fn new(token: String, project_root: PathBuf) -> Self {
         let config = load_config(&project_root);
+        let events = EventBus::new();
+        let jobs = FeatureJobManager::new(
+            events.clone(),
+            resolve_global_provider_concurrency(&project_root),
+        );
         Self {
             active_token: token,
             version: env!("CARGO_PKG_VERSION"),
@@ -138,8 +153,9 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
-            events: EventBus::new(),
+            events,
             logs: LogStore::new(),
+            jobs,
         }
     }
 
@@ -152,6 +168,11 @@ impl DaemonContext {
     pub fn inline() -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let config = load_config(&project_root);
+        let events = EventBus::new();
+        let jobs = FeatureJobManager::new(
+            events.clone(),
+            resolve_global_provider_concurrency(&project_root),
+        );
         Self {
             active_token: String::new(),
             version: env!("CARGO_PKG_VERSION"),
@@ -160,8 +181,9 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
-            events: EventBus::new(),
+            events,
             logs: LogStore::new(),
+            jobs,
         }
     }
 
@@ -200,6 +222,14 @@ impl DaemonContext {
         &self.logs
     }
 
+    /// Phase 7: the detached-task tracker for background dispatches.
+    /// Task 10's dispatch helper uses this to enforce
+    /// one-feature-at-a-time (`run_id_for`) and to spawn the
+    /// orchestrator future on the daemon runtime.
+    pub fn jobs(&self) -> &FeatureJobManager {
+        &self.jobs
+    }
+
     /// Validate a request's `auth` token against the active daemon
     /// token. Returns `Ok(())` on match; on mismatch returns an
     /// already-formatted `DaemonResponse` error (code `-32002`) that
@@ -222,6 +252,8 @@ impl DaemonContext {
     /// can assert on a known value without depending on Cargo.toml.
     #[cfg(test)]
     pub(crate) fn new_for_test(token: &str) -> Self {
+        let events = EventBus::new();
+        let jobs = FeatureJobManager::new(events.clone(), 4);
         Self {
             active_token: token.to_string(),
             version: "0.1.0-test",
@@ -230,8 +262,9 @@ impl DaemonContext {
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config: PiceConfig::default(),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
-            events: EventBus::new(),
+            events,
             logs: LogStore::new(),
+            jobs,
         }
     }
 
@@ -242,6 +275,8 @@ impl DaemonContext {
     #[cfg(test)]
     pub(crate) fn new_for_test_with_root(token: &str, project_root: PathBuf) -> Self {
         let config = load_config(&project_root);
+        let events = EventBus::new();
+        let jobs = FeatureJobManager::new(events.clone(), 4);
         Self {
             active_token: token.to_string(),
             version: "0.1.0-test",
@@ -250,8 +285,9 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
-            events: EventBus::new(),
+            events,
             logs: LogStore::new(),
+            jobs,
         }
     }
 
@@ -285,6 +321,36 @@ impl DaemonContext {
 fn load_config(project_root: &std::path::Path) -> PiceConfig {
     let config_path = project_root.join(".pice/config.toml");
     PiceConfig::load(&config_path).unwrap_or_else(|_| PiceConfig::default())
+}
+
+/// Resolve the global-provider-concurrency cap for this daemon's
+/// [`FeatureJobManager`].
+///
+/// Precedence:
+/// 1. `workflow.yaml defaults.max_global_provider_concurrency` (if
+///    present)
+/// 2. `workflow.yaml defaults.max_parallelism` (if present) — matches
+///    v0.6 single-feature behavior
+/// 3. `num_cpus::get()` — parity with per-feature cohort default
+///
+/// The final value is clamped by [`FeatureJobManager::new`] to the
+/// hard cap. Returns `u32` so clamping math stays type-consistent with
+/// the schema field.
+///
+/// Non-existent / malformed `.pice/workflow.yaml` silently falls
+/// through to `num_cpus` — the daemon must start without a workflow
+/// config (uninitialized project), and a broken workflow file will be
+/// surfaced separately at evaluate-dispatch time.
+fn resolve_global_provider_concurrency(project_root: &std::path::Path) -> u32 {
+    let default = num_cpus::get().max(1) as u32;
+    match pice_core::workflow::loader::resolve(project_root) {
+        Ok(wf) => wf
+            .defaults
+            .max_global_provider_concurrency
+            .or(wf.defaults.max_parallelism)
+            .unwrap_or(default),
+        Err(_) => default,
+    }
 }
 
 /// Authenticate and dispatch a daemon RPC request.

@@ -25,6 +25,7 @@
 //! layer). The `Daemon` subcommand (T24) is also CLI-only.
 
 pub mod audit;
+pub mod background;
 pub mod benchmark;
 pub mod commit;
 pub mod evaluate;
