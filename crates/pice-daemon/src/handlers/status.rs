@@ -799,6 +799,147 @@ mod tests {
         assert!(out.contains("c=0.912"), "missing confidence: {out}");
     }
 
+    /// Phase 7 Task 12: `StatusMode::Detail` returns the requested manifest
+    /// verbatim as JSON.
+    #[tokio::test]
+    // `home_lock` serializes `std::env::set_var("HOME", ...)` across the
+    // single-threaded test consumers below. The guard is held across
+    // `.await` only because the test body does no cross-task work —
+    // `run(...)` awaits synchronous IO on the current task. Using a
+    // `tokio::sync::Mutex` would defeat the test's atomic-env guarantee
+    // (per `.claude/rules/rust-core.md` "Holding MutexGuard across .await").
+    #[allow(clippy::await_holding_lock)]
+    async fn detail_mode_returns_manifest_when_feature_exists() {
+        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let project_root = tmp.path();
+
+        setup_manifest_at("feature-detail", project_root, adaptive_layer_fixture());
+
+        let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
+        let req = StatusRequest {
+            json: true,
+            mode: StatusMode::Detail,
+            feature_id: Some("feature-detail".to_string()),
+            stream_json: false,
+            timeout_secs: None,
+        };
+        let resp = run(req, &ctx, &crate::orchestrator::NullSink)
+            .await
+            .expect("run");
+        match resp {
+            CommandResponse::Json { value } => {
+                assert_eq!(value["feature_id"], "feature-detail");
+                // The adaptive_layer_fixture adds one layer; setup_manifest_at
+                // adds another legacy layer.
+                let layers = value["layers"].as_array().expect("layers array");
+                assert_eq!(layers.len(), 2);
+            }
+            other => panic!("expected Json, got: {other:?}"),
+        }
+    }
+
+    /// Phase 7 Task 12: `StatusMode::Detail` with a missing feature_id
+    /// returns `ExitJsonStatus::FeatureNotFound`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn detail_mode_json_surfaces_feature_not_found() {
+        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let project_root = tmp.path();
+
+        let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
+        let req = StatusRequest {
+            json: true,
+            mode: StatusMode::Detail,
+            feature_id: Some("does-not-exist".to_string()),
+            stream_json: false,
+            timeout_secs: None,
+        };
+        let resp = run(req, &ctx, &crate::orchestrator::NullSink)
+            .await
+            .expect("run");
+        match resp {
+            CommandResponse::ExitJson { code, value } => {
+                assert_eq!(code, ExitJsonStatus::FeatureNotFound.exit_code());
+                assert_eq!(value["status"], ExitJsonStatus::FeatureNotFound.as_str());
+                assert_eq!(value["feature_id"], "does-not-exist");
+            }
+            other => panic!("expected ExitJson, got: {other:?}"),
+        }
+    }
+
+    /// Phase 7 Task 12: `StatusMode::Follow` / `Wait` at cli/dispatch is a
+    /// CLI routing bug — the daemon surfaces it with a structured `Exit`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn follow_and_wait_modes_rejected_at_dispatch() {
+        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let project_root = tmp.path();
+        let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
+
+        for mode in [StatusMode::Follow, StatusMode::Wait] {
+            let req = StatusRequest {
+                json: false,
+                mode,
+                feature_id: Some("f".to_string()),
+                stream_json: false,
+                timeout_secs: None,
+            };
+            let resp = run(req, &ctx, &crate::orchestrator::NullSink)
+                .await
+                .expect("run");
+            match resp {
+                CommandResponse::Exit { code, message } => {
+                    assert_eq!(code, 1);
+                    assert!(
+                        message.contains("manifest/subscribe"),
+                        "expected routing-bug message for {mode:?}, got: {message}"
+                    );
+                }
+                other => panic!("expected Exit, got: {other:?}"),
+            }
+        }
+    }
+
+    /// Phase 7 Task 12: List-mode JSON output now includes `summaries` —
+    /// one [`ManifestSummary`] per project-namespaced manifest.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn list_mode_json_includes_manifest_summaries() {
+        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = TempDir::new().unwrap();
+        std::env::set_var("HOME", tmp.path());
+        let project_root = tmp.path();
+        setup_manifest_at("feature-a", project_root, adaptive_layer_fixture());
+
+        let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
+        let req = StatusRequest {
+            json: true,
+            mode: StatusMode::List,
+            feature_id: None,
+            stream_json: false,
+            timeout_secs: None,
+        };
+        let resp = run(req, &ctx, &crate::orchestrator::NullSink)
+            .await
+            .expect("run");
+        match resp {
+            CommandResponse::Json { value } => {
+                let summaries = value["summaries"].as_array().expect("summaries array");
+                assert!(
+                    summaries.iter().any(|s| s["feature_id"] == "feature-a"),
+                    "feature-a should be in summaries; got {summaries:?}"
+                );
+            }
+            other => panic!("expected Json, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn render_adaptive_layer_block_skips_legacy_only_layers() {
         // All layers are legacy (no adaptive fields) — block should be empty.
