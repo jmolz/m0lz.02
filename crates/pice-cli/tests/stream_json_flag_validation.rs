@@ -227,3 +227,105 @@ fn status_follow_with_stream_json_parses() {
 fn logs_help_renders() {
     pice().args(["logs", "--help"]).assert().success();
 }
+
+// ─── NDJSON envelope validity (Task 15) ──────────────────────────────────
+//
+// Exercise `StreamJsonFrame` serialize → line-by-line deserialize to
+// prove every emitted line of `--stream-json` output parses back as a
+// typed frame. This pins the wire shape that consumers pattern-match
+// on, independent of the runtime path (no daemon needed, no tokio
+// runtime — pure serde). The status follow loop calls
+// `serde_json::to_string(&StreamJsonFrame::*)` and emits one frame per
+// line; if the enum's tag layout ever drifts from `{"kind":...}`, the
+// parse step below fails instantly and CI catches it before a user's
+// NDJSON pipeline breaks.
+
+#[test]
+fn stream_json_frame_ndjson_roundtrip_is_stable() {
+    use pice_core::events::{ManifestEvent, ManifestEventPayload, StreamJsonFrame};
+    use pice_core::protocol::subscribe::SubscribeManifestResponse;
+    use std::collections::BTreeMap;
+
+    // Build 50 frames: 1 snapshot + 48 events + 1 terminal — the worst
+    // case the plan's integration test calls out ("JSONL validity over
+    // 50 events").
+    let mut lines = Vec::with_capacity(50);
+    lines.push(
+        serde_json::to_string(&StreamJsonFrame::Snapshot {
+            snapshot: SubscribeManifestResponse {
+                snapshots: vec![],
+                run_ids: BTreeMap::new(),
+            },
+        })
+        .expect("snapshot serializes"),
+    );
+    for i in 0..48 {
+        let payload = ManifestEventPayload {
+            feature_id: format!("f-{}", i % 3),
+            run_id: format!("r-{}", i % 7),
+            event: match i % 4 {
+                0 => ManifestEvent::LayerStarted,
+                1 => ManifestEvent::PassComplete,
+                2 => ManifestEvent::LayerComplete,
+                _ => ManifestEvent::SeamFinding,
+            },
+            layer: Some(format!("layer-{}", i % 5)),
+            data: serde_json::json!({ "i": i }),
+            timestamp: "2026-04-21T10:00:00Z".to_string(),
+        };
+        lines.push(
+            serde_json::to_string(&StreamJsonFrame::Event { event: payload })
+                .expect("event serializes"),
+        );
+    }
+    lines.push(
+        serde_json::to_string(&StreamJsonFrame::Terminal { exit_code: 0 })
+            .expect("terminal serializes"),
+    );
+    assert_eq!(lines.len(), 50);
+
+    // Every line parses back as a typed frame, in order: first is
+    // snapshot, last is terminal, middle are events.
+    let mut saw_snapshot = 0;
+    let mut saw_event = 0;
+    let mut saw_terminal = 0;
+    for (idx, line) in lines.iter().enumerate() {
+        // Mandatory: no newline INSIDE a serialized frame (would break
+        // the NDJSON contract).
+        assert!(
+            !line.contains('\n'),
+            "line {idx} contains an embedded newline: {line}"
+        );
+        let frame: StreamJsonFrame =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("line {idx} parse: {e}: {line}"));
+        match frame {
+            StreamJsonFrame::Snapshot { .. } => saw_snapshot += 1,
+            StreamJsonFrame::Event { .. } => saw_event += 1,
+            StreamJsonFrame::Terminal { .. } => saw_terminal += 1,
+        }
+    }
+    assert_eq!(saw_snapshot, 1);
+    assert_eq!(saw_event, 48);
+    assert_eq!(saw_terminal, 1);
+}
+
+#[test]
+fn stream_json_frame_kind_discriminant_values() {
+    // Pin the exact kebab-case discriminant wire strings so a future
+    // serde rename on `StreamJsonFrame` is caught at CI.
+    use pice_core::events::StreamJsonFrame;
+    let terminal = serde_json::to_value(StreamJsonFrame::Terminal { exit_code: 0 }).unwrap();
+    assert_eq!(terminal["kind"], "terminal");
+    let event = serde_json::to_value(StreamJsonFrame::Event {
+        event: pice_core::events::ManifestEventPayload {
+            feature_id: "f".to_string(),
+            run_id: "r".to_string(),
+            event: pice_core::events::ManifestEvent::FeatureComplete,
+            layer: None,
+            data: serde_json::json!({}),
+            timestamp: "ts".to_string(),
+        },
+    })
+    .unwrap();
+    assert_eq!(event["kind"], "event");
+}
