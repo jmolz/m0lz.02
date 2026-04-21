@@ -33,6 +33,7 @@ pub mod execute;
 pub mod handoff;
 pub mod init;
 pub mod layers;
+pub mod logs;
 pub mod metrics;
 pub mod plan;
 pub mod prime;
@@ -111,15 +112,7 @@ pub async fn dispatch(
         CommandRequest::Validate(r) => validate::run(r, ctx, sink).await,
         CommandRequest::ReviewGate(r) => review_gate::run(r, ctx, sink).await,
         CommandRequest::Audit(r) => audit::run(r, ctx, sink).await,
-        // Phase 7 stub: Task 2 adds the enum variant so the CLI adapter +
-        // round-trip tests compile; Task 13 replaces this arm with a real
-        // `logs::run(r, ctx, sink)` that consults the daemon's `LogStore`.
-        // The stub keeps exhaustiveness intact between tasks without
-        // shipping scaffolding ahead of a real consumer (rust-core rule).
-        CommandRequest::Logs(_) => Ok(CommandResponse::Exit {
-            code: 1,
-            message: "pice logs: handler not yet implemented (Phase 7 Task 13)".to_string(),
-        }),
+        CommandRequest::Logs(r) => logs::run(r, ctx, sink).await,
     }
 }
 

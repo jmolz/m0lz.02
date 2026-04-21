@@ -1,25 +1,35 @@
 //! `pice logs <feature_id>` — inspect or tail captured provider
 //! session logs for a background feature run.
 //!
-//! Phase 7 shape:
+//! Phase 7 Task 13 shape:
 //! - `pice logs <feature_id>`               → one-shot snapshot via
-//!   `cli/dispatch::Logs`
+//!   `cli/dispatch::Logs` (daemon handler renders JSON or text).
 //! - `pice logs <feature_id> --follow`      → router-level
-//!   `logs/stream` RPC with `follow: true` (live tail)
-//! - `pice logs <feature_id> --layer L`     → filter buffered history
-//!   to a specific layer
+//!   `logs/stream` RPC with `follow: true`; opens a
+//!   [`crate::adapter::transport::DaemonClient::subscribe_stream`]
+//!   connection and forwards every `logs/chunk` notification until a
+//!   `LogChunk { terminal: true }` frame arrives or the connection
+//!   closes.
+//! - `--layer L` filters both modes.
+//! - `--stream-json` (requires `--follow`) emits heterogeneous
+//!   `StreamJsonFrame` NDJSON frames. `--json` (requires `--follow=false`)
+//!   emits a single top-level `LogsStreamResponse` object.
 //!
-//! Clap-enforced conflict rules (parity with `pice status`):
-//! - `--json` conflicts with `--follow` (single-JSON-object invariant)
-//! - `--stream-json` requires `--follow`
-//!
-//! The Task 13 CLI-side `--follow` implementation will open the
-//! dedicated `logs/stream` connection; the one-shot path continues
-//! to dispatch through `cli/dispatch::Logs`.
+//! **Short-circuit on terminal-in-history (Codex Cycle 2 fix):** when the
+//! `logs/stream` snapshot already contains a `LogChunk { terminal: true }`
+//! frame (late subscribe to a completed feature), the CLI renders the
+//! replay and exits IMMEDIATELY instead of hanging waiting for a live
+//! terminal frame that will never fire.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Args;
-use pice_core::cli::{CommandRequest, LogsRequest};
+use pice_core::cli::{CommandRequest, ExitJsonStatus, LogsRequest};
+use pice_core::events::LogChunk;
+use pice_core::protocol::methods::{LOGS_CHUNK, LOGS_STREAM};
+use pice_core::protocol::subscribe::{LogsStreamRequest, LogsStreamResponse};
+use serde_json::json;
+
+use crate::adapter::autostart::ensure_daemon_running;
 
 #[derive(Args, Debug, Clone)]
 pub struct LogsArgs {
@@ -67,7 +77,230 @@ impl From<LogsArgs> for LogsRequest {
 }
 
 pub async fn run(args: &LogsArgs) -> Result<()> {
+    if args.follow {
+        return run_follow(args).await;
+    }
+    // Non-follow: dispatch through `cli/dispatch`, render the response.
     let req = CommandRequest::Logs(args.clone().into());
     let resp = crate::adapter::dispatch(req).await?;
     super::render_response(resp)
+}
+
+/// `pice logs <feature_id> --follow` — open `logs/stream` and tail.
+///
+/// The response body is a full [`LogsStreamResponse`] carrying the
+/// history up to subscribe time; subsequent `logs/chunk` notifications
+/// arrive on the same connection until a `LogChunk { terminal: true }`
+/// is observed or the stream closes.
+async fn run_follow(args: &LogsArgs) -> Result<()> {
+    let feature_id = args.feature_id.clone();
+    let layer = args.layer.clone();
+    let stream_json = args.stream_json;
+
+    let client = ensure_daemon_running()
+        .await
+        .context("failed to open subscribe connection for pice logs --follow")?;
+    let params = LogsStreamRequest {
+        feature_id: feature_id.clone(),
+        layer: layer.clone(),
+        follow: true,
+        include_history: args.include_history,
+    };
+    let mut stream = client
+        .subscribe_stream::<_, LogsStreamResponse>(LOGS_STREAM, params)
+        .await
+        .context("failed to open logs/stream subscribe connection")?;
+
+    // Render buffered history.
+    for chunk in &stream.snapshot.history {
+        render_chunk(chunk, stream_json)?;
+    }
+
+    // Short-circuit: history already carries a terminal frame → exit
+    // immediately (Codex Cycle 2 fix).
+    if stream.snapshot.history.iter().any(|c| c.terminal) {
+        stream.close().await;
+        return maybe_emit_logs_stream_ended(args.json);
+    }
+
+    loop {
+        match stream.rx.recv().await {
+            Some(notif) => {
+                if notif.method != LOGS_CHUNK {
+                    continue;
+                }
+                let Ok(chunk) = serde_json::from_value::<LogChunk>(notif.params) else {
+                    continue;
+                };
+                // Apply client-side layer filter as defense-in-depth —
+                // the daemon already filters, but a future wildcard
+                // topic could slip through.
+                if let Some(ref want) = layer {
+                    if chunk.layer != *want && !chunk.terminal {
+                        continue;
+                    }
+                }
+                render_chunk(&chunk, stream_json)?;
+                if chunk.terminal {
+                    stream.close().await;
+                    return maybe_emit_logs_stream_ended(args.json);
+                }
+            }
+            None => {
+                // Daemon closed the subscribe connection before a terminal
+                // frame. Phase 7 semantics → exit 5.
+                emit_daemon_disconnected(&feature_id, stream_json)?;
+                std::process::exit(ExitJsonStatus::DaemonDisconnected.exit_code());
+            }
+        }
+    }
+}
+
+fn render_chunk(chunk: &LogChunk, stream_json: bool) -> Result<()> {
+    if stream_json {
+        // NDJSON: one line per chunk, plus a terminal frame at
+        // end-of-stream. Task 15 formalizes the `StreamJsonFrame`
+        // envelope parity across status+logs; the per-chunk frame here
+        // reuses the typed `LogChunk` wire shape directly under a
+        // `kind=log-chunk` discriminant so log-specific consumers don't
+        // have to re-derive a manifest-event envelope. A future Task 15
+        // pass may wrap this in a `StreamJsonFrame::Event` to unify the
+        // two streaming commands.
+        let value = json!({ "kind": "log-chunk", "chunk": chunk });
+        println!("{}", serde_json::to_string(&value)?);
+    } else if chunk.terminal {
+        // Stderr: a terminal marker is a control event for human
+        // readers, not buffered output — written to stderr so callers
+        // who pipe stdout into a log file do not get the sentinel mixed
+        // in.
+        eprintln!(
+            "[{}] (terminal) reason={}",
+            chunk.timestamp,
+            chunk.reason.as_deref().unwrap_or("-")
+        );
+    } else {
+        // Stdout: one chunk per `text`, as-is. Trailing newline
+        // preserved (matches `cat`-like `tail -f` output).
+        let text = chunk.text.trim_end_matches('\n');
+        println!("[{}] [{}] {}", chunk.timestamp, chunk.layer, text);
+    }
+    Ok(())
+}
+
+fn maybe_emit_logs_stream_ended(json: bool) -> Result<()> {
+    if json {
+        // Structured success discriminant for `--json` consumers tailing
+        // a completed feature. Exit 0 — stream-close was clean.
+        let value = json!({
+            "status": ExitJsonStatus::LogsStreamEnded.as_str(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        );
+    }
+    Ok(())
+}
+
+fn emit_daemon_disconnected(feature_id: &str, stream_json: bool) -> Result<()> {
+    if stream_json {
+        let value = json!({
+            "kind": "terminal",
+            "exit_code": ExitJsonStatus::DaemonDisconnected.exit_code(),
+        });
+        println!("{}", serde_json::to_string(&value)?);
+    } else {
+        eprintln!(
+            "subscribe connection closed before feature {feature_id} reached \
+             terminal frame"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_follow_args_route_through_cli_dispatch() {
+        // The handler chooses its RPC based on `follow`. This test pins
+        // the dispatch-method choice without invoking the async runtime —
+        // if a future refactor accidentally routes non-follow through
+        // `logs/stream`, the assertion fails at compile time (a
+        // `LogsStreamRequest` does not fit `CommandRequest::Logs`).
+        let args = LogsArgs {
+            feature_id: "f".to_string(),
+            layer: None,
+            follow: false,
+            json: false,
+            stream_json: false,
+            include_history: true,
+        };
+        let req: CommandRequest = CommandRequest::Logs(args.into());
+        // CommandRequest tag is kebab-case "logs".
+        let wire = serde_json::to_string(&req).unwrap();
+        assert!(wire.contains(r#""command":"logs""#), "got {wire}");
+    }
+
+    #[test]
+    fn follow_args_build_logs_stream_request() {
+        // The follow path bundles a LogsStreamRequest (with follow=true).
+        // Pin the wire shape so a rename in pice-core catches at this test.
+        let params = LogsStreamRequest {
+            feature_id: "f".to_string(),
+            layer: Some("backend".to_string()),
+            follow: true,
+            include_history: false,
+        };
+        let wire = serde_json::to_string(&params).unwrap();
+        assert!(wire.contains(r#""feature_id":"f""#));
+        assert!(wire.contains(r#""follow":true"#));
+        assert!(wire.contains(r#""include_history":false"#));
+    }
+
+    #[test]
+    fn render_chunk_human_mode_prints_layer_and_timestamp() {
+        // Smoke-test the human render: no panic on a well-formed chunk.
+        // The println goes to stdout in the real CLI; this test only
+        // asserts the function returns Ok.
+        let chunk = LogChunk {
+            feature_id: "f".to_string(),
+            run_id: "r-1".to_string(),
+            layer: "backend".to_string(),
+            text: "compiling foo\n".to_string(),
+            timestamp: "2026-04-21T10:00:00Z".to_string(),
+            terminal: false,
+            reason: None,
+        };
+        assert!(render_chunk(&chunk, false).is_ok());
+    }
+
+    #[test]
+    fn render_chunk_stream_json_mode_emits_envelope() {
+        let chunk = LogChunk {
+            feature_id: "f".to_string(),
+            run_id: "r-1".to_string(),
+            layer: "backend".to_string(),
+            text: "x\n".to_string(),
+            timestamp: "2026-04-21T10:00:00Z".to_string(),
+            terminal: false,
+            reason: None,
+        };
+        assert!(render_chunk(&chunk, true).is_ok());
+    }
+
+    #[test]
+    fn render_chunk_terminal_in_stream_json_mode() {
+        let chunk = LogChunk {
+            feature_id: "f".to_string(),
+            run_id: "r-1".to_string(),
+            layer: "".to_string(),
+            text: "".to_string(),
+            timestamp: "2026-04-21T10:04:00Z".to_string(),
+            terminal: true,
+            reason: Some("passed".to_string()),
+        };
+        assert!(render_chunk(&chunk, true).is_ok());
+    }
 }
