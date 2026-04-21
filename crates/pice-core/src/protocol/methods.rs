@@ -130,12 +130,7 @@ mod tests {
     /// into the `cli/dispatch` funnel by accident, the test catches it.
     #[test]
     fn phase_7_subscribe_methods_are_router_level() {
-        for name in &[
-            MANIFEST_SUBSCRIBE,
-            LOGS_STREAM,
-            MANIFEST_EVENT,
-            LOGS_CHUNK,
-        ] {
+        for name in &[MANIFEST_SUBSCRIBE, LOGS_STREAM, MANIFEST_EVENT, LOGS_CHUNK] {
             assert!(
                 !name.starts_with("cli/"),
                 "Phase 7 method {name} must NOT use the cli/ namespace — \
