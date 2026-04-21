@@ -39,6 +39,7 @@ pub mod handlers;
 pub mod inline;
 pub mod lifecycle;
 pub mod logging;
+pub mod logs;
 pub mod metrics;
 pub mod orchestrator;
 pub mod prompt;
