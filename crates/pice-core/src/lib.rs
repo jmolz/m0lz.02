@@ -21,6 +21,8 @@
 //! |--------|---------|
 //! | [`adaptive`] | SPRT/ADTS/VEC algorithms + halt dispatcher (PRDv2 Feature 7) |
 //! | [`config`] | TOML configuration parsing (`.pice/config.toml`) |
+//! | [`events`] | Phase 7 `ManifestEvent` / `LogChunk` wire types |
+//! | [`jobs`] | Phase 7 `JobEnv` dispatch-time env snapshot |
 //! | [`plan_parser`] | Markdown plan parsing, `## Contract` detection |
 //! | [`provider`] | Provider registry lookup (path walking) |
 //! | [`prompt`] | Pure prompt helpers (read_claude_md, get_git_diff) |
@@ -33,7 +35,9 @@
 pub mod adaptive;
 pub mod cli;
 pub mod config;
+pub mod events;
 pub mod gate;
+pub mod jobs;
 pub mod layers;
 pub mod paths;
 pub mod plan_parser;
