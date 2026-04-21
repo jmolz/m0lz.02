@@ -26,6 +26,22 @@ pub struct EvaluateArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Phase 7: dispatch the evaluate orchestrator as a detached tokio
+    /// task in the daemon. Returns `{feature_id, run_id, status:
+    /// background-dispatched}` within the 500ms p95 SLO.
+    #[arg(long)]
+    pub background: bool,
+
+    /// Phase 7: with `--background`, block until terminal status via a
+    /// second subscribe connection. Requires `--background`.
+    #[arg(long, requires = "background")]
+    pub wait: bool,
+
+    /// Phase 7: max seconds to wait before returning exit 4
+    /// (`WaitTimeout`). Requires `--wait`.
+    #[arg(long, value_name = "N", requires = "wait")]
+    pub timeout_secs: Option<u64>,
 }
 
 impl From<EvaluateArgs> for EvaluateRequest {
@@ -33,7 +49,9 @@ impl From<EvaluateArgs> for EvaluateRequest {
         EvaluateRequest {
             plan_path: args.plan_path,
             json: args.json,
-            ..Default::default()
+            background: args.background,
+            wait: args.wait,
+            timeout_secs: args.timeout_secs,
         }
     }
 }

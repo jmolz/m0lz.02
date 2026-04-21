@@ -52,6 +52,9 @@ enum Commands {
     /// Display active plans and workflow state
     Status(commands::status::StatusArgs),
 
+    /// Inspect or tail captured provider session logs for a feature (Phase 7)
+    Logs(commands::logs::LogsArgs),
+
     /// Aggregate and display quality metrics
     Metrics(commands::metrics::MetricsArgs),
 
@@ -104,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Commit(args) => commands::commit::run(args).await,
         Commands::Handoff(args) => commands::handoff::run(args).await,
         Commands::Status(args) => commands::status::run(args).await,
+        Commands::Logs(args) => commands::logs::run(args).await,
         Commands::Metrics(args) => commands::metrics::run(args).await,
         Commands::Benchmark(args) => commands::benchmark::run(args).await,
         Commands::Layers(args) => commands::layers::run(args).await,
