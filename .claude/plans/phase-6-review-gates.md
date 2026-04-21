@@ -859,3 +859,9 @@ All 11 Cycle-1 Criticals were addressed in the Cycle-2 rewrite. See git history 
 - Windows PTY test coverage — out (CI runs PTY tests on Linux + macOS only)
 
 **Worktree interplay.** Phase 5 shipped cohort parallelism without worktree isolation. Phase 6 is unaffected by worktree presence/absence (reads/writes manifest only). When Feature 8 (worktree isolation) lands, gates operate identically.
+
+---
+
+## Phase 7 follow-up — `DecisionSource` trait revival NOT executed
+
+Phase 6 Task 19 (`DecisionSource` trait revival) is **NOT executed in Phase 7** — the trait remained cut. Only `SubscribedGateSource` (a concrete struct in `crates/pice-cli/src/input/gate_source.rs`) shipped in Phase 7 to handle review-gate prompts during `pice status --follow`. Per `.claude/rules/rust-core.md` → "Don't ship trait-based scaffolding ahead of a real consumer", the trait stays cut until a second consumer materializes (e.g. a dashboard gate UI in v0.3 or a fully-mocked PTY harness). Phase 7 sidesteps the original Phase 6 blocker (StdinLock: !Send vs async handler path) by wrapping stdin reads in `tokio::task::spawn_blocking` inside `SubscribedGateSource::read_decision_blocking` — a single call site, not enough shape variety to justify the abstraction.
