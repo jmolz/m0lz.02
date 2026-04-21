@@ -90,9 +90,7 @@ fn ensure_parent_dir(socket_path: &SocketPath) -> Result<()> {
 
 #[cfg(unix)]
 async fn run_unix(path: &std::path::Path, ctx: Arc<DaemonContext>) -> Result<()> {
-    use crate::server::router;
     use crate::server::unix::UnixSocketListener;
-    use pice_core::protocol::DaemonRequest;
 
     let listener = UnixSocketListener::bind(path).await?;
     info!(path = %path.display(), "daemon listening");
@@ -101,29 +99,10 @@ async fn run_unix(path: &std::path::Path, ctx: Arc<DaemonContext>) -> Result<()>
         tokio::select! {
             result = listener.accept() => {
                 match result {
-                    Ok(mut conn) => {
+                    Ok(conn) => {
                         let ctx = Arc::clone(&ctx);
                         tokio::spawn(async move {
-                            loop {
-                                let req: Option<DaemonRequest> = match conn.read_message().await {
-                                    Ok(Some(r)) => Some(r),
-                                    Ok(None) => break, // EOF — client disconnected.
-                                    Err(e) => {
-                                        tracing::debug!("read error: {e}");
-                                        break;
-                                    }
-                                };
-                                let req = match req {
-                                    Some(r) => r,
-                                    None => break,
-                                };
-
-                                let resp = router::route(req, &ctx).await;
-                                if let Err(e) = conn.write_message(&resp).await {
-                                    tracing::debug!("write error: {e}");
-                                    break;
-                                }
-                            }
+                            handle_connection_unix(conn, ctx).await;
                         });
                     }
                     Err(e) => {
@@ -158,13 +137,52 @@ async fn run_unix(path: &std::path::Path, ctx: Arc<DaemonContext>) -> Result<()>
     // UnixSocketListener::drop removes the socket file.
 }
 
+#[cfg(unix)]
+async fn handle_connection_unix(
+    mut conn: crate::server::unix::UnixConnection,
+    ctx: Arc<DaemonContext>,
+) {
+    use pice_core::protocol::DaemonRequest;
+
+    loop {
+        let req: DaemonRequest = match conn.read_message().await {
+            Ok(Some(r)) => r,
+            Ok(None) => break, // EOF — client disconnected.
+            Err(e) => {
+                tracing::debug!("read error: {e}");
+                break;
+            }
+        };
+
+        // Phase 7 Task 6: subscribe methods take over the connection.
+        // After the handler returns, the subscription is over — we MUST
+        // NOT read more frames on this connection (the handler's
+        // `tokio::select!` already drained to EOF) so we break out of
+        // the loop and let the task exit.
+        if crate::handlers::subscribe::is_subscribe_method(&req.method) {
+            if let Err(auth_err) = ctx.validate_auth(&req) {
+                let _ = conn.write_message(&auth_err).await;
+                break;
+            }
+            if let Err(e) = crate::handlers::subscribe::dispatch(&ctx, &mut conn, req).await {
+                tracing::debug!("subscribe handler error: {e}");
+            }
+            break;
+        }
+
+        let resp = crate::server::router::route(req, &ctx).await;
+        if let Err(e) = conn.write_message(&resp).await {
+            tracing::debug!("write error: {e}");
+            break;
+        }
+    }
+}
+
 // ─── Windows accept loop ───────────────────────────────────────────────────
 
 #[cfg(windows)]
 async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
-    use crate::server::router;
     use crate::server::windows::WindowsPipeListener;
-    use pice_core::protocol::DaemonRequest;
 
     let listener = WindowsPipeListener::bind(name).await?;
     info!(pipe = %name, "daemon listening");
@@ -173,29 +191,10 @@ async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
         tokio::select! {
             result = listener.accept() => {
                 match result {
-                    Ok(mut conn) => {
+                    Ok(conn) => {
                         let ctx = Arc::clone(&ctx);
                         tokio::spawn(async move {
-                            loop {
-                                let req: Option<DaemonRequest> = match conn.read_message().await {
-                                    Ok(Some(r)) => Some(r),
-                                    Ok(None) => break,
-                                    Err(e) => {
-                                        tracing::debug!("read error: {e}");
-                                        break;
-                                    }
-                                };
-                                let req = match req {
-                                    Some(r) => r,
-                                    None => break,
-                                };
-
-                                let resp = router::route(req, &ctx).await;
-                                if let Err(e) = conn.write_message(&resp).await {
-                                    tracing::debug!("write error: {e}");
-                                    break;
-                                }
-                            }
+                            handle_connection_windows(conn, ctx).await;
                         });
                     }
                     Err(e) => {
@@ -221,6 +220,42 @@ async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
     info!("daemon shutdown complete");
     Ok(())
+}
+
+#[cfg(windows)]
+async fn handle_connection_windows(
+    mut conn: crate::server::windows::WindowsPipeConnection,
+    ctx: Arc<DaemonContext>,
+) {
+    use pice_core::protocol::DaemonRequest;
+
+    loop {
+        let req: DaemonRequest = match conn.read_message().await {
+            Ok(Some(r)) => r,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!("read error: {e}");
+                break;
+            }
+        };
+
+        if crate::handlers::subscribe::is_subscribe_method(&req.method) {
+            if let Err(auth_err) = ctx.validate_auth(&req) {
+                let _ = conn.write_message(&auth_err).await;
+                break;
+            }
+            if let Err(e) = crate::handlers::subscribe::dispatch(&ctx, &mut conn, req).await {
+                tracing::debug!("subscribe handler error: {e}");
+            }
+            break;
+        }
+
+        let resp = crate::server::router::route(req, &ctx).await;
+        if let Err(e) = conn.write_message(&resp).await {
+            tracing::debug!("write error: {e}");
+            break;
+        }
+    }
 }
 
 // ─── Shutdown signal ───────────────────────────────────────────────────────

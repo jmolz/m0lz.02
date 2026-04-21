@@ -13,6 +13,7 @@
 //! [`DaemonRequest`] values, not raw bytes.
 
 pub mod auth;
+pub mod connection;
 pub mod framing;
 pub mod router;
 

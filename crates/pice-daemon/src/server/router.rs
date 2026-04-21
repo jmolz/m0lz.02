@@ -34,7 +34,9 @@ use serde_json::json;
 use tokio::sync::Mutex as TokioMutex;
 
 use super::auth;
+use crate::events::EventBus;
 use crate::handlers;
+use crate::logs::LogStore;
 use crate::orchestrator::NullSink;
 
 /// Phase 4.1 Pass-6 Codex High #2: per-manifest single-writer lock map.
@@ -106,6 +108,19 @@ pub struct DaemonContext {
     /// serialize on the inner mutex, preventing the atomic-rename race at
     /// `VerificationManifest::save()` + `~/.pice/state/.../manifest.json`.
     manifest_locks: ManifestLockMap,
+
+    /// Phase 7 Task 4: manifest-event pub/sub bus. The orchestrator
+    /// publishes `ManifestEvent`s via the typed `emit_*` helpers; the
+    /// `manifest/subscribe` router handler (Task 6) acquires receivers
+    /// and forwards payloads as `manifest/event` notifications. Clone-
+    /// cheap (`Arc`-backed) so handler borrows are free.
+    events: EventBus,
+
+    /// Phase 7 Task 5: captured-provider-session log store. Orchestrator
+    /// writes chunks via `append_chunk` (Task 9 wires this); the
+    /// `logs/stream` router handler (Task 6) reads via `snapshot` +
+    /// `subscribe`.
+    logs: LogStore,
 }
 
 impl DaemonContext {
@@ -123,6 +138,8 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            events: EventBus::new(),
+            logs: LogStore::new(),
         }
     }
 
@@ -143,6 +160,8 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            events: EventBus::new(),
+            logs: LogStore::new(),
         }
     }
 
@@ -164,6 +183,39 @@ impl DaemonContext {
         self.shutdown_requested.load(Ordering::Relaxed)
     }
 
+    /// Phase 7: the process-wide manifest-event pub/sub bus.
+    /// Producers go through the typed `emit_*` helpers on
+    /// [`EventBus`]; subscribers (the `manifest/subscribe` router
+    /// handler) acquire receivers via `subscribe_feature` /
+    /// `subscribe_wildcard`.
+    pub fn events(&self) -> &EventBus {
+        &self.events
+    }
+
+    /// Phase 7: the captured-provider-session log store. Orchestrator
+    /// chunks flow in via `append_chunk` (Task 9 wires the forwarding);
+    /// the `logs/stream` router handler reads via `snapshot` /
+    /// `subscribe`.
+    pub fn logs(&self) -> &LogStore {
+        &self.logs
+    }
+
+    /// Validate a request's `auth` token against the active daemon
+    /// token. Returns `Ok(())` on match; on mismatch returns an
+    /// already-formatted `DaemonResponse` error (code `-32002`) that
+    /// the caller writes back to the connection.
+    ///
+    /// Used by the Phase 7 subscribe handlers, which branch on the
+    /// method name BEFORE entering the normal [`route`] path and
+    /// therefore must authenticate independently.
+    #[allow(clippy::result_large_err)] // DaemonResponse is returned unboxed so the caller can send it directly.
+    pub fn validate_auth(
+        &self,
+        req: &pice_core::protocol::DaemonRequest,
+    ) -> Result<(), pice_core::protocol::DaemonResponse> {
+        auth::validate_request(req, &self.active_token)
+    }
+
     /// Test-only constructor with a custom version string.
     ///
     /// Uses a fixed version instead of `env!("CARGO_PKG_VERSION")` so tests
@@ -178,6 +230,8 @@ impl DaemonContext {
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config: PiceConfig::default(),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            events: EventBus::new(),
+            logs: LogStore::new(),
         }
     }
 
@@ -196,6 +250,8 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            events: EventBus::new(),
+            logs: LogStore::new(),
         }
     }
 

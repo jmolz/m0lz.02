@@ -38,6 +38,7 @@ pub mod prime;
 pub mod review;
 pub mod review_gate;
 pub mod status;
+pub mod subscribe;
 pub mod validate;
 
 use std::sync::Arc;
