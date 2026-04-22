@@ -66,6 +66,39 @@ impl NotificationKind {
     }
 }
 
+/// Pluggable fallback writer. Production uses [`StderrFallbackWriter`] which
+/// calls `eprintln!`; tests inject [`CapturingFallbackWriter`] to assert the
+/// exact bytes written without needing to redirect the process's stderr fd.
+pub trait FallbackWriter: Send + Sync {
+    fn write_line(&self, line: &str);
+}
+
+/// Production fallback writer — writes to process stderr via `eprintln!`.
+pub struct StderrFallbackWriter;
+
+impl FallbackWriter for StderrFallbackWriter {
+    fn write_line(&self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
+/// Test fallback writer — appends to an `Arc<Mutex<String>>` so the test
+/// can assert on the captured content without redirecting stderr.
+#[cfg(test)]
+#[derive(Default, Clone)]
+pub struct CapturingFallbackWriter {
+    pub captured: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+#[cfg(test)]
+impl FallbackWriter for CapturingFallbackWriter {
+    fn write_line(&self, line: &str) {
+        let mut g = self.captured.lock().unwrap_or_else(|e| e.into_inner());
+        g.push_str(line);
+        g.push('\n');
+    }
+}
+
 /// Dispatch a desktop notification with debounce + config gating.
 ///
 /// Debounce key: `(feature_id, kind)`. A repeat within `DEBOUNCE_WINDOW`
@@ -84,6 +117,23 @@ pub fn notify(
     body: &str,
     dispatcher: &dyn Dispatcher,
 ) {
+    notify_with_fallback(state, cfg, kind, feature_id, title, body, dispatcher, &StderrFallbackWriter);
+}
+
+/// Internal variant of [`notify`] with a pluggable fallback writer. Called
+/// by the public `notify` with the production [`StderrFallbackWriter`]; tests
+/// call this directly with a [`CapturingFallbackWriter`] to assert content.
+#[allow(clippy::too_many_arguments)]
+pub fn notify_with_fallback(
+    state: &NotificationState,
+    cfg: &NotificationsConfig,
+    kind: NotificationKind,
+    feature_id: &str,
+    title: &str,
+    body: &str,
+    dispatcher: &dyn Dispatcher,
+    fallback: &dyn FallbackWriter,
+) {
     if !kind.enabled_in(cfg) {
         return;
     }
@@ -98,7 +148,7 @@ pub fn notify(
             kind = kind.as_str(),
             "notification show failed; falling back to terminal BEL"
         );
-        eprintln!("\x07[pice] {title} — {body}");
+        fallback.write_line(&format!("\x07[pice] {title} — {body}"));
     }
 }
 
@@ -320,16 +370,87 @@ mod tests {
 
     #[test]
     fn notify_failure_logs_and_uses_terminal_fallback() {
-        // Exercises the failure branch — a real-platform failure would
-        // route through `tracing::debug!` + BEL-prefixed eprintln. We
-        // can't easily capture stderr in a unit test, but we CAN assert
-        // the dispatcher was invoked and the function returned (no
-        // panic + no re-surfaced error — notifications are fire-and-
-        // forget).
+        // Exercises the failure branch end-to-end with two hard assertions:
+        //
+        // 1. `tracing::debug!` was emitted — verified via a test-local
+        //    `tracing_subscriber` layer that records events to an
+        //    `Arc<Mutex<Vec<String>>>`.
+        //
+        // 2. The fallback writer received the BEL + title + body line —
+        //    verified via `CapturingFallbackWriter` (dependency-injected,
+        //    avoids OS-level stderr redirection which is shared state across
+        //    concurrent test threads).
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+
+        // ── Tracing capture ──────────────────────────────────────────────
+        // Each entry in `debug_events` is the formatted message string of a
+        // `tracing::debug!` event captured during this test's scope. We use
+        // a `Mutex<Vec<String>>` because `tracing_subscriber::Layer::on_event`
+        // is called synchronously (no async), and we only need a single-
+        // threaded assertion after the `notify_with_fallback` call.
+        let debug_events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&debug_events);
+
+        // Build a thin recording layer. We record only DEBUG-level events
+        // that contain "falling back" — the specific message from the
+        // failure branch in `notify_with_fallback`.
+        struct DebugRecorder {
+            events: Arc<Mutex<Vec<String>>>,
+        }
+        impl<S: tracing::Subscriber> Layer<S> for DebugRecorder {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _ctx: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() != tracing::Level::DEBUG {
+                    return;
+                }
+                // Collect the debug message into a string via a visitor.
+                struct MsgVisitor(String);
+                impl tracing::field::Visit for MsgVisitor {
+                    fn record_debug(
+                        &mut self,
+                        _field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.0.push_str(&format!("{value:?}"));
+                    }
+                    fn record_str(
+                        &mut self,
+                        _field: &tracing::field::Field,
+                        value: &str,
+                    ) {
+                        self.0.push_str(value);
+                    }
+                }
+                let mut visitor = MsgVisitor(String::new());
+                event.record(&mut visitor);
+                self.events
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(visitor.0);
+            }
+        }
+
+        let recorder = DebugRecorder { events: events_clone };
+
+        // Install a test-scoped subscriber. `try_init()` may fail when
+        // another test already set a global default — guard with `let _ =`.
+        // We then use `with_default` to scope the subscriber to this
+        // thread so parallel tests don't interfere.
+        let subscriber = tracing_subscriber::registry().with(recorder);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // ── Fallback writer ──────────────────────────────────────────────
+        let writer = CapturingFallbackWriter::default();
+
         let state = NotificationState::new();
         let cfg = cfg_all_on();
         let failing = FailingDispatcher;
-        notify(
+
+        notify_with_fallback(
             &state,
             &cfg,
             NotificationKind::Failure,
@@ -337,8 +458,39 @@ mod tests {
             "failed",
             "see logs",
             &failing,
+            &writer,
         );
-        // No panic + no assertion — reaching here is the test.
+
+        // ── Assert 1: tracing::debug! was emitted ───────────────────────
+        let events = debug_events.lock().unwrap_or_else(|e| e.into_inner());
+        let found_debug = events
+            .iter()
+            .any(|e| e.contains("falling back") || e.contains("terminal BEL"));
+        assert!(
+            found_debug,
+            "expected a tracing::debug! event containing 'falling back' or 'terminal BEL', \
+             got events: {events:?}"
+        );
+        drop(events);
+
+        // ── Assert 2: fallback writer received BEL + title + body ───────
+        let captured = writer
+            .captured
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            captured.contains('\x07'),
+            "fallback line must start with BEL (\\x07), got: {captured:?}"
+        );
+        assert!(
+            captured.contains("failed"),
+            "fallback line must contain the notification title ('failed'), got: {captured:?}"
+        );
+        assert!(
+            captured.contains("see logs"),
+            "fallback line must contain the notification body ('see logs'), got: {captured:?}"
+        );
     }
 
     #[test]
