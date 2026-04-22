@@ -632,19 +632,27 @@ mod tests {
         }
     }
 
-    /// Process-global mutex serializing tests that set `HOME`. The variable
-    /// is process-wide, so unsynchronized tests would race on it (and on
-    /// `~/.pice/state/` resolution).
-    fn home_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
+    // Phase 7 remediation: `home_lock()` removed. Tests migrated to
+    // `crate::test_support::StateDirGuard`, which serializes on the
+    // workspace-wide `state_dir_lock()` + drives `PICE_STATE_DIR`
+    // directly (the same env var `VerificationManifest::state_dir()`
+    // reads first). The old `HOME`-based pattern only serialized among
+    // tests in this module and raced against other modules that set
+    // `PICE_STATE_DIR` concurrently — the documented flake.
 
     #[test]
     fn load_layer_snapshot_returns_none_when_manifest_missing() {
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
         let plan_path = project_root.join(".claude/plans/feature-x.md");
         let got = load_manifest_snapshot(&plan_path, project_root);
@@ -653,9 +661,17 @@ mod tests {
 
     #[test]
     fn load_layer_snapshot_surfaces_adaptive_fields_in_json() {
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
         setup_manifest_at("feature-x", project_root, adaptive_layer_fixture());
 
@@ -703,9 +719,17 @@ mod tests {
         use pice_core::layers::manifest::{GateEntry, GateStatus};
         use pice_core::workflow::schema::OnTimeout;
 
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
 
         // Build manifest with a PendingReview layer + its gate.
@@ -810,9 +834,17 @@ mod tests {
     // (per `.claude/rules/rust-core.md` "Holding MutexGuard across .await").
     #[allow(clippy::await_holding_lock)]
     async fn detail_mode_returns_manifest_when_feature_exists() {
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
 
         setup_manifest_at("feature-detail", project_root, adaptive_layer_fixture());
@@ -845,9 +877,17 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn detail_mode_json_surfaces_feature_not_found() {
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
 
         let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
@@ -876,9 +916,17 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn follow_and_wait_modes_rejected_at_dispatch() {
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
         let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
 
@@ -911,9 +959,17 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn list_mode_json_includes_manifest_summaries() {
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
         setup_manifest_at("feature-a", project_root, adaptive_layer_fixture());
 

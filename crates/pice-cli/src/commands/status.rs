@@ -137,6 +137,16 @@ pub async fn run(args: &StatusArgs) -> Result<()> {
 /// never runs — closes the Codex Cycle 2 hazard (FeatureComplete fired
 /// before subscribe → infinite wait).
 async fn run_follow(req: StatusRequest) -> Result<()> {
+    // Phase 7 Criterion 20: `PICE_DAEMON_INLINE=1` bypasses the daemon,
+    // so there is no subscribe stream to open. Graceful fallback: emit
+    // a stderr notice, dispatch a single-shot Detail (if feature_id is
+    // set) or List otherwise, render, exit 0. The notice lets an
+    // operator who pasted `pice status --follow` into an inline-mode
+    // shell session understand why streaming was downgraded.
+    if crate::adapter::is_inline_mode() {
+        return inline_follow_fallback(req).await;
+    }
+
     let feature_id_filter = req.feature_id.clone();
     let stream_json = req.stream_json;
     // Task 14: Notifications state + config. Defaults to all-on; a real
@@ -294,6 +304,14 @@ async fn run_wait(req: StatusRequest) -> Result<()> {
     };
     let timeout_secs = req.timeout_secs;
     let json = req.json;
+
+    // Phase 7 Criterion 20: inline mode has no persistent daemon +
+    // `FeatureJobManager`, so `--wait` has no live feature to wait on.
+    // Reject with `InlineModeBackgroundUnsupported` — same variant as
+    // `pice evaluate --background --wait` under inline.
+    if crate::adapter::is_inline_mode() {
+        return inline_wait_reject(&feature_id, json);
+    }
 
     let client = ensure_daemon_running()
         .await
@@ -628,6 +646,65 @@ fn terminal_from_event(payload: &ManifestEventPayload) -> Option<(String, i32)> 
         )),
         _ => None,
     }
+}
+
+// ─── Phase 7 Criterion 20: inline-mode follow/wait behavior ─────────────────
+
+/// `pice status --follow` under `PICE_DAEMON_INLINE=1` — graceful
+/// single-shot fallback.
+///
+/// Emits a stderr notice, dispatches a single Detail or List through
+/// `adapter::dispatch` (which re-enters inline mode and runs the
+/// handler in-process), renders the response, exits 0. Satisfies
+/// Contract criterion 20's "`--follow` falls back for inline mode:
+/// exits 0 after a single snapshot + stderr notice line".
+async fn inline_follow_fallback(req: StatusRequest) -> Result<()> {
+    eprintln!(
+        "pice: PICE_DAEMON_INLINE=1 — `--follow` streaming unavailable; \
+         emitting single snapshot instead"
+    );
+    // Downgrade to Detail if a feature_id was provided, else List.
+    let downgrade = StatusRequest {
+        mode: if req.feature_id.is_some() {
+            StatusMode::Detail
+        } else {
+            StatusMode::List
+        },
+        stream_json: false,
+        ..req
+    };
+    let resp = crate::adapter::dispatch(CommandRequest::Status(downgrade)).await?;
+    super::render_response(resp)
+}
+
+/// `pice status --wait` under `PICE_DAEMON_INLINE=1` — typed rejection.
+///
+/// Inline mode runs one command per process and has no persistent
+/// `FeatureJobManager`, so there is no running feature to wait on. Emit
+/// `ExitJsonStatus::InlineModeBackgroundUnsupported` (JSON or human text)
+/// and exit with its exit code. Same variant as `pice evaluate
+/// --background --wait` under inline mode.
+fn inline_wait_reject(feature_id: &str, json: bool) -> Result<()> {
+    if json {
+        let value = json!({
+            "status": ExitJsonStatus::InlineModeBackgroundUnsupported.as_str(),
+            "feature_id": feature_id,
+            "hint": "PICE_DAEMON_INLINE=1 has no persistent daemon; \
+                     unset it to use --wait",
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        );
+    } else {
+        eprintln!(
+            "pice: PICE_DAEMON_INLINE=1 — `--wait` requires a running daemon \
+             (no background tasks exist under inline mode). Unset the env var \
+             to use --wait, or use `pice status {feature_id}` for a one-shot \
+             lookup."
+        );
+    }
+    std::process::exit(ExitJsonStatus::InlineModeBackgroundUnsupported.exit_code());
 }
 
 #[cfg(test)]

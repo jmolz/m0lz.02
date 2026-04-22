@@ -370,7 +370,7 @@ pub async fn route(req: DaemonRequest, ctx: &DaemonContext) -> DaemonResponse {
 
     match req.method.as_str() {
         methods::DAEMON_HEALTH => handle_health(req.id, ctx),
-        methods::DAEMON_SHUTDOWN => handle_shutdown(req.id, ctx),
+        methods::DAEMON_SHUTDOWN => handle_shutdown(req.id, ctx).await,
         methods::CLI_DISPATCH => handle_dispatch(req, ctx).await,
         _ => DaemonResponse::error(req.id, METHOD_NOT_FOUND_CODE, "method not found"),
     }
@@ -394,13 +394,37 @@ fn handle_health(id: u64, ctx: &DaemonContext) -> DaemonResponse {
 
 /// `daemon/shutdown` — request orderly shutdown.
 ///
-/// Sets the shutdown flag and returns immediately. The actual shutdown
-/// sequence (drain in-flight RPCs, flush manifests, close providers, remove
-/// socket) is driven by the lifecycle event loop in T21 — this handler only
-/// signals intent.
-fn handle_shutdown(id: u64, ctx: &DaemonContext) -> DaemonResponse {
+/// Phase 7 Criterion 17 contract: the response is emitted AFTER
+/// [`FeatureJobManager::drain_on_shutdown`] returns, so any in-flight
+/// background-dispatch job has a chance to observe its cancel token and
+/// flush its final manifest save BEFORE the socket closes. Ordering:
+///
+/// 1. Set `shutdown_requested` (so the accept loop stops accepting new
+///    connections on its 100ms poll).
+/// 2. `await ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT)` — fires
+///    every feature's `CancellationToken` and waits up to 10s for the
+///    supervisor tasks to exit.
+/// 3. Emit the success response.
+///
+/// The `drained_remaining` field reports how many jobs were still live
+/// when the 10s budget elapsed; tests assert it is 0 under the
+/// happy-path and nonzero when a job refuses cancellation. The flag-
+/// based poll in `lifecycle::run_unix` also calls drain for the
+/// SIGTERM path (no caller waiting there), keeping the two entry
+/// points symmetric.
+async fn handle_shutdown(id: u64, ctx: &DaemonContext) -> DaemonResponse {
     ctx.shutdown_requested.store(true, Ordering::Relaxed);
-    DaemonResponse::success(id, json!({"shutting_down": true}))
+    let remaining = ctx
+        .jobs()
+        .drain_on_shutdown(crate::lifecycle::SHUTDOWN_TIMEOUT)
+        .await;
+    DaemonResponse::success(
+        id,
+        json!({
+            "shutting_down": true,
+            "drained_remaining": remaining,
+        }),
+    )
 }
 
 /// `cli/dispatch` — execute a `CommandRequest` in the daemon.
@@ -583,9 +607,99 @@ mod tests {
 
         let result = resp.result.expect("should have result");
         assert_eq!(result["shutting_down"], true);
+        // Phase 7 Criterion 17: drained_remaining is reported. With no
+        // background jobs, drain returns 0 immediately.
+        assert_eq!(
+            result["drained_remaining"], 0,
+            "idle context should drain with zero remaining jobs"
+        );
         assert!(
             ctx.is_shutdown_requested(),
             "shutdown flag should be set after handler"
+        );
+    }
+
+    /// Phase 7 Criterion 17: the shutdown handler MUST await
+    /// `drain_on_shutdown` BEFORE emitting its response. This test
+    /// spawns a supervised background job that holds across a short
+    /// sleep after its cancel token fires; asserts the shutdown
+    /// response lands AFTER the job exits (not before), and that the
+    /// final `drained_remaining == 0`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_awaits_drain_before_returning() {
+        use pice_core::jobs::JobEnv;
+        use pice_core::layers::manifest::VerificationManifest;
+        use pice_core::workflow::schema::{CostCapBehavior, Defaults, Phases, WorkflowConfig};
+        use std::path::PathBuf;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc as StdArc;
+
+        let ctx = test_ctx("valid-token");
+        let env = StdArc::new(JobEnv {
+            state_dir: PathBuf::from("/tmp/state"),
+            project_root: PathBuf::from("/tmp/project"),
+            workflow_snapshot: WorkflowConfig {
+                schema_version: "0.2".into(),
+                defaults: Defaults {
+                    tier: 2,
+                    min_confidence: 0.90,
+                    max_passes: 5,
+                    model: "sonnet".into(),
+                    budget_usd: 2.0,
+                    cost_cap_behavior: CostCapBehavior::Halt,
+                    max_parallelism: None,
+                    max_global_provider_concurrency: None,
+                },
+                phases: Phases::default(),
+                layer_overrides: Default::default(),
+                review: None,
+                seams: None,
+            },
+            contracts: Default::default(),
+            pice_state_dir_override: None,
+            pice_user_workflow_file: None,
+        });
+
+        let job_exited = StdArc::new(AtomicBool::new(false));
+        let job_exited_c = job_exited.clone();
+
+        ctx.jobs()
+            .spawn(
+                "feat-drain",
+                env,
+                move |_env, permit, cancel| async move {
+                    let _hold = permit;
+                    cancel.cancelled().await;
+                    // Simulate a manifest-save flush after the cancel.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    job_exited_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(VerificationManifest::new(
+                        "feat-drain",
+                        std::path::Path::new("/irrelevant"),
+                    ))
+                },
+            )
+            .expect("spawn should succeed");
+
+        assert_eq!(ctx.jobs().active_count(), 1);
+
+        // Issue daemon/shutdown. It must block until the job exits.
+        let req = test_req(99, methods::DAEMON_SHUTDOWN, "valid-token");
+        let before = std::time::Instant::now();
+        let resp = route(req, &ctx).await;
+        let elapsed = before.elapsed();
+
+        assert!(resp.error.is_none());
+        let result = resp.result.expect("result");
+        assert_eq!(result["drained_remaining"], 0);
+        assert!(
+            job_exited.load(std::sync::atomic::Ordering::SeqCst),
+            "job must have exited BEFORE the shutdown response returned",
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(80),
+            "shutdown response must wait for the job's cancel + flush (elapsed={:?})",
+            elapsed,
         );
     }
 

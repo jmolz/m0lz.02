@@ -22,9 +22,15 @@ use tracing::{error, info};
 use crate::server::auth;
 use crate::server::router::DaemonContext;
 
-/// Graceful shutdown budget — max time to wait for in-flight RPCs.
-#[allow(dead_code)] // Used in shutdown logging; actual timeout enforcement comes with JoinHandle tracking.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Graceful shutdown budget — max time to wait for in-flight background jobs
+/// (`FeatureJobManager::drain_on_shutdown`) to finish after `daemon/shutdown` or
+/// SIGTERM fires the cancellation tokens.
+///
+/// Referenced from both [`crate::server::router::handle_shutdown`] (caller-
+/// awaits path — response is emitted AFTER drain returns) and the accept-loop
+/// SIGTERM cleanup branch below (no caller to wait, drain is still required so
+/// any in-flight manifest saves land before the socket closes).
+pub(crate) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run the daemon event loop. Blocks until the daemon shuts down.
 ///
@@ -138,10 +144,19 @@ async fn run_unix(path: &std::path::Path, ctx: Arc<DaemonContext>) -> Result<()>
         }
     }
 
-    // Graceful shutdown: give in-flight tasks a moment to finish.
-    // Phase 0 handlers are stubs that return immediately, so a brief
-    // yield is sufficient. Full JoinHandle tracking comes later.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Phase 7 Criterion 17: drain background jobs BEFORE closing the
+    // socket. `daemon/shutdown` already drained for its caller, but
+    // SIGTERM / SIGINT never ran a handler, so this call is the ONLY
+    // drain on the signal path. Idempotent when the shutdown handler
+    // already drained — `drain_on_shutdown` returns 0 immediately if
+    // no jobs are live.
+    let remaining = ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT).await;
+    if remaining > 0 {
+        tracing::warn!(
+            remaining,
+            "daemon shutdown: {remaining} background jobs did not finish within the {SHUTDOWN_TIMEOUT:?} drain budget"
+        );
+    }
 
     info!("daemon shutdown complete");
     Ok(())
@@ -228,7 +243,16 @@ async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
         }
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Phase 7 Criterion 17: drain background jobs BEFORE exit. See
+    // the Unix branch above for rationale — Windows pipe path needs
+    // the same symmetric drain.
+    let remaining = ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT).await;
+    if remaining > 0 {
+        tracing::warn!(
+            remaining,
+            "daemon shutdown: {remaining} background jobs did not finish within the {SHUTDOWN_TIMEOUT:?} drain budget"
+        );
+    }
     info!("daemon shutdown complete");
     Ok(())
 }

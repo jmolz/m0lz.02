@@ -93,6 +93,22 @@ pub async fn run(args: &LogsArgs) -> Result<()> {
 /// arrive on the same connection until a `LogChunk { terminal: true }`
 /// is observed or the stream closes.
 async fn run_follow(args: &LogsArgs) -> Result<()> {
+    // Phase 7 Criterion 20: `PICE_DAEMON_INLINE=1` has no socket to
+    // subscribe on. Graceful fallback: emit stderr notice, dispatch a
+    // single-shot non-follow logs request, render, exit 0.
+    if crate::adapter::is_inline_mode() {
+        eprintln!(
+            "pice: PICE_DAEMON_INLINE=1 — `--follow` streaming unavailable; \
+             emitting buffered history snapshot instead"
+        );
+        let mut downgrade: LogsArgs = args.clone();
+        downgrade.follow = false;
+        downgrade.stream_json = false;
+        let req = CommandRequest::Logs(downgrade.into());
+        let resp = crate::adapter::dispatch(req).await?;
+        return super::render_response(resp);
+    }
+
     let feature_id = args.feature_id.clone();
     let layer = args.layer.clone();
     let stream_json = args.stream_json;
