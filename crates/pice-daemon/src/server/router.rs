@@ -664,21 +664,17 @@ mod tests {
         let job_exited_c = job_exited.clone();
 
         ctx.jobs()
-            .spawn(
-                "feat-drain",
-                env,
-                move |_env, permit, cancel| async move {
-                    let _hold = permit;
-                    cancel.cancelled().await;
-                    // Simulate a manifest-save flush after the cancel.
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    job_exited_c.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(VerificationManifest::new(
-                        "feat-drain",
-                        std::path::Path::new("/irrelevant"),
-                    ))
-                },
-            )
+            .spawn("feat-drain", env, move |_env, permit, cancel| async move {
+                let _hold = permit;
+                cancel.cancelled().await;
+                // Simulate a manifest-save flush after the cancel.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                job_exited_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(VerificationManifest::new(
+                    "feat-drain",
+                    std::path::Path::new("/irrelevant"),
+                ))
+            })
             .expect("spawn should succeed");
 
         assert_eq!(ctx.jobs().active_count(), 1);
