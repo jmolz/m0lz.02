@@ -114,10 +114,10 @@ After writing the plan, draft a **contract** — the structured success criteria
 
 Based on the plan's success criteria and implementation tasks, write a JSON contract block in the plan file's `## Contract` section:
 
-1. **Set the tier** based on scope (determines both Claude evaluator passes AND whether GPT-5.4 adversarial review runs):
+1. **Set the tier** based on scope (determines both Claude evaluator passes AND whether GPT-5.5 adversarial review runs):
    - **Tier 1** (Claude only, 1 pass): Bug fixes, simple endpoints, UI tweaks
-   - **Tier 2** (1 Claude pass + GPT-5.4 adversarial review): New features touching multiple domains, integrations, schema changes
-   - **Tier 3** (Claude agent team + GPT-5.4 xhigh adversarial review): New pipeline phases, agent types, architectural changes
+   - **Tier 2** (1 Claude pass + GPT-5.5 adversarial review): New features touching multiple domains, integrations, schema changes
+   - **Tier 3** (Claude agent team + GPT-5.5 xhigh adversarial review): New pipeline phases, agent types, architectural changes
 
 2. **Write criteria** — each must be:
    - Independently testable (no "works well" or "looks good")

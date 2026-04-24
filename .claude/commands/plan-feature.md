@@ -117,7 +117,7 @@ Plans suffer the same confirmation bias that `/evaluate` was built to break: whe
 
 ### The Critique Prompt
 
-The same prompt is used by all adversaries (Tier 1 self-critique, Tier 2+ Claude sub-agent, Tier 2+ Codex GPT-5.4). It must attack six dimensions:
+The same prompt is used by all adversaries (Tier 1 self-critique, Tier 2+ Claude sub-agent, Tier 2+ Codex GPT-5.5). It must attack six dimensions:
 
 ```
 You are reviewing an implementation plan BEFORE code is written. You did NOT write this plan and have no stake in its approval. Your job is to find weaknesses along six dimensions. Be specific. Cite plan sections by heading. Reject generic concerns.
@@ -163,7 +163,7 @@ Run two independent adversaries **in parallel** (not sequentially):
 - Tier 3 → `subagent_type: "architect"`
 - Pass the critique prompt with plan + CLAUDE.md + git log appended.
 
-**Stream B — Codex GPT-5.4 task** (runs in background via `Bash` with `run_in_background: true`):
+**Stream B — Codex GPT-5.5 task** (runs in background via `Bash` with `run_in_background: true`):
 
 ```bash
 node "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs" \
@@ -218,7 +218,7 @@ Append findings to the plan file under a new `## Adversarial Review` section (th
 ## Adversarial Review
 
 **Tier**: {N}
-**Reviewers**: {"self-critique" | "Claude sub-agent + Codex GPT-5.4"}
+**Reviewers**: {"self-critique" | "Claude sub-agent + Codex GPT-5.5"}
 **Refinement cycles**: {N}
 **Attack framework**: Karpathy four principles + PoetiQ cross-model verification
 
@@ -253,10 +253,10 @@ This keeps the contract honest: it grades against the plan as challenged, not th
 
 Based on the plan's success criteria and implementation tasks, write a JSON contract block in the plan file's `## Contract` section:
 
-1. **Set the tier** based on scope (determines both Claude evaluator passes AND whether GPT-5.4 adversarial review runs):
+1. **Set the tier** based on scope (determines both Claude evaluator passes AND whether GPT-5.5 adversarial review runs):
    - **Tier 1** (Claude only, 1 pass): Bug fixes, simple endpoints, UI tweaks
-   - **Tier 2** (1 Claude pass + GPT-5.4 adversarial review): New features touching multiple domains, integrations, schema changes
-   - **Tier 3** (Claude agent team + GPT-5.4 xhigh adversarial review): New pipeline phases, agent types, architectural changes
+   - **Tier 2** (1 Claude pass + GPT-5.5 adversarial review): New features touching multiple domains, integrations, schema changes
+   - **Tier 3** (Claude agent team + GPT-5.5 xhigh adversarial review): New pipeline phases, agent types, architectural changes
 
 2. **Write criteria** — each must be:
    - Independently testable (no "works well" or "looks good")
