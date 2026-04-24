@@ -96,7 +96,7 @@ The repo serves dual purpose: it documents the PICE methodology (readable on Git
 3. As a developer adding a feature, I want to run `pice plan "add user auth"` so that an AI agent researches my codebase, creates a detailed plan with a contract, and presents it for my approval.
 4. As a developer with an approved plan, I want to run `pice execute auth-plan.md` so that an AI agent implements the plan in a fresh session with full context from the plan file.
 5. As a developer who just finished implementation, I want to run `pice evaluate auth-plan.md` so that multiple adversarial AI agents from different model families grade my implementation against the contract criteria in parallel — eliminating single-model blind spots.
-11. As a developer, I want to configure which models run evaluation (e.g., Claude Opus for contract grading, GPT-5.4 for design challenge) so that I can choose the evaluation rigor and cost trade-off that fits my needs.
+11. As a developer, I want to configure which models run evaluation (e.g., Claude Opus for contract grading, GPT-5.5 for design challenge) so that I can choose the evaluation rigor and cost trade-off that fits my needs.
 6. As a developer who wants to ship, I want to run `pice review` so that code review and regression tests run before I commit.
 7. As a developer, I want to run `pice metrics` so that I can see aggregate quality scores, pass rates, and trends across all my PICE loops — proving the methodology works.
 8. As an open-source contributor, I want to build a provider for my preferred AI tool by implementing the JSON-RPC protocol, without needing to understand or modify the Rust core.
@@ -117,7 +117,7 @@ The repo serves dual purpose: it documents the PICE methodology (readable on Git
 | serde / serde_json | Rust serialization for JSON-RPC protocol and config | 1.x |
 | tokio | Async runtime for provider process management | 1.x |
 | @anthropic-ai/claude-code | Claude Code SDK for workflow orchestration + Claude evaluator | Latest |
-| OpenAI SDK / Codex CLI | Adversarial evaluator provider (GPT-5.4 / user-configurable) | Latest |
+| OpenAI SDK / Codex CLI | Adversarial evaluator provider (GPT-5.5 / user-configurable) | Latest |
 | npm | Distribution channel (binary wrapper pattern) | 10+ |
 | GitHub Actions | CI/CD for cross-platform builds and releases | N/A |
 
@@ -300,7 +300,7 @@ User runs `pice evaluate plan.md`
 ### Key Design Decisions
 
 - **JSON-RPC over stdio for provider protocol** — Same IPC pattern as MCP servers. Familiar to the AI tooling community. Language-agnostic. Providers are independently testable processes.
-- **Dual-model adversarial evaluation as a first-class concept** — Different model families have different blind spots. Claude evaluates contract criteria formally (structured grading). A second model (GPT-5.4 by default) challenges the approach itself — design tradeoffs, assumptions, failure modes. The provider protocol distinguishes between `workflow` and `evaluation` capabilities so providers can declare what they support. The Rust core orchestrates both in parallel.
+- **Dual-model adversarial evaluation as a first-class concept** — Different model families have different blind spots. Claude evaluates contract criteria formally (structured grading). A second model (GPT-5.5 by default) challenges the approach itself — design tradeoffs, assumptions, failure modes. The provider protocol distinguishes between `workflow` and `evaluation` capabilities so providers can declare what they support. The Rust core orchestrates both in parallel.
 - **User-configurable evaluation models** — The evaluation config is not hardcoded. Users choose which models run each evaluator role. This future-proofs against model deprecation and lets users optimize for cost vs. rigor. The tiered system (1/2/3) provides sensible defaults while allowing full override.
 - **Graceful degradation for evaluation** — If only one provider is configured (e.g., no OpenAI key), evaluation falls back to single-model mode with a clear warning. The tool never fails because an optional evaluator is missing.
 - **SQLite for metrics** — Zero-config, file-based, embedded in the Rust binary. No external database dependency. Portable across platforms. Sufficient for local metrics aggregation.
@@ -339,12 +339,12 @@ Each command orchestrates a Claude Code session via the provider protocol. The R
 **Dual-model adversarial evaluation in `pice evaluate`:** The evaluate command implements the methodology's tiered evaluation system:
 
 - **Tier 1** (bug fixes, simple changes): Single Claude evaluator session — grades contract criteria formally.
-- **Tier 2** (new features, integrations): Claude evaluator + parallel adversarial review from a second model (default: GPT-5.4 via Codex provider). The second model challenges the *approach* — design tradeoffs, assumptions, failure modes. Different model families have different blind spots.
+- **Tier 2** (new features, integrations): Claude evaluator + parallel adversarial review from a second model (default: GPT-5.5 via Codex provider). The second model challenges the *approach* — design tradeoffs, assumptions, failure modes. Different model families have different blind spots.
 - **Tier 3** (architectural changes): Claude agent team (contract evaluator + convention auditor + regression hunter + edge case breaker) + parallel adversarial review from a second model at maximum reasoning depth.
 
 All evaluators see ONLY the contract, code diff, and CLAUDE.md — never the planning or implementation context. This eliminates self-evaluation bias. The Rust core orchestrates multiple provider sessions in parallel and synthesizes results into a unified report.
 
-**User-configurable models:** Users select which models to use for each evaluator role via `.pice/config.toml`. The provider architecture supports any model through any provider — Claude via the Claude Code provider, GPT via the Codex provider, or any future model via community providers. The default configuration ships with Claude + GPT-5.4 for dual-model coverage.
+**User-configurable models:** Users select which models to use for each evaluator role via `.pice/config.toml`. The provider architecture supports any model through any provider — Claude via the Claude Code provider, GPT via the Codex provider, or any future model via community providers. The default configuration ships with Claude + GPT-5.5 for dual-model coverage.
 
 ### Feature 3: Workflow Status (`pice status`)
 
@@ -498,15 +498,15 @@ model = "claude-opus-4-6"   # User-selectable model
 
 [evaluation.adversarial]
 provider = "codex"           # Design challenge evaluator — different model family
-model = "gpt-5.4"           # User-selectable model
+model = "gpt-5.5"           # User-selectable model
 effort = "high"              # Reasoning effort: "low", "high", "xhigh"
 enabled = true               # Can be disabled for Tier 1 or cost savings
 
 [evaluation.tiers]
 # Override default tier behavior
 tier1_models = ["claude-opus-4-6"]                     # Single evaluator
-tier2_models = ["claude-opus-4-6", "gpt-5.4"]          # Dual-model
-tier3_models = ["claude-opus-4-6", "gpt-5.4"]          # Dual-model + agent team
+tier2_models = ["claude-opus-4-6", "gpt-5.5"]          # Dual-model
+tier3_models = ["claude-opus-4-6", "gpt-5.5"]          # Dual-model + agent team
 tier3_agent_team = true                                 # Enable 4-agent team for Tier 3
 
 [telemetry]

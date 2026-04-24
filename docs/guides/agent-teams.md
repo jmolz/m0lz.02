@@ -15,7 +15,7 @@ Prompts for orchestrating multi-agent parallel work. Each prompt creates a team 
 
 ### Tier 2: Dual-Model Adversarial Review
 
-Use for Tier 2 contracts -- new features, integrations, schema changes. Runs a Claude evaluator and a GPT-5.4 adversarial review in parallel. See [evaluation methodology](../methodology/evaluate.md) for details on the tier system.
+Use for Tier 2 contracts -- new features, integrations, schema changes. Runs a Claude evaluator and a GPT-5.5 adversarial review in parallel. See [evaluation methodology](../methodology/evaluate.md) for details on the tier system.
 
 ```
 We just finished implementing [FEATURE]. The contract is in [PLAN PATH].

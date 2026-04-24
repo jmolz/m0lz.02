@@ -26,13 +26,13 @@ Print this. Pin it. Tape it to your monitor.
 
 ### Evaluation Tiers (Dual-Model Adversarial)
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 high) | Use When |
 |------|------------------|----------------------------------|----------|
 | 1 | 1 pass | — | Bug fixes, simple endpoints, UI tweaks |
 | 2 | 1 pass | 1 `/codex:adversarial-review` | New features, integrations, schema changes |
 | 3 | Claude agent team | 1 `/codex:adversarial-review --effort xhigh` | Architectural changes, new pipeline phases |
 
-**Dual-model rationale:** Claude evaluates contract criteria formally (scores, pass/fail). GPT-5.4 challenges whether the *approach itself* is right — questioning design tradeoffs, assumptions, and alternative approaches. Different model families have different blind spots, so running both in parallel maximizes coverage.
+**Dual-model rationale:** Claude evaluates contract criteria formally (scores, pass/fail). GPT-5.5 challenges whether the *approach itself* is right — questioning design tradeoffs, assumptions, and alternative approaches. Different model families have different blind spots, so running both in parallel maximizes coverage.
 
 Both evaluators are adversarial by design — they never see implementation reasoning, only the contract, code diff, and CLAUDE.md. This eliminates self-evaluation bias.
 
@@ -83,7 +83,7 @@ Both evaluators are adversarial by design — they never see implementation reas
 | `/plan-feature <desc>` | Start of every PICE loop (includes contract) |
 | `/execute <path>` | After planning, in fresh session |
 | `/evaluate <path>` | After execution — dual-model adversarial eval vs contract |
-| `/codex:adversarial-review` | Design challenge review via GPT-5.4 (Tier 2+) |
+| `/codex:adversarial-review` | Design challenge review via GPT-5.5 (Tier 2+) |
 | `/review` | After evaluation — regressions + code review |
 | `/commit` | After every successful implementation |
 | `/handoff` | When session is getting long |

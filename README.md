@@ -27,7 +27,7 @@ Structured AI coding workflow orchestrator -- Plan, Implement, Contract-Evaluate
 
 m0lz.02 implements the PICE methodology — a structured approach to AI coding that breaks work into three formal phases: **Plan** (research, design, and contract negotiation), **Implement** (code generation from a plan), and **Contract-Evaluate** (adversarial grading of the implementation against the contract). The CLI orchestrates this lifecycle -- it manages the state, the prompts, and the measurement while an AI assistant does the actual coding.
 
-The key differentiator is **dual-model adversarial evaluation**. Instead of asking the same AI that wrote the code to judge it, m0lz.02 runs parallel evaluations from independent models -- Claude grades contract criteria while GPT-5.4 challenges the approach as an adversary. This eliminates the single-model blind spots that plague self-review workflows.
+The key differentiator is **dual-model adversarial evaluation**. Instead of asking the same AI that wrote the code to judge it, m0lz.02 runs parallel evaluations from independent models -- Claude grades contract criteria while GPT-5.5 challenges the approach as an adversary. This eliminates the single-model blind spots that plague self-review workflows.
 
 m0lz.02 is the outer loop. It spawns AI providers over a JSON-RPC protocol, feeds them scoped context, captures structured output, and stores quality metrics locally in SQLite. The AI does the coding; m0lz.02 makes sure it is doing it well.
 
@@ -102,7 +102,7 @@ $ pice evaluate .claude/plans/auth-plan.md
 ╚══════════════════════════════════════╝
 ```
 
-Claude grades each contract criterion with a numeric score against a threshold. GPT-5.4 independently challenges the approach as an adversary — surfacing blind spots neither model would catch alone.
+Claude grades each contract criterion with a numeric score against a threshold. GPT-5.5 independently challenges the approach as an adversary — surfacing blind spots neither model would catch alone.
 
 ## Commands
 
@@ -142,7 +142,7 @@ Evaluation scales with the significance of the change:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/evaluation-tiers-dark.svg">
-  <img alt="Evaluation tiers: Tier 1 uses single Claude Opus evaluator for minor changes; Tier 2 adds parallel GPT-5.4 adversarial review for new features; Tier 3 uses a Claude Opus agent team of 4 plus high-effort GPT-5.4 review for architectural changes" src="docs/images/evaluation-tiers-light.svg" width="800">
+  <img alt="Evaluation tiers: Tier 1 uses single Claude Opus evaluator for minor changes; Tier 2 adds parallel GPT-5.5 adversarial review for new features; Tier 3 uses a Claude Opus agent team of 4 plus high-effort GPT-5.5 review for architectural changes" src="docs/images/evaluation-tiers-light.svg" width="800">
 </picture>
 
 Evaluators are **context-isolated** -- they see only the contract JSON, the git diff, and the project's `CLAUDE.md`. They never see the implementation conversation or planning rationale.
@@ -161,7 +161,7 @@ model = "claude-opus-4-6"
 
 [evaluation.adversarial]
 provider = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 effort = "high"
 enabled = true
 

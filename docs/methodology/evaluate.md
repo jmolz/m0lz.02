@@ -33,9 +33,9 @@ contract:
 Claude's output is structured: an array of `{ criterion, score, justification }`
 objects. The Rust core consumes this structure directly.
 
-### Design Challenge (GPT-5.4 / Codex)
+### Design Challenge (GPT-5.5 / Codex)
 
-The adversarial evaluator is a model from a different family -- GPT-5.4 via the Codex
+The adversarial evaluator is a model from a different family -- GPT-5.5 via the Codex
 provider by default. Its role is fundamentally different from contract grading. It
 challenges the approach itself:
 
@@ -135,7 +135,7 @@ Contract: API Rate Limiting (Tier 2)
 
 Contract: PASS (3/3 criteria met)
 
-Adversarial Review (GPT-5.4):
+Adversarial Review (GPT-5.5):
   - Consider: Token bucket refill rate is hardcoded; configuration would
     improve flexibility
   - Consider: No test for concurrent request handling under rate limit
@@ -169,7 +169,7 @@ Evaluation models are not hardcoded. Users configure them in `.pice/config.toml`
 contract_provider = "claude-code"
 contract_model = "claude-opus-4-6"
 adversarial_provider = "codex"
-adversarial_model = "gpt-5.4"
+adversarial_model = "gpt-5.5"
 ```
 
 This lets users swap in newer models, use cheaper models for iteration, or configure

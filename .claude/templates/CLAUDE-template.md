@@ -105,9 +105,9 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Adversarial Evaluation (Codex Plugin)
 
-This project uses **dual-model adversarial evaluation** via the Codex plugin. GPT-5.4 with high reasoning acts as a peer-level adversary to Opus 4.6, challenging design decisions and assumptions from a different model family's perspective.
+This project uses **dual-model adversarial evaluation** via the Codex plugin. GPT-5.5 with high reasoning acts as a peer-level adversary to Opus 4.6, challenging design decisions and assumptions from a different model family's perspective.
 
-- **Config**: `.codex/config.toml` — defaults to `gpt-5.4` with `high` reasoning
+- **Config**: `.codex/config.toml` — defaults to `gpt-5.5` with `high` reasoning
 - **Tier 2+ features**: Run `/codex:adversarial-review --background` in parallel with `/evaluate`
 - **Tier 3 architectural changes**: Use `--effort xhigh` for maximum reasoning depth
 - **Design challenges from Codex are complementary** — they question the approach, not just the implementation

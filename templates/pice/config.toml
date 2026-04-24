@@ -7,14 +7,14 @@ model = "claude-opus-4-6"
 
 [evaluation.adversarial]
 provider = "codex"
-model = "gpt-5.4"
+model = "gpt-5.5"
 effort = "high"
 enabled = true
 
 [evaluation.tiers]
 tier1_models = ["claude-opus-4-6"]
-tier2_models = ["claude-opus-4-6", "gpt-5.4"]
-tier3_models = ["claude-opus-4-6", "gpt-5.4"]
+tier2_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_models = ["claude-opus-4-6", "gpt-5.5"]
 tier3_agent_team = true
 
 [telemetry]

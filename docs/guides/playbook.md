@@ -23,13 +23,13 @@ See [methodology overview](../methodology/overview.md) for a deeper explanation 
 
 ## Evaluation Tiers (Dual-Model Adversarial)
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5) | Use When |
 |------|------------------|------------------------------|----------|
 | 1 | 1 pass | -- | Bug fixes, simple endpoints, UI tweaks |
 | 2 | 1 pass | 1 design challenge (high) | New features, integrations, schema changes |
 | 3 | Claude agent team | 1 design challenge (xhigh) | Architectural changes, new pipeline phases |
 
-Claude evaluates contract criteria formally (scores, pass/fail). GPT-5.4 challenges whether the approach itself is sound. Different model families have different blind spots, so running both in parallel maximizes coverage.
+Claude evaluates contract criteria formally (scores, pass/fail). GPT-5.5 challenges whether the approach itself is sound. Different model families have different blind spots, so running both in parallel maximizes coverage.
 
 Both evaluators are adversarial by design -- they never see implementation reasoning, only the contract, code diff, and CLAUDE.md.
 

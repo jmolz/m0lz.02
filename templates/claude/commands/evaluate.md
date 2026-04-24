@@ -58,11 +58,11 @@ Also gather:
 
 ## Step 3: Run Evaluation Pass(es)
 
-Evaluation uses a **dual-model adversarial** approach. The Claude evaluator grades contract criteria formally. For Tier 2+, a parallel GPT-5.4 adversarial review challenges the design approach itself.
+Evaluation uses a **dual-model adversarial** approach. The Claude evaluator grades contract criteria formally. For Tier 2+, a parallel GPT-5.5 adversarial review challenges the design approach itself.
 
 ### Step 3a: Launch Codex Adversarial Review (Tier 2+ only)
 
-If the contract tier is 2 or 3, launch a Codex adversarial review in the background **before** running the Claude evaluator. This runs GPT-5.4 in parallel.
+If the contract tier is 2 or 3, launch a Codex adversarial review in the background **before** running the Claude evaluator. This runs GPT-5.5 in parallel.
 
 Run the following via `Bash` with `run_in_background: true` (so Claude evaluation can proceed in parallel):
 
@@ -205,7 +205,7 @@ After all passes complete (or the user stops early), output:
 | {name}    | {T}/10    | {S}/10 | YES/NO |
 | ...       | ...       | ...    | ...    |
 
-### Design Challenge Findings (Codex GPT-5.4 — Tier 2+ only)
+### Design Challenge Findings (Codex GPT-5.5 — Tier 2+ only)
 
 {Paste Codex adversarial review findings verbatim. These challenge the approach
 itself — design tradeoffs, assumptions, and alternative approaches. Categorize as:}

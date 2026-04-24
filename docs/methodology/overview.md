@@ -77,7 +77,7 @@ only three things: the contract JSON, the git diff, and the project's CLAUDE.md.
 never see the planning conversation or implementation session.
 
 PICE uses dual-model adversarial evaluation as a key differentiator. Claude grades each
-contract criterion on a 1-10 scale. A second model from a different family -- GPT-5.4
+contract criterion on a 1-10 scale. A second model from a different family -- GPT-5.5
 by default -- challenges the approach itself: design tradeoffs, unstated assumptions,
 failure modes. Different model families have different blind spots, so cross-model
 evaluation catches issues that single-model review misses.
@@ -94,7 +94,7 @@ This is the mechanism that distinguishes PICE from simple AI code review:
 - **Contract grading** (Claude): Formal, per-criterion scoring against the contract.
   Each criterion gets a 1-10 score. The Rust core checks whether every score meets its
   threshold.
-- **Design challenge** (GPT-5.4 / Codex): An independent model critiques the approach
+- **Design challenge** (GPT-5.5 / Codex): An independent model critiques the approach
   itself. It looks for questionable design decisions, unstated assumptions, missed edge
   cases, and better alternatives. This is not scored against the contract -- it surfaces
   issues the contract might not cover.

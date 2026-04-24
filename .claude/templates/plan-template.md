@@ -148,13 +148,13 @@ Execute in order, top to bottom. Each task is atomic.
 
 ## Contract
 
-> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.4 adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
+> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.5 adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
 
 ### Tier
 
 **{1 | 2 | 3}** — determines evaluation depth and model coverage:
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 high) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 1    | 1 pass           | —                                | Bug fixes, simple endpoints, UI tweaks |
 | 2    | 1 pass           | 1 `/codex:adversarial-review`    | New features, integrations, schema changes |
@@ -194,10 +194,10 @@ Execute in order, top to bottom. Each task is atomic.
 
 ## Adversarial Review
 
-> Populated during `/plan-feature` Phase 5.5. Findings from fresh Claude sub-agent + Codex GPT-5.4 (Tier 2+) or self-critique (Tier 1) against the Karpathy four principles + PoetiQ cross-model verification. Critical findings are resolved or explicitly Acknowledged before the contract is drafted.
+> Populated during `/plan-feature` Phase 5.5. Findings from fresh Claude sub-agent + Codex GPT-5.5 (Tier 2+) or self-critique (Tier 1) against the Karpathy four principles + PoetiQ cross-model verification. Critical findings are resolved or explicitly Acknowledged before the contract is drafted.
 
 **Tier**: {1 | 2 | 3}
-**Reviewers**: {"self-critique" | "Claude sub-agent + Codex GPT-5.4"}
+**Reviewers**: {"self-critique" | "Claude sub-agent + Codex GPT-5.5"}
 **Refinement cycles**: {N}
 
 ### Critical (resolved before proceeding)
