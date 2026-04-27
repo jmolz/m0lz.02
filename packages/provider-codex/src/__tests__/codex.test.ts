@@ -47,8 +47,8 @@ describe('CodexProvider', () => {
     expect(caps.workflow).toBe(false);
     expect(caps.evaluation).toBe(true);
     expect(caps.agentTeams).toBe(false);
-    expect(caps.models).toContain('gpt-5.4');
-    expect(caps.defaultEvalModel).toBe('gpt-5.4');
+    expect(caps.models).toContain('gpt-5.5');
+    expect(caps.defaultEvalModel).toBe('gpt-5.5');
   });
 
   it('workflow methods are not registered (returns METHOD_NOT_FOUND)', () => {
@@ -62,7 +62,7 @@ describe('CodexProvider', () => {
 
   it('runAdversarialEvaluation calls OpenAI with correct format', async () => {
     const { runAdversarialEvaluation } = await import('../evaluator.js');
-    const result = await runAdversarialEvaluation('test prompt', 'gpt-5.4', 'high');
+    const result = await runAdversarialEvaluation('test prompt', 'gpt-5.5', 'high');
 
     expect(result.designChallenges).toHaveLength(1);
     expect(result.designChallenges[0].severity).toBe('consider');
@@ -70,7 +70,7 @@ describe('CodexProvider', () => {
     expect(result.recommendsChanges).toBe(false);
     expect(mockParse).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: 'gpt-5.4',
+        model: 'gpt-5.5',
         messages: expect.arrayContaining([
           expect.objectContaining({ role: 'system' }),
           expect.objectContaining({ role: 'user', content: 'test prompt' }),
@@ -86,7 +86,7 @@ describe('CodexProvider', () => {
 
     const { runAdversarialEvaluation } = await import('../evaluator.js');
     await expect(
-      runAdversarialEvaluation('prompt', 'gpt-5.4', 'high'),
+      runAdversarialEvaluation('prompt', 'gpt-5.5', 'high'),
     ).rejects.toThrow('Failed to parse adversarial evaluation result');
   });
 

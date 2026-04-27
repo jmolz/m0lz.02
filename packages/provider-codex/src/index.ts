@@ -36,8 +36,8 @@ export class CodexProvider extends BaseProvider<CodexConfig> {
       workflow: false,
       evaluation: true,
       agentTeams: false,
-      models: ['gpt-5.4', 'gpt-4.1'],
-      defaultEvalModel: 'gpt-5.4',
+      models: ['gpt-5.5', 'gpt-4.1'],
+      defaultEvalModel: 'gpt-5.5',
     };
   }
 
@@ -52,7 +52,7 @@ export class CodexProvider extends BaseProvider<CodexConfig> {
         contract,
         diff,
         claudeMd,
-        model: model ?? this.config?.defaultModel ?? 'gpt-5.4',
+        model: model ?? this.config?.defaultModel ?? 'gpt-5.5',
         effort: effort ?? this.config?.defaultEffort ?? 'high',
       });
       return { sessionId: id };

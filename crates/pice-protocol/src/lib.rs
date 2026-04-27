@@ -770,7 +770,7 @@ mod tests {
             contract: json!({"criteria": []}),
             diff: "+line".to_string(),
             claude_md: "# Rules".to_string(),
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             effort: Some("high".to_string()),
             seam_checks: None,
             pass_index: None,
@@ -781,7 +781,7 @@ mod tests {
         assert!(json.contains("\"model\""));
         assert!(json.contains("\"effort\""));
         let parsed: EvaluateCreateParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.model.unwrap(), "gpt-5.4");
+        assert_eq!(parsed.model.unwrap(), "gpt-5.5");
         assert_eq!(parsed.effort.unwrap(), "high");
     }
 

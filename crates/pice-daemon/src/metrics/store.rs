@@ -540,7 +540,7 @@ mod tests {
             "claude-code",
             "claude-opus-4-6",
             Some("codex"),
-            Some("gpt-5.4"),
+            Some("gpt-5.5"),
             Some("All criteria met"),
             &scores,
         )

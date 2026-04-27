@@ -95,14 +95,14 @@ impl Default for PiceConfig {
                 },
                 adversarial: AdversarialConfig {
                     provider: "codex".to_string(),
-                    model: "gpt-5.4".to_string(),
+                    model: "gpt-5.5".to_string(),
                     effort: "high".to_string(),
                     enabled: true,
                 },
                 tiers: TiersConfig {
                     tier1_models: vec!["claude-opus-4-6".to_string()],
-                    tier2_models: vec!["claude-opus-4-6".to_string(), "gpt-5.4".to_string()],
-                    tier3_models: vec!["claude-opus-4-6".to_string(), "gpt-5.4".to_string()],
+                    tier2_models: vec!["claude-opus-4-6".to_string(), "gpt-5.5".to_string()],
+                    tier3_models: vec!["claude-opus-4-6".to_string(), "gpt-5.5".to_string()],
                     tier3_agent_team: true,
                 },
             },
@@ -151,7 +151,7 @@ mod tests {
         let config = PiceConfig::default();
         assert_eq!(config.provider.name, "claude-code");
         assert_eq!(config.evaluation.primary.model, "claude-opus-4-6");
-        assert_eq!(config.evaluation.adversarial.model, "gpt-5.4");
+        assert_eq!(config.evaluation.adversarial.model, "gpt-5.5");
         assert!(config.evaluation.adversarial.enabled);
         assert!(!config.telemetry.enabled);
         assert_eq!(config.init.project_type, "auto");

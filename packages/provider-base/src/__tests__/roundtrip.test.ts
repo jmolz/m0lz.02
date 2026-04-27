@@ -338,14 +338,14 @@ describe('JSON-RPC roundtrip (matches Rust wire format)', () => {
       contract: { criteria: [] },
       diff: '+line',
       claudeMd: '# Rules',
-      model: 'gpt-5.4',
+      model: 'gpt-5.5',
       effort: 'high',
     };
     const json = JSON.stringify(params);
     expect(json).toContain('"model"');
     expect(json).toContain('"effort"');
     const parsed: EvaluateCreateParams = JSON.parse(json);
-    expect(parsed.model).toBe('gpt-5.4');
+    expect(parsed.model).toBe('gpt-5.5');
     expect(parsed.effort).toBe('high');
   });
 
