@@ -177,7 +177,7 @@ For Tier 3, use `--effort xhigh` instead of `--effort high`.
 
 Inherits the fallback from `/evaluate`. If Stream B output contains rate-limit markers (`rate limit`, `rate_limit_exceeded`, `429`, `too many requests`, `usage cap`, `quota exceeded`), read `~/.claude/.openai-fallback-key` and retry via direct OpenAI Responses API:
 
-- `model: "gpt-5.4"`, `reasoning.effort: "high"` (Tier 2) or `"xhigh"` (Tier 3)
+- `model: "gpt-5.5"`, `reasoning.effort: "high"` (Tier 2) or `"xhigh"` (Tier 3)
 - `max_output_tokens: 32000`; on `status: "incomplete"` with `reason: "max_output_tokens"`, retry with larger budget
 - Do NOT run `codex login --api-key` (overwrites ChatGPT Team session)
 

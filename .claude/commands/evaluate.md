@@ -90,10 +90,10 @@ The Codex CLI authenticates via the user's ChatGPT Team session by default. When
 
 ```bash
 OPENAI_FALLBACK_KEY=$(cat "$HOME/.claude/.openai-fallback-key")
-EFFORT="high"   # Tier 2 → "high"; Tier 3 → "xhigh" (Responses API supports xhigh for gpt-5.4)
+EFFORT="high"   # Tier 2 → "high"; Tier 3 → "xhigh" (Responses API supports xhigh for gpt-5.5)
 cat > /tmp/codex-fallback-request.json <<'JSON'
 {
-  "model": "gpt-5.4",
+  "model": "gpt-5.5",
   "reasoning": { "effort": "__EFFORT__" },
   "input": "__PROMPT__"
 }
@@ -105,7 +105,7 @@ curl -sS https://api.openai.com/v1/responses \
   --data-binary @/tmp/codex-fallback-request.json
 ```
 
-Reserve sufficient output budget (OpenAI recommends ≥25k tokens for reasoning + output on gpt-5.4 at `xhigh`). Optionally pass `"max_output_tokens": 32000` and handle `status: "incomplete"` with `incomplete_details.reason === "max_output_tokens"` by retrying with a larger budget. Extract the visible answer from `response.output[].content[].text` (or `response.output_text`).
+Reserve sufficient output budget (OpenAI recommends ≥25k tokens for reasoning + output on gpt-5.5 at `xhigh`). Optionally pass `"max_output_tokens": 32000` and handle `status: "incomplete"` with `incomplete_details.reason === "max_output_tokens"` by retrying with a larger budget. Extract the visible answer from `response.output[].content[].text` (or `response.output_text`).
 
 The `__PROMPT__` must include: the same focus text passed to `codex-companion adversarial-review`, the contract criteria JSON, the full diff, and CLAUDE.md — i.e., the same context Codex would have received. Construct the prompt string explicitly rather than relying on Codex's internal prompt templates (which are not accessible outside the CLI).
 
