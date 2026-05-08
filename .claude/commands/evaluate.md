@@ -60,19 +60,19 @@ Also gather:
 
 Evaluation uses a **dual-model adversarial** approach. The Claude evaluator grades contract criteria formally. For Tier 2+, a parallel GPT-5.5 adversarial review challenges the design approach itself.
 
-### Step 3a: Launch Codex Adversarial Review (Tier 2+ only)
+### Step 3a: Launch Codex Adversarial Review (all tiers)
 
-If the contract tier is 2 or 3, launch a Codex adversarial review in the background **before** running the Claude evaluator. This runs GPT-5.5 in parallel.
+For every tier (1, 2, and 3), launch a Codex adversarial review in the background **before** running the Claude evaluator. This runs GPT-5.5 xhigh in parallel.
 
 Run the following via `Bash` with `run_in_background: true` (so Claude evaluation can proceed in parallel):
 
 ```bash
 node "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs" \
-  adversarial-review \
+  adversarial-review --effort xhigh \
   "evaluate against this contract: {paste contract criteria names and thresholds}"
 ```
 
-For Tier 3, insert `--effort xhigh` before the focus text for maximum reasoning depth.
+All tiers use `--effort xhigh` for maximum reasoning depth.
 
 If the script fails (e.g., Codex not configured), note the error and continue with Claude-only evaluation — do not block the entire evaluation.
 
@@ -90,7 +90,7 @@ The Codex CLI authenticates via the user's ChatGPT Team session by default. When
 
 ```bash
 OPENAI_FALLBACK_KEY=$(cat "$HOME/.claude/.openai-fallback-key")
-EFFORT="high"   # Tier 2 → "high"; Tier 3 → "xhigh" (Responses API supports xhigh for gpt-5.5)
+EFFORT="xhigh"   # All tiers (Responses API supports xhigh for gpt-5.5)
 cat > /tmp/codex-fallback-request.json <<'JSON'
 {
   "model": "gpt-5.5",
@@ -115,7 +115,7 @@ Once the ChatGPT Team rate limit lifts, no action is required: the primary Codex
 
 ### Step 3b: Run Claude Evaluator Pass(es)
 
-For each Claude evaluation pass (1 for Tier 1, 1 for Tier 2, 3 for Tier 3 agent team), spawn a **fresh sub-agent** with the following prompt. The sub-agent must use the most capable available model.
+For each Claude evaluation pass (1 for Tier 1, 1 for Tier 2, 3 for Tier 3 agent team), spawn a **fresh Claude opus 4.7 adaptive sub-agent** (`model: "opus"`) with the following prompt.
 
 ### Evaluator Sub-Agent Prompt
 
@@ -210,9 +210,9 @@ The new evaluator does NOT see the implementation conversation — only prior ev
 
 ---
 
-## Step 4: Collect Codex Findings (Tier 2+ only)
+## Step 4: Collect Codex Findings (all tiers)
 
-If a Codex adversarial review was launched in Step 3a, collect its results now. The background Bash task should have completed (or will complete shortly) — wait for the completion notification if it hasn't arrived yet, then read the full output.
+A Codex adversarial review was launched in Step 3a regardless of tier; collect its results now. The background Bash task should have completed (or will complete shortly) — wait for the completion notification if it hasn't arrived yet, then read the full output.
 
 If the background task is still running after all Claude evaluation passes are complete, wait up to 5 minutes. If it times out or errored, note this in the final report and proceed with Claude-only results.
 
@@ -237,7 +237,7 @@ After all passes complete (or the user stops early), output:
 
 - Tier: {N}
 - Claude passes completed: {N}/{max}
-- Codex adversarial review: {YES (Tier 2+) / NO (Tier 1)}
+- Codex adversarial review: YES (all tiers — GPT-5.5 xhigh)
 
 ### Results by Criterion (Claude Evaluator)
 
@@ -246,7 +246,7 @@ After all passes complete (or the user stops early), output:
 | {name}    | {T}/10    | {S}/10 | YES/NO |
 | ...       | ...       | ...    | ...    |
 
-### Design Challenge Findings (Codex GPT-5.5 — Tier 2+ only)
+### Design Challenge Findings (Codex GPT-5.5 xhigh — all tiers)
 
 {Paste Codex adversarial review findings verbatim. These challenge the approach
 itself — design tradeoffs, assumptions, and alternative approaches. Categorize as:}

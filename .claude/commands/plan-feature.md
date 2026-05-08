@@ -117,7 +117,7 @@ Plans suffer the same confirmation bias that `/evaluate` was built to break: whe
 
 ### The Critique Prompt
 
-The same prompt is used by all adversaries (Tier 1 self-critique, Tier 2+ Claude sub-agent, Tier 2+ Codex GPT-5.5). It must attack six dimensions:
+The same prompt is used by all adversaries — every tier (Tier 1, Tier 2, Tier 3) runs both adversaries in parallel: a fresh Claude opus 4.7 adaptive sub-agent AND a Codex GPT-5.5 xhigh task. It must attack six dimensions:
 
 ```
 You are reviewing an implementation plan BEFORE code is written. You did NOT write this plan and have no stake in its approval. Your job is to find weaknesses along six dimensions. Be specific. Cite plan sections by heading. Reject generic concerns.
@@ -150,42 +150,37 @@ Do NOT output praise. Do NOT pad with generic concerns. Specificity is the quali
 
 The adversary receives: the plan file, `CLAUDE.md`, and `git log --oneline -15` — nothing else. It does NOT see the planning conversation, Phase 1–4 research, or any prior reasoning.
 
-### Tier 1: Self-Critique
+### All Tiers: Parallel Adversarial Streams
 
-For Tier 1 plans (bug fixes, simple endpoints, UI tweaks), the planning agent runs the critique prompt itself against its own plan and writes findings directly into the plan file. Bias still exists at Tier 1, but the friction of writing concrete findings against each dimension catches the obvious misses. If you cannot name a specific weakness in each of the six dimensions, look harder — never skip to "no findings."
+Run two independent adversaries **in parallel** (not sequentially) for every tier — Tier 1, Tier 2, and Tier 3. Self-critique by the planning agent is no longer sufficient at any tier; bias from the planner is too strong. Tier only changes the Claude sub-agent type and the refinement-cycle ceiling — both adversaries always run.
 
-### Tier 2+: Parallel Adversarial Streams
-
-Run two independent adversaries **in parallel** (not sequentially):
-
-**Stream A — Fresh Claude sub-agent.** Spawn via `Task` tool:
+**Stream A — Fresh Claude opus 4.7 adaptive sub-agent.** Spawn via `Task` tool with `model: "opus"` (Claude opus 4.7 adaptive):
+- Tier 1 → `subagent_type: "general-purpose"`
 - Tier 2 → `subagent_type: "general-purpose"`
 - Tier 3 → `subagent_type: "architect"`
 - Pass the critique prompt with plan + CLAUDE.md + git log appended.
 
-**Stream B — Codex GPT-5.5 task** (runs in background via `Bash` with `run_in_background: true`):
+**Stream B — Codex GPT-5.5 xhigh task** (runs in background via `Bash` with `run_in_background: true`). Always `--effort xhigh` regardless of tier:
 
 ```bash
 node "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs" \
-  task --background --effort high \
+  task --background --effort xhigh \
   "{the critique prompt above, with plan + CLAUDE.md + git log appended}"
 ```
-
-For Tier 3, use `--effort xhigh` instead of `--effort high`.
 
 #### Rate-Limit Fallback
 
 Inherits the fallback from `/evaluate`. If Stream B output contains rate-limit markers (`rate limit`, `rate_limit_exceeded`, `429`, `too many requests`, `usage cap`, `quota exceeded`), read `~/.claude/.openai-fallback-key` and retry via direct OpenAI Responses API:
 
-- `model: "gpt-5.5"`, `reasoning.effort: "high"` (Tier 2) or `"xhigh"` (Tier 3)
+- `model: "gpt-5.5"`, `reasoning.effort: "xhigh"` (all tiers)
 - `max_output_tokens: 32000`; on `status: "incomplete"` with `reason: "max_output_tokens"`, retry with larger budget
 - Do NOT run `codex login --api-key` (overwrites ChatGPT Team session)
 
 See `/evaluate` Step 3a for the exact curl recipe.
 
-### Refinement Loop (Tier 3 only)
+### Refinement Loop
 
-PoetiQ's core insight: iterative refinement beats single-pass reasoning. Tier 3 plans get up to 2 refinement cycles:
+PoetiQ's core insight: iterative refinement beats single-pass reasoning. Refinement cycles per tier — Tier 1: 1 cycle, Tier 2: 1 cycle, Tier 3: up to 2 cycles:
 
 **Cycle 1** — Run both streams, merge findings.
 - Zero Critical findings → proceed to persistence.
@@ -197,16 +192,16 @@ PoetiQ's core insight: iterative refinement beats single-pass reasoning. Tier 3 
   3. Mixed — revise some, acknowledge others
   ```
 
-**Cycle 2** — If user chose revise: rewrite affected plan sections, then re-run both streams with the NEW plan + the previous critique (so reviewers can verify fixes addressed the concerns). After Cycle 2, any remaining Critical findings must be Acknowledged by the user with explicit reasoning — no silent dismissal.
+**Cycle 2 (Tier 3 only)** — If user chose revise: rewrite affected plan sections, then re-run both streams with the NEW plan + the previous critique (so reviewers can verify fixes addressed the concerns). After Cycle 2, any remaining Critical findings must be Acknowledged by the user with explicit reasoning — no silent dismissal.
 
-Tier 2 runs a single cycle; skip Cycle 2.
+Tier 1 and Tier 2 run a single cycle; skip Cycle 2. After Cycle 1, any remaining Critical findings must be Acknowledged by the user with explicit reasoning — no silent dismissal.
 
 ### Self-Auditing Stop Condition
 
 Stop refinement when any of:
 - Zero Critical findings remain, or
 - All Critical findings Acknowledged with explicit reasoning, or
-- Tier refinement-cycle limit reached (Tier 2: 1, Tier 3: 2)
+- Tier refinement-cycle limit reached (Tier 1: 1, Tier 2: 1, Tier 3: 2)
 
 Do not over-refine. A plan that survives informed critique is ready.
 
@@ -218,7 +213,7 @@ Append findings to the plan file under a new `## Adversarial Review` section (th
 ## Adversarial Review
 
 **Tier**: {N}
-**Reviewers**: {"self-critique" | "Claude sub-agent + Codex GPT-5.5"}
+**Reviewers**: Claude opus 4.7 adaptive sub-agent + Codex GPT-5.5 xhigh
 **Refinement cycles**: {N}
 **Attack framework**: Karpathy four principles + PoetiQ cross-model verification
 
@@ -253,10 +248,10 @@ This keeps the contract honest: it grades against the plan as challenged, not th
 
 Based on the plan's success criteria and implementation tasks, write a JSON contract block in the plan file's `## Contract` section:
 
-1. **Set the tier** based on scope (determines both Claude evaluator passes AND whether GPT-5.5 adversarial review runs):
-   - **Tier 1** (Claude only, 1 pass): Bug fixes, simple endpoints, UI tweaks
-   - **Tier 2** (1 Claude pass + GPT-5.5 adversarial review): New features touching multiple domains, integrations, schema changes
-   - **Tier 3** (Claude agent team + GPT-5.5 xhigh adversarial review): New pipeline phases, agent types, architectural changes
+1. **Set the tier** based on scope (determines Claude evaluator passes; the dual Claude opus 4.7 adaptive + GPT-5.5 xhigh adversarial review runs at every tier):
+   - **Tier 1** (1 Claude pass + Claude opus 4.7 adaptive sub-agent + GPT-5.5 xhigh adversarial review): Bug fixes, simple endpoints, UI tweaks
+   - **Tier 2** (1 Claude pass + Claude opus 4.7 adaptive sub-agent + GPT-5.5 xhigh adversarial review): New features touching multiple domains, integrations, schema changes
+   - **Tier 3** (Claude agent team + Claude opus 4.7 adaptive architect sub-agent + GPT-5.5 xhigh adversarial review): New pipeline phases, agent types, architectural changes
 
 2. **Write criteria** — each must be:
    - Independently testable (no "works well" or "looks good")
