@@ -9,48 +9,49 @@ paths:
 
 # Frontend Conventions
 
-This file is an example on-demand rule for frontend work. Customize it for the project.
+This file auto-loads when Claude touches frontend files. Customize for your project.
 
 ## Component Structure
 
-- Use one component per file.
-- Co-locate styles, types, and tests when the local framework supports it.
-- Prefer named exports unless the project already standardizes on default exports.
+- One component per file
+- Co-locate styles, types, and tests with the component
+- Use named exports (not default exports)
 
-```text
+```
 ComponentName/
-├── ComponentName.tsx
-├── ComponentName.test.tsx
-└── index.ts
+├── ComponentName.tsx      # Component implementation
+├── ComponentName.test.tsx # Tests
+└── index.ts               # Re-export
 ```
 
 ## Styling
 
-- Use the project's established styling system.
-- Avoid inline styles except for truly dynamic values.
-- Follow design tokens when present.
+- Use {Tailwind / CSS Modules / styled-components}
+- No inline styles except for truly dynamic values
+- Follow the design tokens in `src/styles/tokens.{ext}`
 
 ## State Management
 
-- Local state: `useState` or `useReducer`.
-- Server state: project-standard fetch/cache library.
-- Global state only when state is genuinely shared across distant surfaces.
+- Local state: `useState` / `useReducer`
+- Server state: {React Query / SWR / RTK Query}
+- Global state: {Context / Zustand / Redux} — only when truly global
 
 ## Forms
 
-- Use the project's existing form library or native forms.
-- Validate on both client and server when data crosses a trust boundary.
-- Show validation errors near the relevant field.
+- Use {React Hook Form / Formik / native}
+- Always validate on both client and server
+- Show validation errors inline, below the field
 
 ## Accessibility
 
-- Interactive elements need keyboard support.
-- Images need alt text unless decorative.
-- Inputs need labels.
-- Prefer semantic HTML.
+- All interactive elements need keyboard support
+- Images need alt text
+- Form inputs need labels (not just placeholders)
+- Use semantic HTML elements
 
 ## Performance
 
-- Lazy-load routes or heavy components where appropriate.
-- Memoize expensive computations only when there is real cost or rerender pressure.
-- Avoid introducing layout shift.
+- Lazy-load routes with `React.lazy()` or framework equivalent
+- Memoize expensive computations with `useMemo`
+- Use `useCallback` for callbacks passed to child components
+- Avoid unnecessary re-renders (check with React DevTools)
