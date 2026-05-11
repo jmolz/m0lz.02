@@ -54,6 +54,12 @@ Also gather:
 - The project's CLAUDE.md (for convention checking)
 - Any on-demand rules in `.claude/rules/` relevant to changed files
 
+If `CLAUDE.md` is missing from the current git toplevel and the toplevel path
+contains `/.worktrees/`, use the sibling main checkout `CLAUDE.md` above the
+`.worktrees` directory instead. Report the resolved guidance path in the
+evaluation output so a worktree cannot silently evaluate without project
+conventions.
+
 ---
 
 ## Step 3: Run Evaluation Pass(es)
@@ -67,12 +73,14 @@ For every tier (1, 2, and 3), launch a Codex adversarial review in the backgroun
 Run the following via `Bash` with `run_in_background: true` (so Claude evaluation can proceed in parallel):
 
 ```bash
-node "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs" \
-  adversarial-review --effort xhigh \
-  "evaluate against this contract: {paste contract criteria names and thresholds}"
+node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
+  task --background --model gpt-5.5 --effort xhigh \
+  "Adversarially evaluate against this contract: {paste contract criteria names and thresholds}. Use only the contract JSON, git diff/status, CLAUDE.md, and relevant .claude/rules. Challenge design assumptions, failure modes, and production risks; do not edit files."
 ```
 
-All tiers use `--effort xhigh` for maximum reasoning depth.
+All tiers use `task --model gpt-5.5 --effort xhigh` for maximum reasoning depth.
+Do not use `adversarial-review --effort`; the installed companion does not
+parse effort flags for that subcommand.
 
 If the script fails (e.g., Codex not configured), note the error and continue with Claude-only evaluation — do not block the entire evaluation.
 

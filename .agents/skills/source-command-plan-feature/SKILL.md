@@ -167,11 +167,11 @@ Run two independent adversaries **in parallel** (not sequentially) for every tie
 - Tier 3 → `subagent_type: "architect"`
 - Pass the critique prompt with plan + AGENTS.md + git log appended.
 
-**Stream B — Codex GPT-5.5 xhigh task** (runs in background via `Bash` with `run_in_background: true`). Always `--effort xhigh` regardless of tier:
+**Stream B — Codex GPT-5.5 xhigh task** (runs in background via `Bash` with `run_in_background: true`). Always `--model gpt-5.5 --effort xhigh` regardless of tier:
 
 ```bash
-node "$HOME/.codex/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs" \
-  task --background --effort xhigh \
+node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
+  task --background --model gpt-5.5 --effort xhigh \
   "{the critique prompt above, with plan + AGENTS.md + git log appended}"
 ```
 

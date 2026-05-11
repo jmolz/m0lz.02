@@ -54,6 +54,8 @@ Also gather:
 - The project's CLAUDE.md (for convention checking)
 - Any on-demand rules in `.claude/rules/` relevant to changed files
 
+If `CLAUDE.md` is missing from the current git toplevel and the toplevel path contains `/.worktrees/`, use the sibling main checkout `CLAUDE.md` above the `.worktrees` directory instead. Report the resolved guidance path in the evaluation output so a worktree cannot silently evaluate without project conventions.
+
 ---
 
 ## Step 3: Run Evaluation Pass(es)
@@ -67,12 +69,12 @@ For every tier (1, 2, and 3), launch a Codex adversarial review in the backgroun
 Run the following via `Bash` with `run_in_background: true` (so Claude evaluation can proceed in parallel):
 
 ```bash
-node "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs" \
-  adversarial-review --effort xhigh \
-  "evaluate against this contract: {paste contract criteria names and thresholds}"
+node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
+  task --background --model gpt-5.5 --effort xhigh \
+  "Adversarially evaluate against this contract: {paste contract criteria names and thresholds}. Use only the contract JSON, git diff/status, CLAUDE.md, and relevant .claude/rules. Challenge design assumptions, failure modes, and production risks; do not edit files."
 ```
 
-All tiers use `--effort xhigh` for maximum reasoning depth.
+All tiers use `task --model gpt-5.5 --effort xhigh` for maximum reasoning depth. Do not use `adversarial-review --effort`; the installed companion does not parse effort flags for that subcommand.
 
 If the script fails (e.g., Codex not configured), note the error and continue with Claude-only evaluation — do not block the entire evaluation.
 
@@ -82,14 +84,14 @@ The Codex review challenges the *approach* — was this the right design? What a
 
 The Codex CLI authenticates via the user's ChatGPT Team session by default. When that session hits its rate limit, fall back to a direct OpenAI Responses API call — do **not** run `codex login --api-key`, as that would overwrite the ChatGPT Team session (making recovery manual once the rate limit lifts).
 
-**Fallback key location**: `~/.claude/.openai-fallback-key` — single line containing an OpenAI API key, `chmod 600`. If absent, skip fallback and report the rate-limit error verbatim.
+**Fallback key location**: `~/.codex/.openai-fallback-key` — single line containing an OpenAI API key, `chmod 600`. If absent, skip fallback and report the rate-limit error verbatim.
 
 **Rate-limit detection** (in collected Codex output, case-insensitive): any of `rate limit`, `rate_limit_exceeded`, `429`, `too many requests`, `usage cap`, `quota exceeded`.
 
 **Fallback invocation** (only on detection, only if the key file exists):
 
 ```bash
-OPENAI_FALLBACK_KEY=$(cat "$HOME/.claude/.openai-fallback-key")
+OPENAI_FALLBACK_KEY=$(cat "$HOME/.codex/.openai-fallback-key")
 EFFORT="xhigh"   # All tiers (Responses API supports xhigh for gpt-5.5)
 cat > /tmp/codex-fallback-request.json <<'JSON'
 {
@@ -107,7 +109,7 @@ curl -sS https://api.openai.com/v1/responses \
 
 Reserve sufficient output budget (OpenAI recommends ≥25k tokens for reasoning + output on gpt-5.5 at `xhigh`). Optionally pass `"max_output_tokens": 32000` and handle `status: "incomplete"` with `incomplete_details.reason === "max_output_tokens"` by retrying with a larger budget. Extract the visible answer from `response.output[].content[].text` (or `response.output_text`).
 
-The `__PROMPT__` must include: the same focus text passed to `codex-companion adversarial-review`, the contract criteria JSON, the full diff, and CLAUDE.md — i.e., the same context Codex would have received. Construct the prompt string explicitly rather than relying on Codex's internal prompt templates (which are not accessible outside the CLI).
+The `__PROMPT__` must include: the same focus text passed to `codex-companion task`, the contract criteria JSON, the full diff, and CLAUDE.md — i.e., the same context Codex would have received. Construct the prompt string explicitly rather than relying on Codex's internal prompt templates (which are not accessible outside the CLI).
 
 Treat the extracted text as the adversarial review output. Label it clearly in the final report as `Codex GPT-5.5 (OpenAI API fallback — ChatGPT Team rate-limited)`.
 
@@ -218,9 +220,9 @@ If the background task is still running after all Claude evaluation passes are c
 
 **Before proceeding**, scan the collected Codex output for rate-limit markers (see Step 3a → Rate-Limit Fallback). If any are present:
 
-1. If `~/.claude/.openai-fallback-key` exists → run the fallback curl invocation from Step 3a and substitute the fallback output for the Codex output.
+1. If `~/.codex/.openai-fallback-key` exists → run the fallback curl invocation from Step 3a and substitute the fallback output for the Codex output.
 2. If the key file is missing → report to the user:
-   `Codex adversarial review was rate-limited. Paste your OpenAI API key into ~/.claude/.openai-fallback-key (chmod 600) to enable fallback, then re-run /evaluate. Proceeding with Claude-only evaluation for now.`
+   `Codex adversarial review was rate-limited. Paste your OpenAI API key into ~/.codex/.openai-fallback-key (chmod 600) to enable fallback, then re-run /evaluate. Proceeding with Claude-only evaluation for now.`
 
 The Codex review output challenges design decisions and assumptions — it does NOT score against the contract. Treat its findings as a separate evaluation dimension.
 

@@ -61,6 +61,8 @@ Also gather:
 - The project's AGENTS.md (for convention checking)
 - Any on-demand rules in `.codex/rules/` relevant to changed files
 
+If `AGENTS.md` is missing from the current git toplevel and the toplevel path contains `/.worktrees/`, use the sibling main checkout `AGENTS.md` above the `.worktrees` directory instead. Report the resolved AGENTS path in the evaluation output so a worktree cannot silently evaluate without project conventions.
+
 ---
 
 ## Step 3: Run Evaluation Pass(es)
@@ -74,12 +76,12 @@ For every tier (1, 2, and 3), launch a Codex adversarial review in the backgroun
 Run the following via `Bash` with `run_in_background: true` (so Claude evaluation can proceed in parallel):
 
 ```bash
-node "$HOME/.codex/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs" \
-  adversarial-review --effort xhigh \
-  "evaluate against this contract: {paste contract criteria names and thresholds}"
+node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
+  task --background --model gpt-5.5 --effort xhigh \
+  "Adversarially evaluate against this contract: {paste contract criteria names and thresholds}. Use only the contract JSON, git diff/status, AGENTS.md, and relevant .codex/rules. Challenge design assumptions, failure modes, and production risks; do not edit files."
 ```
 
-All tiers use `--effort xhigh` for maximum reasoning depth.
+All tiers use `task --model gpt-5.5 --effort xhigh` for maximum reasoning depth. Do not use `adversarial-review --effort`; the installed companion does not parse effort flags for that subcommand.
 
 If the script fails (e.g., Codex not configured), note the error and continue with Claude-only evaluation — do not block the entire evaluation.
 
@@ -114,7 +116,7 @@ curl -sS https://api.openai.com/v1/responses \
 
 Reserve sufficient output budget (OpenAI recommends ≥25k tokens for reasoning + output on gpt-5.5 at `xhigh`). Optionally pass `"max_output_tokens": 32000` and handle `status: "incomplete"` with `incomplete_details.reason === "max_output_tokens"` by retrying with a larger budget. Extract the visible answer from `response.output[].content[].text` (or `response.output_text`).
 
-The `__PROMPT__` must include: the same focus text passed to `codex-companion adversarial-review`, the contract criteria JSON, the full diff, and AGENTS.md — i.e., the same context Codex would have received. Construct the prompt string explicitly rather than relying on Codex's internal prompt templates (which are not accessible outside the CLI).
+The `__PROMPT__` must include: the same focus text passed to `codex-companion task`, the contract criteria JSON, the full diff, and AGENTS.md — i.e., the same context Codex would have received. Construct the prompt string explicitly rather than relying on Codex's internal prompt templates (which are not accessible outside the CLI).
 
 Treat the extracted text as the adversarial review output. Label it clearly in the final report as `Codex GPT-5.5 (OpenAI API fallback — ChatGPT Team rate-limited)`.
 
