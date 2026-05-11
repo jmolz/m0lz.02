@@ -8,7 +8,7 @@ model = "claude-opus-4-6"
 [evaluation.adversarial]
 provider = "codex"
 model = "gpt-5.5"
-effort = "high"
+effort = "xhigh"
 enabled = true
 
 [evaluation.tiers]
