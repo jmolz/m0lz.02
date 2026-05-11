@@ -61,9 +61,7 @@ mod wait_logic {
     /// Inspect a notification payload for a terminal `FeatureComplete` or
     /// `Cancelled` event.  Returns `(status_wire, exit_code)` or `None`.
     /// Mirrors `parse_terminal_notification` from `background_wait.rs`.
-    pub fn parse_terminal_notification(
-        payload: &ManifestEventPayload,
-    ) -> Option<(String, i32)> {
+    pub fn parse_terminal_notification(payload: &ManifestEventPayload) -> Option<(String, i32)> {
         match payload.event {
             ManifestEvent::FeatureComplete => {
                 let status_wire = payload
@@ -182,7 +180,8 @@ async fn wait_exit_0_passed_via_snapshot_short_circuit() {
     let project = tempfile::tempdir().unwrap();
     init_git(project.path());
 
-    let manifest_path = seed_terminal_manifest("wait-feat-pass", ManifestStatus::Passed, project.path());
+    let manifest_path =
+        seed_terminal_manifest("wait-feat-pass", ManifestStatus::Passed, project.path());
     let m = VerificationManifest::load(&manifest_path).unwrap();
 
     // Short-circuit: terminal status detected from snapshot — no need to
@@ -208,8 +207,7 @@ async fn wait_exit_2_failed_via_snapshot_short_circuit() {
         seed_terminal_manifest("wait-feat-fail", ManifestStatus::Failed, project.path());
     let m = VerificationManifest::load(&manifest_path).unwrap();
 
-    let code = wait_logic::terminal_exit_code(&m.overall_status)
-        .expect("Failed is terminal");
+    let code = wait_logic::terminal_exit_code(&m.overall_status).expect("Failed is terminal");
 
     assert_eq!(
         code,
@@ -236,8 +234,8 @@ async fn wait_exit_3_pending_review_via_snapshot_short_circuit() {
     );
     let m = VerificationManifest::load(&manifest_path).unwrap();
 
-    let code = wait_logic::terminal_exit_code(&m.overall_status)
-        .expect("PendingReview is terminal");
+    let code =
+        wait_logic::terminal_exit_code(&m.overall_status).expect("PendingReview is terminal");
 
     assert_eq!(
         code,
@@ -285,10 +283,11 @@ async fn wait_exit_4_timeout_feature_still_running() {
     let _run_id = mgr
         .spawn(
             "wait-feat-timeout".to_string(),
+            mgr.next_run_id(),
             env,
             move |_env, permit, _cancel| async move {
                 gate_clone.notified().await; // blocks forever in this test
-                // Hold permit so it isn't released.
+                                             // Hold permit so it isn't released.
                 let _p = permit;
                 Ok(VerificationManifest::new(
                     "wait-feat-timeout",
@@ -351,8 +350,7 @@ async fn wait_exit_0_via_feature_complete_event() {
         );
     });
 
-    let code =
-        wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
+    let code = wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
 
     assert_eq!(code, 0, "FeatureComplete(passed) → exit 0");
 }
@@ -373,8 +371,7 @@ async fn wait_exit_2_via_feature_complete_event() {
         );
     });
 
-    let code =
-        wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
+    let code = wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
 
     assert_eq!(
         code,
@@ -395,8 +392,7 @@ async fn wait_exit_2_via_cancelled_event() {
         bus_clone.emit_cancelled("cancel-feat", "r-c", "shutdown");
     });
 
-    let code =
-        wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
+    let code = wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
 
     assert_eq!(
         code,
@@ -421,8 +417,7 @@ async fn wait_exit_3_via_pending_review_event() {
         );
     });
 
-    let code =
-        wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
+    let code = wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
 
     assert_eq!(
         code,
@@ -440,8 +435,7 @@ async fn wait_exit_5_via_channel_closed() {
     // Drop the bus so the sender is gone — the receiver observes Closed.
     drop(events);
 
-    let code =
-        wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
+    let code = wait_logic::wait_on_receiver(&mut rx, Duration::from_secs(2)).await;
 
     assert_eq!(
         code,

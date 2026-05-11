@@ -24,9 +24,7 @@
 //! `ExitJsonStatus::X.as_str()` at a point in the call stack where the string
 //! is actually placed on a response channel.
 
-use pice_core::cli::{
-    CommandRequest, CommandResponse, ExitJsonStatus, StatusMode, StatusRequest,
-};
+use pice_core::cli::{CommandRequest, CommandResponse, ExitJsonStatus, StatusMode, StatusRequest};
 use pice_daemon::handlers::dispatch;
 use pice_daemon::orchestrator::NullSink;
 use pice_daemon::server::router::DaemonContext;
@@ -179,8 +177,6 @@ async fn feature_not_found_wire_string_via_handler_dispatch() {
                 "ExitJson value must carry the requested feature_id; got: {value}"
             );
         }
-        other => panic!(
-            "expected ExitJson for missing feature, got: {other:?}"
-        ),
+        other => panic!("expected ExitJson for missing feature, got: {other:?}"),
     }
 }

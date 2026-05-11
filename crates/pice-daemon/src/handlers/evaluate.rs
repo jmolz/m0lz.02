@@ -77,6 +77,33 @@ fn review_gate_pending_response(
     CommandResponse::Exit { code: 3, message }
 }
 
+fn layers_toml_missing_response(
+    project_root: &std::path::Path,
+    plan_path: &std::path::Path,
+    json_mode: bool,
+) -> CommandResponse {
+    let status = ExitJsonStatus::LayersTomlMissing;
+    let layers_path = project_root.join(".pice/layers.toml");
+    if json_mode {
+        return CommandResponse::ExitJson {
+            code: status.exit_code(),
+            value: json!({
+                "status": status.as_str(),
+                "plan_path": plan_path.display().to_string(),
+                "layers_path": layers_path.display().to_string(),
+                "hint": "Background evaluation requires Stack Loops. Run `pice layers detect --write` or create .pice/layers.toml, then retry.",
+            }),
+        };
+    }
+    CommandResponse::Exit {
+        code: status.exit_code(),
+        message: format!(
+            "background evaluation requires .pice/layers.toml; missing {}",
+            layers_path.display()
+        ),
+    }
+}
+
 /// Reconcile expired review gates against the current clock. For each
 /// Pending gate whose `timeout_at` has passed, apply the pinned
 /// `on_timeout_action`: mutate the gate status, update the owning
@@ -1419,11 +1446,9 @@ pub async fn run(
 /// Scope note: this landing implements the dispatch contract (SLO +
 /// FeatureAlreadyRunning + InlineMode rejection + Queued/InProgress
 /// transitions + event emission). The spawned future wires a
-/// simplified orchestrator invocation that:
-/// - Loads layers.toml if present; on absence, records a minimal
-///   Passed manifest (execute-like semantics — background evaluate
-///   without layers.toml is legal but has no cohorts to drain).
-/// - Runs `run_stack_loops` for projects with layers.toml.
+/// simplified orchestrator invocation that runs Stack Loops for projects
+/// with layers.toml. Missing `.pice/layers.toml` is rejected before
+/// dispatch so the daemon never writes a synthetic Passed manifest.
 /// - Treats a provider startup failure as a runtime-error layer so the
 ///   terminal manifest is observable (rather than the future silently
 ///   erroring out without producing a terminal manifest).
@@ -1433,6 +1458,15 @@ async fn run_background(
     plan_path: &std::path::Path,
 ) -> Result<CommandResponse> {
     let feature_id = feature_id_from_plan_path(plan_path);
+    let layers_path = ctx.project_root().join(".pice/layers.toml");
+    if !layers_path.exists() {
+        return Ok(layers_toml_missing_response(
+            ctx.project_root(),
+            plan_path,
+            req.json,
+        ));
+    }
+
     let workflow_snapshot = pice_core::workflow::loader::resolve(ctx.project_root())
         .unwrap_or_else(|_| pice_core::workflow::loader::embedded_defaults());
 
@@ -1543,15 +1577,9 @@ async fn run_background(
 
 /// Run the evaluate orchestrator for a background-dispatched feature.
 ///
-/// Covers the two paths the foreground handler supports:
-/// - Project with `.pice/layers.toml` → `run_stack_loops_with_cancel`.
-/// - Project without → a minimal "v0.1 fallback" behavior: single
-///   provider evaluation against the plan's contract, wrapped in a
-///   synthetic one-layer manifest so terminal observability is
-///   preserved. Full v0.1 behavior (adversarial pair, metrics DB
-///   finalize) is NOT ported to the background path — users who need
-///   adversarial grading in a background workflow should upgrade to
-///   Stack Loops.
+/// Requires `.pice/layers.toml` and runs `run_stack_loops_with_cancel`.
+/// The caller rejects missing layers before dispatch; the defensive check
+/// here exists only for a layer file deleted after admission.
 ///
 /// The helper honors the cancel token at cohort boundaries (via
 /// `run_stack_loops_with_cancel`) and at the pre-provider boundary
@@ -1572,39 +1600,18 @@ async fn run_evaluate_orchestrator(
     // Plan parse happens inside the spawn (per plan: dispatch-SLO
     // absorbs only the cheap handshake, not plan parse latency).
     let plan = ParsedPlan::load(plan_path)?;
-    let contract = plan
+    let _contract = plan
         .contract
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no contract section found in plan"))?;
 
     let layers_path = args.env.project_root.join(".pice/layers.toml");
     if !layers_path.exists() {
-        // v0.1 fallback path: no layers.toml. Surface a minimal
-        // Passed manifest recording the dispatch happened. The
-        // foreground v0.1 path runs a provider-backed evaluation; we
-        // do not port that complexity into the background path — the
-        // Stack Loops path is the supported background surface.
-        let mut manifest = VerificationManifest::load(&args.manifest_path)?;
-        manifest
-            .layers
-            .push(pice_core::layers::manifest::LayerResult {
-                name: "default".to_string(),
-                status: pice_core::layers::manifest::LayerStatus::Skipped,
-                passes: Vec::new(),
-                seam_checks: Vec::new(),
-                halted_by: Some(
-                    "background-evaluate-without-layers-toml: \
-                     v0.1 single-loop path not supported in background mode"
-                        .to_string(),
-                ),
-                final_confidence: None,
-                total_cost_usd: None,
-                escalation_events: None,
-            });
-        manifest.overall_status = ManifestStatus::Passed;
-        let _ = contract; // contract kept in scope for future v0.1 porting
         let _ = logs;
-        return Ok(manifest);
+        return Err(anyhow::anyhow!(
+            "background evaluation requires .pice/layers.toml; missing {}",
+            layers_path.display()
+        ));
     }
 
     let layers_config = pice_core::layers::LayersConfig::load(&layers_path)

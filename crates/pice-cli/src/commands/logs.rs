@@ -24,7 +24,7 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use pice_core::cli::{CommandRequest, ExitJsonStatus, LogsRequest};
-use pice_core::events::LogChunk;
+use pice_core::events::{LogChunk, StreamJsonFrame};
 use pice_core::protocol::methods::{LOGS_CHUNK, LOGS_STREAM};
 use pice_core::protocol::subscribe::{LogsStreamRequest, LogsStreamResponse};
 use serde_json::json;
@@ -174,16 +174,10 @@ async fn run_follow(args: &LogsArgs) -> Result<()> {
 
 fn render_chunk(chunk: &LogChunk, stream_json: bool) -> Result<()> {
     if stream_json {
-        // NDJSON: one line per chunk, plus a terminal frame at
-        // end-of-stream. Task 15 formalizes the `StreamJsonFrame`
-        // envelope parity across status+logs; the per-chunk frame here
-        // reuses the typed `LogChunk` wire shape directly under a
-        // `kind=log-chunk` discriminant so log-specific consumers don't
-        // have to re-derive a manifest-event envelope. A future Task 15
-        // pass may wrap this in a `StreamJsonFrame::Event` to unify the
-        // two streaming commands.
-        let value = json!({ "kind": "log-chunk", "chunk": chunk });
-        println!("{}", serde_json::to_string(&value)?);
+        let frame = StreamJsonFrame::LogChunk {
+            chunk: chunk.clone(),
+        };
+        println!("{}", serde_json::to_string(&frame)?);
     } else if chunk.terminal {
         // Stderr: a terminal marker is a control event for human
         // readers, not buffered output — written to stderr so callers

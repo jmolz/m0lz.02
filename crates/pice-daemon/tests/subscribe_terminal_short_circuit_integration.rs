@@ -37,7 +37,9 @@
 use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
 use pice_core::protocol::{
     methods,
-    subscribe::{LogsStreamRequest, LogsStreamResponse, SubscribeManifestRequest, SubscribeManifestResponse},
+    subscribe::{
+        LogsStreamRequest, LogsStreamResponse, SubscribeManifestRequest, SubscribeManifestResponse,
+    },
     DaemonRequest, DaemonResponse,
 };
 use pice_core::transport::SocketPath;
@@ -81,17 +83,17 @@ fn seed_manifest_with_status(
     path
 }
 
-async fn shutdown_daemon(
-    sock_path: &std::path::Path,
-    token: &str,
-    req_id: u64,
-) {
+async fn shutdown_daemon(sock_path: &std::path::Path, token: &str, req_id: u64) {
     let stream = UnixStream::connect(sock_path)
         .await
         .expect("connect for shutdown");
     let mut conn = UnixConnection::new(stream);
-    let shutdown_req =
-        DaemonRequest::new(req_id, methods::DAEMON_SHUTDOWN, token, serde_json::json!({}));
+    let shutdown_req = DaemonRequest::new(
+        req_id,
+        methods::DAEMON_SHUTDOWN,
+        token,
+        serde_json::json!({}),
+    );
     conn.write_message(&shutdown_req)
         .await
         .expect("write shutdown");
@@ -149,17 +151,19 @@ async fn manifest_subscribe_snapshot_carries_terminal_status_for_passed_feature(
     // This is the short-circuit SLO: a CLI subscribing to an already-terminal
     // feature reads this snapshot in the first frame and exits — never blocks.
     conn.write_message(&req).await.expect("write subscribe");
-    let resp: DaemonResponse = tokio::time::timeout(
-        Duration::from_millis(500),
-        conn.read_message(),
-    )
-    .await
-    .expect("snapshot response within 500ms")
-    .expect("read response")
-    .expect("not EOF");
+    let resp: DaemonResponse =
+        tokio::time::timeout(Duration::from_millis(500), conn.read_message())
+            .await
+            .expect("snapshot response within 500ms")
+            .expect("read response")
+            .expect("not EOF");
 
     assert_eq!(resp.id, 1);
-    assert!(resp.error.is_none(), "subscribe should succeed, got: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "subscribe should succeed, got: {:?}",
+        resp.error
+    );
     let body: SubscribeManifestResponse =
         serde_json::from_value(resp.result.expect("result")).expect("parse snapshot body");
 
@@ -250,17 +254,19 @@ async fn logs_subscribe_snapshot_carries_terminal_chunk_for_completed_feature() 
     conn.write_message(&req).await.expect("write logs/stream");
 
     // Assert: the logs/stream one-shot response arrives within 500ms.
-    let resp: DaemonResponse = tokio::time::timeout(
-        Duration::from_millis(500),
-        conn.read_message(),
-    )
-    .await
-    .expect("logs/stream snapshot response within 500ms")
-    .expect("read response")
-    .expect("not EOF");
+    let resp: DaemonResponse =
+        tokio::time::timeout(Duration::from_millis(500), conn.read_message())
+            .await
+            .expect("logs/stream snapshot response within 500ms")
+            .expect("read response")
+            .expect("not EOF");
 
     assert_eq!(resp.id, 1);
-    assert!(resp.error.is_none(), "logs/stream should succeed, got: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "logs/stream should succeed, got: {:?}",
+        resp.error
+    );
 
     let body: LogsStreamResponse =
         serde_json::from_value(resp.result.expect("result")).expect("parse logs response body");
@@ -346,14 +352,12 @@ async fn manifest_subscribe_snapshot_also_pinned_for_failed_feature() {
         let req = DaemonRequest::new(10, methods::MANIFEST_SUBSCRIBE, &token, params);
         conn.write_message(&req).await.expect("write subscribe");
 
-        let resp: DaemonResponse = tokio::time::timeout(
-            Duration::from_millis(500),
-            conn.read_message(),
-        )
-        .await
-        .expect("Failed snapshot within 500ms")
-        .expect("read")
-        .expect("not EOF");
+        let resp: DaemonResponse =
+            tokio::time::timeout(Duration::from_millis(500), conn.read_message())
+                .await
+                .expect("Failed snapshot within 500ms")
+                .expect("read")
+                .expect("not EOF");
 
         assert_eq!(resp.id, 10);
         assert!(resp.error.is_none());
@@ -382,14 +386,12 @@ async fn manifest_subscribe_snapshot_also_pinned_for_failed_feature() {
         let req = DaemonRequest::new(11, methods::MANIFEST_SUBSCRIBE, &token, params);
         conn.write_message(&req).await.expect("write subscribe");
 
-        let resp: DaemonResponse = tokio::time::timeout(
-            Duration::from_millis(500),
-            conn.read_message(),
-        )
-        .await
-        .expect("PendingReview snapshot within 500ms")
-        .expect("read")
-        .expect("not EOF");
+        let resp: DaemonResponse =
+            tokio::time::timeout(Duration::from_millis(500), conn.read_message())
+                .await
+                .expect("PendingReview snapshot within 500ms")
+                .expect("read")
+                .expect("not EOF");
 
         assert_eq!(resp.id, 11);
         assert!(resp.error.is_none());

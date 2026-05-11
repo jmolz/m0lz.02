@@ -112,6 +112,7 @@ async fn daemon_shutdown_drains_background_jobs_before_responding() {
     ctx.jobs()
         .spawn(
             "feat-drain-int",
+            ctx.jobs().next_run_id(),
             stub_env(&state_dir, &project),
             move |_env, permit, cancel| async move {
                 let _hold = permit;

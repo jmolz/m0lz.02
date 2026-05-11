@@ -188,6 +188,7 @@ async fn connection_drop_does_not_cancel_background_task() {
     ctx.jobs()
         .spawn(
             "drop-survives-feat",
+            "run-drop-test".to_string(),
             stub_env(&state_dir, &project),
             move |_env, permit, _cancel| async move {
                 let _hold = permit; // keep global semaphore slot for task lifetime
@@ -200,7 +201,10 @@ async fn connection_drop_does_not_cancel_background_task() {
                     "run-drop-test",
                     serde_json::json!({"status": "passed"}),
                 );
-                Ok(VerificationManifest::new("drop-survives-feat", &project_for_job))
+                Ok(VerificationManifest::new(
+                    "drop-survives-feat",
+                    &project_for_job,
+                ))
             },
         )
         .expect("spawn background job");
@@ -272,7 +276,10 @@ async fn connection_drop_does_not_cancel_background_task() {
     })
     .unwrap();
     let req_a = DaemonRequest::new(1, methods::MANIFEST_SUBSCRIBE, &token, params_a);
-    conn_a.write_message(&req_a).await.expect("write subscribe A");
+    conn_a
+        .write_message(&req_a)
+        .await
+        .expect("write subscribe A");
 
     // Consume the snapshot response to confirm connection A is live.
     let snap_a: DaemonResponse = conn_a
@@ -336,24 +343,16 @@ async fn connection_drop_does_not_cancel_background_task() {
     // The stream may deliver a LayerStarted notification first (emitted
     // before the unblock), then FeatureComplete. We scan until we see
     // FeatureComplete — no fixed sleep.
-    let fc_payload = await_notification_event(
-        &mut conn_b,
-        methods::MANIFEST_EVENT,
-        Duration::from_secs(5),
-    )
-    .await;
+    let fc_payload =
+        await_notification_event(&mut conn_b, methods::MANIFEST_EVENT, Duration::from_secs(5))
+            .await;
 
     // Keep reading if this was LayerStarted rather than FeatureComplete.
     let terminal_payload = if fc_payload.event == ManifestEvent::FeatureComplete {
         fc_payload
     } else {
         // We got an intermediate event (LayerStarted); wait for the next one.
-        await_notification_event(
-            &mut conn_b,
-            methods::MANIFEST_EVENT,
-            Duration::from_secs(5),
-        )
-        .await
+        await_notification_event(&mut conn_b, methods::MANIFEST_EVENT, Duration::from_secs(5)).await
     };
 
     assert_eq!(
@@ -382,7 +381,9 @@ async fn connection_drop_does_not_cancel_background_task() {
     );
 
     // Shutdown the daemon gracefully.
-    let stream_s = UnixStream::connect(&sock_path).await.expect("connect shutdown");
+    let stream_s = UnixStream::connect(&sock_path)
+        .await
+        .expect("connect shutdown");
     let mut conn_s = UnixConnection::new(stream_s);
     let shutdown_req =
         DaemonRequest::new(3, methods::DAEMON_SHUTDOWN, &token, serde_json::json!({}));

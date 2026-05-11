@@ -9,17 +9,20 @@
 //!    short-circuits with `ExitJsonStatus::FeatureAlreadyRunning`.
 //! 4. Allocate a fresh `run_id` via [`FeatureJobManager::next_run_id`].
 //! 5. Build a [`JobEnv`] snapshot from [`DaemonContext`] state.
-//! 6. Atomically write `ManifestStatus::Queued` via [`NullSaver`] —
-//!    Queued is a pre-work state and MUST NOT emit a `LayerStarted`
-//!    event (that event is the Queued → InProgress transition inside
-//!    the spawned future).
-//! 7. Hand an owned closure to [`FeatureJobManager::spawn`]. The closure
+//! 6. Hand an owned closure to [`FeatureJobManager::spawn_after_signal`],
+//!    using the manager's DashMap entry as the single atomic admission point.
+//! 7. After admission succeeds, write `ManifestStatus::Queued` via
+//!    [`NullSaver`] and release the spawned future's start gate. Queued
+//!    is a pre-work state and MUST NOT emit a `LayerStarted` event
+//!    (that event is the Queued → InProgress transition inside the
+//!    spawned future).
+//! 8. The closure
 //!    re-opens the manifest, transitions Queued → InProgress via the
 //!    `EventEmittingSaver`, invokes the caller-supplied orchestrator,
 //!    then persists the terminal manifest with the `FeatureCompleted`
 //!    save-intent so `manifest/subscribe` observers see the final
 //!    state.
-//! 8. Return `CommandResponse::Json { feature_id, run_id, status:
+//! 9. Return `CommandResponse::Json { feature_id, run_id, status:
 //!    "background-dispatched" }`.
 //!
 //! The p95 dispatch-return SLO (plan criterion: <500ms over 50
@@ -38,7 +41,7 @@ use pice_core::jobs::JobEnv;
 use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
 use pice_core::workflow::WorkflowConfig;
 use serde_json::json;
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{oneshot, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
 use crate::events::{ManifestSaver, NullSaver, SaveIntent};
@@ -239,8 +242,11 @@ where
     // Step 5: snapshot env into JobEnv.
     let env = Arc::new(build_job_env(ctx.project_root(), workflow_snapshot)?);
 
-    // Step 6: write the Queued manifest via NullSaver (no event).
-    let manifest_path = write_queued_manifest(&feature_id, &run_id, ctx.project_root())?;
+    // Step 6: derive the manifest path. The actual Queued write happens
+    // only after `spawn` admits this feature as the single live run.
+    let manifest_path = VerificationManifest::manifest_path_for(&feature_id, ctx.project_root())
+        .context("deriving manifest path for Queued checkpoint")?;
+    let (start_tx, start_rx) = oneshot::channel::<()>();
 
     // Step 7: hand the owned builder to the job manager.
     let spawn_args = OrchestratorSpawnArgs {
@@ -249,29 +255,23 @@ where
         manifest_path,
         env: Arc::clone(&env),
     };
-    let spawn_result = ctx
-        .jobs()
-        .spawn(feature_id.clone(), env, move |_env, permit, cancel| {
-            future_builder(spawn_args, permit, cancel)
-        });
+    let spawn_result = ctx.jobs().spawn_after_signal(
+        feature_id.clone(),
+        run_id.clone(),
+        env,
+        start_rx,
+        move |_env, permit, cancel| future_builder(spawn_args, permit, cancel),
+    );
     match spawn_result {
-        Ok(actual_run_id) => {
-            // The manager allocated its OWN run_id inside `spawn`. We
-            // pre-wrote the manifest with the run_id we allocated via
-            // `next_run_id()`, so they MUST match — the monotonic
-            // counter inside the manager is the same one we consulted.
-            // Defensive check: if they diverge (a future change to
-            // `next_run_id` semantics), log loudly and fall back to
-            // the manager's id on the response so the CLI can still
-            // subscribe.
-            if actual_run_id != run_id {
-                tracing::warn!(
-                    handler_run_id = %run_id,
-                    manager_run_id = %actual_run_id,
-                    "run_id mismatch between pre-write and spawn — responding with manager id"
-                );
-                return Ok(background_dispatched_response(&feature_id, &actual_run_id));
+        Ok(_actual_run_id) => {
+            if let Err(e) = write_queued_manifest(&feature_id, &run_id, ctx.project_root()) {
+                ctx.jobs().cancel(&feature_id);
+                drop(start_tx);
+                return Err(e);
             }
+            start_tx
+                .send(())
+                .map_err(|_| anyhow::anyhow!("background worker exited before Queued release"))?;
             Ok(background_dispatched_response(&feature_id, &run_id))
         }
         Err(SpawnError {

@@ -88,6 +88,47 @@ fn init_git(root: &std::path::Path) {
         .output();
 }
 
+struct LayersTomlGuard {
+    path: PathBuf,
+    previous: Option<Vec<u8>>,
+}
+
+impl Drop for LayersTomlGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(bytes) => {
+                let _ = std::fs::write(&self.path, bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(&self.path);
+                if let Some(parent) = self.path.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                }
+            }
+        }
+    }
+}
+
+fn ensure_layers_toml(root: &std::path::Path) -> LayersTomlGuard {
+    let path = root.join(".pice/layers.toml");
+    let previous = std::fs::read(&path).ok();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(
+        &path,
+        r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#,
+    )
+    .unwrap();
+    LayersTomlGuard { path, previous }
+}
+
 // ─── Helper: dispatch cli/dispatch RPC over a Unix socket ────────────────────
 
 /// Send a `CommandRequest` via the `cli/dispatch` wire RPC and return
@@ -107,11 +148,7 @@ async fn wire_dispatch(
     let daemon_req = DaemonRequest::new(msg_id, methods::CLI_DISPATCH, token, params);
     conn.write_message(&daemon_req).await.expect("write");
 
-    let resp: DaemonResponse = conn
-        .read_message()
-        .await
-        .expect("read")
-        .expect("not EOF");
+    let resp: DaemonResponse = conn.read_message().await.expect("read").expect("not EOF");
 
     assert!(
         resp.error.is_none(),
@@ -143,9 +180,8 @@ async fn shutdown_daemon(
 /// Criterion 18: `run_id` on the Queued/InProgress manifest is preserved
 /// through a daemon restart + startup reconciliation.
 ///
-/// The v0.1 fallback path (no `.pice/layers.toml`) means the spawned
-/// future completes quickly (Skipped-layer branch, hermetic, no network).
-/// We therefore:
+/// A minimal `.pice/layers.toml` keeps background evaluate on the Stack
+/// Loops surface. We therefore:
 ///   a) Capture the `run_id` from the `BackgroundDispatched` response.
 ///   b) Read the Queued manifest from disk immediately after dispatch —
 ///      the Queued manifest carries `run_id` (written by
@@ -173,6 +209,7 @@ async fn run_id_persists_through_dispatch_and_restart() {
     // pre-seed the state dir namespace for the current working directory's
     // hash to make manifest_path_for work correctly.
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let _layers_guard = ensure_layers_toml(&project_root);
     let plan_path = write_plan_with_contract(&project_root, "run-id-persist-feat");
 
     // ── Boot daemon ──────────────────────────────────────────────────────────
@@ -199,7 +236,7 @@ async fn run_id_persists_through_dispatch_and_restart() {
     )
     .await;
 
-    let _dispatched_run_id = match &dispatch_resp {
+    let dispatched_run_id = match &dispatch_resp {
         CommandResponse::Json { value } => {
             assert_eq!(
                 value["status"].as_str().unwrap(),
@@ -215,13 +252,9 @@ async fn run_id_persists_through_dispatch_and_restart() {
     };
 
     // ── Step 3: check disk manifest carries A run_id (source of truth) ───────
-    // NOTE: `handlers::background::dispatch_background` allocates a run_id via
-    // `next_run_id()`, writes it to the Queued manifest, THEN calls
-    // `FeatureJobManager::spawn` which also allocates its own run_id internally.
-    // If these diverge (detectable via the "run_id mismatch" warn log), the
-    // response carries the manager's run_id while the disk carries the pre-
-    // allocated one.  The DISK manifest is the durable record; we use its
-    // run_id as the source of truth for the restart-persistence assertion.
+    // The dispatch response and disk manifest must carry the same caller-minted
+    // run_id. The disk manifest remains the source of truth for the restart
+    // persistence assertion.
     let manifest_path =
         VerificationManifest::manifest_path_for("run-id-persist-feat", &project_root)
             .expect("manifest path");
@@ -238,6 +271,10 @@ async fn run_id_persists_through_dispatch_and_restart() {
     assert!(
         disk_run_id.starts_with("r-"),
         "run_id on disk should match FeatureJobManager format, got {disk_run_id}"
+    );
+    assert_eq!(
+        disk_run_id, dispatched_run_id,
+        "dispatch response and Queued manifest must agree on run_id"
     );
 
     // ── Wait for the spawned future to complete (v0.1 fallback is fast) ──────
@@ -257,13 +294,10 @@ async fn run_id_persists_through_dispatch_and_restart() {
         m
     };
 
-    // The run_id must survive the orchestrator's status transition.
-    // The terminal manifest may carry either the pre-allocated disk run_id
-    // or the manager's run_id (see dispatch_background mismatch path);
-    // the important invariant is that SOME run_id is present and non-empty.
-    assert!(
-        terminal_manifest.run_id.is_some(),
-        "terminal manifest must have a run_id set (step d)"
+    assert_eq!(
+        terminal_manifest.run_id.as_deref(),
+        Some(disk_run_id.as_str()),
+        "terminal manifest must preserve the dispatch run_id (step d)"
     );
 
     // ── Shutdown daemon 1 ────────────────────────────────────────────────────
@@ -320,8 +354,8 @@ async fn run_id_preserved_when_reconciler_rewrites_in_progress_to_failed() {
     let expected_run_id = "r-preserved-across-restart";
 
     // Seed an InProgress manifest with a known run_id.
-    let manifest_path = VerificationManifest::manifest_path_for(feature_id, &project_root)
-        .expect("manifest path");
+    let manifest_path =
+        VerificationManifest::manifest_path_for(feature_id, &project_root).expect("manifest path");
     if let Some(parent) = manifest_path.parent() {
         std::fs::create_dir_all(parent).unwrap();
     }

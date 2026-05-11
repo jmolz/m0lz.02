@@ -301,6 +301,7 @@ fn stream_json_frame_ndjson_roundtrip_is_stable() {
         match frame {
             StreamJsonFrame::Snapshot { .. } => saw_snapshot += 1,
             StreamJsonFrame::Event { .. } => saw_event += 1,
+            StreamJsonFrame::LogChunk { .. } => saw_event += 1,
             StreamJsonFrame::Terminal { .. } => saw_terminal += 1,
         }
     }
@@ -316,6 +317,19 @@ fn stream_json_frame_kind_discriminant_values() {
     use pice_core::events::StreamJsonFrame;
     let terminal = serde_json::to_value(StreamJsonFrame::Terminal { exit_code: 0 }).unwrap();
     assert_eq!(terminal["kind"], "terminal");
+    let log_chunk = serde_json::to_value(StreamJsonFrame::LogChunk {
+        chunk: pice_core::events::LogChunk {
+            feature_id: "f".to_string(),
+            run_id: "r".to_string(),
+            layer: "backend".to_string(),
+            text: "x\n".to_string(),
+            timestamp: "ts".to_string(),
+            terminal: false,
+            reason: None,
+        },
+    })
+    .unwrap();
+    assert_eq!(log_chunk["kind"], "log-chunk");
     let event = serde_json::to_value(StreamJsonFrame::Event {
         event: pice_core::events::ManifestEventPayload {
             feature_id: "f".to_string(),

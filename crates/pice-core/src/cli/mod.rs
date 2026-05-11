@@ -123,6 +123,11 @@ pub enum ExitJsonStatus {
     /// registry validator (unknown check id or applies_to mismatch in a
     /// boundary declared by layers.toml).
     MergedSeamValidationFailed,
+    /// `pice evaluate --background` — Stack Loops background evaluation
+    /// requires `.pice/layers.toml`; without it there are no layer cohorts
+    /// to dispatch and the daemon must fail closed instead of writing a
+    /// synthetic Passed manifest.
+    LayersTomlMissing,
     /// `pice evaluate <plan> --json` — evaluation ran to completion but at
     /// least one layer finished in `Failed` status (SPRT reject, ADTS
     /// exhaustion, or a failed seam check). Phase 4 contract criterion #11
@@ -296,6 +301,7 @@ impl ExitJsonStatus {
             Self::WorkflowValidationFailed => "workflow-validation-failed",
             Self::SeamFloorViolation => "seam-floor-violation",
             Self::MergedSeamValidationFailed => "merged-seam-validation-failed",
+            Self::LayersTomlMissing => "layers-toml-missing",
             Self::EvaluationFailed => "evaluation-failed",
             Self::MetricsPersistFailed => "metrics-persist-failed",
             Self::ReviewGateRejected => "review-gate-rejected",
@@ -352,6 +358,7 @@ impl ExitJsonStatus {
             | Self::WorkflowValidationFailed
             | Self::SeamFloorViolation
             | Self::MergedSeamValidationFailed
+            | Self::LayersTomlMissing
             | Self::MetricsPersistFailed
             | Self::ReviewGateConflict
             | Self::MissingDecision
@@ -1160,6 +1167,7 @@ mod tests {
             ExitJsonStatus::WorkflowValidationFailed,
             ExitJsonStatus::SeamFloorViolation,
             ExitJsonStatus::MergedSeamValidationFailed,
+            ExitJsonStatus::LayersTomlMissing,
             ExitJsonStatus::EvaluationFailed,
             ExitJsonStatus::MetricsPersistFailed,
             ExitJsonStatus::ReviewGateRejected,
@@ -1210,6 +1218,7 @@ mod tests {
         assert_eq!(ExitJsonStatus::LogsStreamEnded.exit_code(), 0);
         // Operational family → 1
         assert_eq!(ExitJsonStatus::PlanNotFound.exit_code(), 1);
+        assert_eq!(ExitJsonStatus::LayersTomlMissing.exit_code(), 1);
         assert_eq!(ExitJsonStatus::ReviewGateConflict.exit_code(), 1);
         assert_eq!(ExitJsonStatus::MissingDecision.exit_code(), 1);
         assert_eq!(ExitJsonStatus::MetricsPersistFailed.exit_code(), 1);
@@ -1227,6 +1236,7 @@ mod tests {
             ExitJsonStatus::WorkflowValidationFailed,
             ExitJsonStatus::SeamFloorViolation,
             ExitJsonStatus::MergedSeamValidationFailed,
+            ExitJsonStatus::LayersTomlMissing,
             ExitJsonStatus::EvaluationFailed,
             ExitJsonStatus::MetricsPersistFailed,
             ExitJsonStatus::ReviewGateRejected,

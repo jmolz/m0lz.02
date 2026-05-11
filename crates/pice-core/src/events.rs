@@ -34,14 +34,13 @@ use crate::protocol::subscribe::SubscribeManifestResponse;
 use serde::{Deserialize, Serialize};
 
 /// Phase 7 NDJSON envelope emitted by `pice status --follow --stream-json`
-/// (and by `pice logs --follow --stream-json` — same envelope, different
-/// payloads in the `event` variant).
+/// and `pice logs --follow --stream-json`.
 ///
 /// Each line of stdout in `--stream-json` mode is one `StreamJsonFrame`.
 /// The envelope is heterogeneous so consumers pattern-match on `kind`:
 ///
 /// - First line: `snapshot` — initial state at subscribe time.
-/// - Middle lines: `event` — live manifest events.
+/// - Middle lines: `event` or `log-chunk` — live manifest/log frames.
 /// - Last line before exit: `terminal` — exit code signalling stream close.
 ///
 /// Callers that want a homogeneous stream can filter on `kind == "event"`.
@@ -55,6 +54,8 @@ pub enum StreamJsonFrame {
     Snapshot { snapshot: SubscribeManifestResponse },
     /// A live manifest event forwarded from the subscribe stream.
     Event { event: ManifestEventPayload },
+    /// A live log chunk forwarded from the logs stream.
+    LogChunk { chunk: LogChunk },
     /// End-of-stream marker. Carries the process exit code the CLI will
     /// return after the stream closes (0 / 2 / 3 / 4 / 5 per
     /// `ExitJsonStatus::exit_code`). Exactly one terminal frame per stream.
@@ -381,6 +382,24 @@ mod tests {
         assert!(wire.starts_with(r#"{"kind":"event""#), "got: {wire}");
         let back: StreamJsonFrame = serde_json::from_str(&wire).unwrap();
         assert!(matches!(back, StreamJsonFrame::Event { .. }));
+    }
+
+    #[test]
+    fn stream_json_frame_log_chunk_roundtrip() {
+        let chunk = LogChunk {
+            feature_id: "f".to_string(),
+            run_id: "r-1".to_string(),
+            layer: "backend".to_string(),
+            text: "x\n".to_string(),
+            timestamp: "2026-04-21T10:00:00Z".to_string(),
+            terminal: false,
+            reason: None,
+        };
+        let frame = StreamJsonFrame::LogChunk { chunk };
+        let wire = serde_json::to_string(&frame).unwrap();
+        assert!(wire.starts_with(r#"{"kind":"log-chunk""#), "got: {wire}");
+        let back: StreamJsonFrame = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(back, StreamJsonFrame::LogChunk { .. }));
     }
 
     #[test]

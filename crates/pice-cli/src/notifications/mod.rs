@@ -117,7 +117,16 @@ pub fn notify(
     body: &str,
     dispatcher: &dyn Dispatcher,
 ) {
-    notify_with_fallback(state, cfg, kind, feature_id, title, body, dispatcher, &StderrFallbackWriter);
+    notify_with_fallback(
+        state,
+        cfg,
+        kind,
+        feature_id,
+        title,
+        body,
+        dispatcher,
+        &StderrFallbackWriter,
+    );
 }
 
 /// Internal variant of [`notify`] with a pluggable fallback writer. Called
@@ -417,11 +426,7 @@ mod tests {
                     ) {
                         self.0.push_str(&format!("{value:?}"));
                     }
-                    fn record_str(
-                        &mut self,
-                        _field: &tracing::field::Field,
-                        value: &str,
-                    ) {
+                    fn record_str(&mut self, _field: &tracing::field::Field, value: &str) {
                         self.0.push_str(value);
                     }
                 }
@@ -434,7 +439,9 @@ mod tests {
             }
         }
 
-        let recorder = DebugRecorder { events: events_clone };
+        let recorder = DebugRecorder {
+            events: events_clone,
+        };
 
         // Install a test-scoped subscriber. `try_init()` may fail when
         // another test already set a global default — guard with `let _ =`.

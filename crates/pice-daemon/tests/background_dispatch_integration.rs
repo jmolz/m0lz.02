@@ -12,12 +12,9 @@
 //! - A queued manifest lands on disk at `$PICE_STATE_DIR/<namespace>/<feature>.manifest.json`
 //!   with `overall_status = "queued"` and `run_id` populated.
 //!
-//! The spawned future in this test does NOT run a real provider —
-//! it's a plan file with a contract but no `.pice/layers.toml`, which
-//! the background evaluate path handles via the "v0.1 fallback"
-//! Skipped-layer branch. That keeps the test hermetic (no network)
-//! while still exercising the dispatch handshake + Queued →
-//! InProgress transition + FeatureComplete emission.
+//! The spawned future uses a minimal `.pice/layers.toml` so background
+//! evaluate stays on the Stack Loops surface; projects without layers
+//! fail closed before dispatch.
 
 use std::time::{Duration, Instant};
 
@@ -74,6 +71,22 @@ fn init_git(root: &std::path::Path) {
         .output();
 }
 
+fn write_layers_toml(root: &std::path::Path) {
+    let pice_dir = root.join(".pice");
+    std::fs::create_dir_all(&pice_dir).unwrap();
+    std::fs::write(
+        pice_dir.join("layers.toml"),
+        r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#,
+    )
+    .unwrap();
+}
+
 /// Dispatch returns within the p95 <500ms SLO and produces the
 /// expected `background-dispatched` JSON response shape.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -83,6 +96,7 @@ async fn background_dispatch_returns_within_slo_with_expected_shape() {
 
     let project = tempfile::tempdir().unwrap();
     init_git(project.path());
+    write_layers_toml(project.path());
     let plan_path = write_plan_with_contract(project.path(), "slo-feature");
 
     let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
@@ -148,24 +162,25 @@ async fn second_dispatch_for_live_feature_surfaces_feature_already_running() {
 
     let project = tempfile::tempdir().unwrap();
     init_git(project.path());
+    write_layers_toml(project.path());
     let plan_path = write_plan_with_contract(project.path(), "busy-feature");
 
     let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
 
-    // The spawned future for the "v0.1 fallback" path returns almost
-    // immediately, so we need to race the second dispatch against
-    // the supervisor cleanup. Seed a VERY long-running dummy task
-    // under the same feature id first to widen the window.
+    // Seed a VERY long-running dummy task under the same feature id first
+    // to widen the duplicate-dispatch window.
     //
     // We do this by calling `spawn` directly on the job manager with
     // a gate future, then attempting a CLI-level dispatch. The second
     // dispatch should observe the live job via `run_id_for`.
     let gate = std::sync::Arc::new(tokio::sync::Notify::new());
     let gate_clone = gate.clone();
+    let first_run_id = ctx.jobs().next_run_id();
     let first_run_id = ctx
         .jobs()
         .spawn(
             "busy-feature".to_string(),
+            first_run_id,
             std::sync::Arc::new(pice_core::jobs::JobEnv {
                 state_dir: state_tmp.path().to_path_buf(),
                 project_root: project.path().to_path_buf(),
@@ -226,6 +241,7 @@ async fn inline_mode_rejects_background_dispatch() {
 
     let project = tempfile::tempdir().unwrap();
     init_git(project.path());
+    write_layers_toml(project.path());
     let plan_path = write_plan_with_contract(project.path(), "inline-feature");
 
     let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
@@ -265,6 +281,52 @@ async fn inline_mode_rejects_background_dispatch() {
     }
 }
 
+/// `pice evaluate --background` must fail closed when Stack Loops has
+/// not been initialized instead of dispatching a job that can later write
+/// a synthetic Passed manifest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_evaluate_without_layers_toml_rejects_dispatch() {
+    let state_tmp = tempfile::tempdir().unwrap();
+    let _guard = StateDirGuard::new(state_tmp.path());
+
+    let project = tempfile::tempdir().unwrap();
+    init_git(project.path());
+    let plan_path = write_plan_with_contract(project.path(), "missing-layers-feature");
+
+    let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
+    let req = CommandRequest::Evaluate(EvaluateRequest {
+        plan_path,
+        json: true,
+        background: true,
+        wait: false,
+        timeout_secs: None,
+    });
+    let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
+
+    match resp {
+        CommandResponse::ExitJson { code, value } => {
+            assert_eq!(code, ExitJsonStatus::LayersTomlMissing.exit_code());
+            assert_eq!(
+                value["status"].as_str().unwrap(),
+                ExitJsonStatus::LayersTomlMissing.as_str()
+            );
+            assert_eq!(
+                ctx.jobs().active_count(),
+                0,
+                "missing layers must reject before spawning a background job"
+            );
+        }
+        other => panic!("expected LayersTomlMissing ExitJson, got {other:?}"),
+    }
+
+    let manifest_path =
+        VerificationManifest::manifest_path_for("missing-layers-feature", project.path()).unwrap();
+    assert!(
+        !manifest_path.exists(),
+        "missing layers must not write a Queued or Passed manifest"
+    );
+}
+
 /// 50 back-to-back dispatches across 50 distinct feature ids all
 /// return under 500ms at p95. Exercises the dispatch handshake cost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -274,6 +336,7 @@ async fn fifty_dispatches_meet_p95_slo() {
 
     let project = tempfile::tempdir().unwrap();
     init_git(project.path());
+    write_layers_toml(project.path());
     let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
 
     let mut elapsed = Vec::with_capacity(50);

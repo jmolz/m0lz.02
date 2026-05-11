@@ -200,6 +200,7 @@ async fn global_semaphore_bounds_concurrent_provider_holds() {
         let fid = feat.to_string();
         jobs.spawn(
             feat.to_string(),
+            jobs.next_run_id(),
             env_clone,
             move |_env, permit, _cancel| async move {
                 // Past the permit-acquire barrier — increment in-flight.
@@ -305,6 +306,7 @@ async fn cancel_one_feature_leaves_others_running() {
         let fid = feat.to_string();
         jobs.spawn(
             feat.to_string(),
+            jobs.next_run_id(),
             env_clone,
             move |_env, _permit, cancel| async move {
                 // Cooperative cancel: wait on `cancel` OR the gate,

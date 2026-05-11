@@ -82,6 +82,7 @@ async fn snapshot_survives_process_env_mutation_mid_flight() {
     manager
         .spawn(
             "feat-snap",
+            manager.next_run_id(),
             env.clone(),
             move |env, _permit, _cancel| async move {
                 proceed_rx.await.expect("proceed");

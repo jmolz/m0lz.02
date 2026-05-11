@@ -14,7 +14,7 @@ use dashmap::DashMap;
 use pice_core::jobs::JobEnv;
 use pice_core::layers::manifest::VerificationManifest;
 use pice_core::workflow::schema::MAX_GLOBAL_PROVIDER_CONCURRENCY_HARD_CAP;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -36,6 +36,16 @@ pub type RunId = String;
 pub struct SpawnError {
     pub feature_id: String,
     pub run_id: RunId,
+}
+
+struct CompletionSignal(Option<oneshot::Sender<()>>);
+
+impl Drop for CompletionSignal {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
 }
 
 /// Per-feature live state held in the manager's DashMap.
@@ -137,13 +147,12 @@ impl FeatureJobManager {
     ///    on every completion path it removes the feature from the
     ///    DashMap.
     ///
-    /// Returns the assigned run id. The caller MUST pre-write a
-    /// `ManifestStatus::Queued` manifest to disk BEFORE calling `spawn`
-    /// — the spawned future assumes the manifest exists when it
-    /// transitions `Queued → InProgress`.
+    /// Returns the assigned run id. The caller supplies the run id so
+    /// admission and durable manifest identity cannot diverge.
     pub fn spawn<F, Fut>(
         &self,
         feature_id: impl Into<String>,
+        run_id: RunId,
         env: Arc<JobEnv>,
         future_builder: F,
     ) -> Result<RunId, SpawnError>
@@ -151,51 +160,85 @@ impl FeatureJobManager {
         F: FnOnce(Arc<JobEnv>, OwnedSemaphorePermit, CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = Result<VerificationManifest>> + Send + 'static,
     {
-        let feature_id = feature_id.into();
+        self.spawn_inner(feature_id.into(), run_id, env, None, future_builder)
+    }
 
-        // Atomic insert: check-and-claim in one critical section so a
-        // racing dispatch can't register a duplicate run under the same
-        // feature id.
-        let run_id = self.next_run_id();
-        let cancel = CancellationToken::new();
+    /// Spawn a background feature that must not acquire provider
+    /// concurrency or invoke the orchestrator until `start_rx` resolves.
+    ///
+    /// Used by dispatch handlers that must first atomically admit the job,
+    /// then persist a durable `Queued` manifest, then release execution.
+    pub fn spawn_after_signal<F, Fut>(
+        &self,
+        feature_id: impl Into<String>,
+        run_id: RunId,
+        env: Arc<JobEnv>,
+        start_rx: oneshot::Receiver<()>,
+        future_builder: F,
+    ) -> Result<RunId, SpawnError>
+    where
+        F: FnOnce(Arc<JobEnv>, OwnedSemaphorePermit, CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<VerificationManifest>> + Send + 'static,
+    {
+        self.spawn_inner(
+            feature_id.into(),
+            run_id,
+            env,
+            Some(start_rx),
+            future_builder,
+        )
+    }
 
-        // Clone references used inside the spawned future.
-        let global_sem = Arc::clone(&self.global_sem);
-        let env_for_task = Arc::clone(&env);
-        let cancel_for_task = cancel.clone();
-
-        let worker_handle = tokio::spawn(async move {
-            // SAFETY note: `acquire_owned` returns `Err` only if the
-            // underlying semaphore is closed. We never `close()` it, so
-            // this path is unreachable in production. Map the error to
-            // anyhow for the JoinHandle's Result type.
-            let permit = match global_sem.acquire_owned().await {
-                Ok(p) => p,
-                Err(e) => {
-                    return Err(anyhow::anyhow!("global provider semaphore closed: {e}"));
-                }
-            };
-            future_builder(env_for_task, permit, cancel_for_task).await
-        });
-
+    fn spawn_inner<F, Fut>(
+        &self,
+        feature_id: String,
+        run_id: RunId,
+        env: Arc<JobEnv>,
+        start_rx: Option<oneshot::Receiver<()>>,
+        future_builder: F,
+    ) -> Result<RunId, SpawnError>
+    where
+        F: FnOnce(Arc<JobEnv>, OwnedSemaphorePermit, CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<VerificationManifest>> + Send + 'static,
+    {
         // Register in the DashMap. Two concurrent `spawn` calls for the
         // same feature_id race here — DashMap's `entry` API serializes.
-        // If we find a live entry, we abort the worker we just spawned
-        // (it's holding no permit yet — acquire_owned awaits at the top)
-        // and return `SpawnError` with the pre-existing run id.
+        // If we find a live entry, return `SpawnError` with the
+        // pre-existing run id without starting another worker.
+        let cancel = CancellationToken::new();
+        let (completion_tx, completion_rx) = oneshot::channel::<()>();
         let entry = self.jobs.entry(feature_id.clone());
         match entry {
             dashmap::Entry::Occupied(slot) => {
                 let existing_run_id = slot.get().run_id.clone();
-                // Abort the spawned worker — the Drop of the JoinHandle
-                // won't cancel the task, we need an explicit abort.
-                worker_handle.abort();
                 return Err(SpawnError {
                     feature_id,
                     run_id: existing_run_id,
                 });
             }
             dashmap::Entry::Vacant(slot) => {
+                let global_sem = Arc::clone(&self.global_sem);
+                let env_for_task = Arc::clone(&env);
+                let cancel_for_task = cancel.clone();
+                let worker_handle = tokio::spawn(async move {
+                    let _completion_signal = CompletionSignal(Some(completion_tx));
+                    if let Some(start_rx) = start_rx {
+                        start_rx.await.map_err(|_| {
+                            anyhow::anyhow!("background job start signal dropped before release")
+                        })?;
+                    }
+                    // SAFETY note: `acquire_owned` returns `Err` only if the
+                    // underlying semaphore is closed. We never `close()` it, so
+                    // this path is unreachable in production. Map the error to
+                    // anyhow for the JoinHandle's Result type.
+                    let permit = match global_sem.acquire_owned().await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return Err(anyhow::anyhow!("global provider semaphore closed: {e}"));
+                        }
+                    };
+                    future_builder(env_for_task, permit, cancel_for_task).await
+                });
                 slot.insert(JobHandle {
                     run_id: run_id.clone(),
                     cancel: cancel.clone(),
@@ -213,46 +256,7 @@ impl FeatureJobManager {
         let feat_for_supervisor = feature_id.clone();
         let run_id_for_supervisor = run_id.clone();
         tokio::spawn(async move {
-            // We can't just hold a reference to the JoinHandle stored in
-            // the DashMap (the map may return None during panic cleanup)
-            // so instead we poll-for-completion via a small polling loop
-            // on a cloned Waker-less path: check the handle present in
-            // the map, take it out if finished, then act.
-            //
-            // Simpler: just block on the join handle inside a small
-            // guard-scoped await. To do that we need to own the handle,
-            // which conflicts with the caller's ability to await it via
-            // `FeatureJobManager::join`. Resolution: use `tokio::select!`
-            // between a periodic wake and a cancellation signal is too
-            // complex — the correct shape is: supervisor owns NOTHING;
-            // it polls via `is_finished` + yields. But that's busy work.
-            //
-            // Cleanest approach: use a `JoinSet` per feature (overkill
-            // for one task) OR thread the cleanup through a `oneshot`
-            // channel the worker signals before completing. The worker
-            // task signaling via oneshot keeps the API clean.
-            //
-            // We take the OneShot approach: this supervisor waits on a
-            // completion oneshot driven by an inner wrapper around
-            // `future_builder`.
-            //
-            // However, implementing that now requires reshaping the
-            // spawn flow. Defer: use a simple `yield_now` loop with
-            // `is_finished()`.
-            loop {
-                // Tight loop is unacceptable — sleep in 100ms ticks.
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                // Has the worker finished? If yes, extract + process.
-                // If the feature was already removed (e.g. by
-                // `drain_on_shutdown`), exit the supervisor.
-                let finished = jobs_for_supervisor
-                    .get(&feat_for_supervisor)
-                    .map(|entry| entry.join_handle.is_finished())
-                    .unwrap_or(true);
-                if finished {
-                    break;
-                }
-            }
+            let _ = completion_rx.await;
 
             // Claim the handle for awaiting by removing the entry.
             let handle = jobs_for_supervisor
@@ -428,6 +432,7 @@ mod tests {
         let run_id = manager
             .spawn(
                 "feat-happy",
+                manager.next_run_id(),
                 env,
                 move |_env, _permit, _cancel| async move { Ok(stub_manifest("feat-happy")) },
             )
@@ -458,9 +463,11 @@ mod tests {
         // the second dispatch against it.
         let gate = Arc::new(tokio::sync::Notify::new());
         let gate_clone = gate.clone();
+        let run_id_first = manager.next_run_id();
         let run_id_first = manager
             .spawn(
                 "feat-dup",
+                run_id_first,
                 env.clone(),
                 move |_env, _permit, _cancel| async move {
                     gate_clone.notified().await;
@@ -470,9 +477,12 @@ mod tests {
             .expect("first spawn");
 
         let err = manager
-            .spawn("feat-dup", env, move |_env, _permit, _cancel| async move {
-                Ok(stub_manifest("feat-dup"))
-            })
+            .spawn(
+                "feat-dup",
+                manager.next_run_id(),
+                env,
+                move |_env, _permit, _cancel| async move { Ok(stub_manifest("feat-dup")) },
+            )
             .expect_err("second spawn should conflict");
 
         assert_eq!(err.feature_id, "feat-dup");
@@ -489,6 +499,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_after_signal_waits_before_global_semaphore() {
+        let events = EventBus::new();
+        let manager = FeatureJobManager::new(events, 1);
+        let env = stub_env();
+
+        let holder_started = Arc::new(tokio::sync::Notify::new());
+        let release_holder = Arc::new(tokio::sync::Notify::new());
+        let holder_started_clone = holder_started.clone();
+        let release_holder_clone = release_holder.clone();
+        manager
+            .spawn(
+                "feat-holder",
+                manager.next_run_id(),
+                env.clone(),
+                move |_env, permit, _cancel| async move {
+                    let _permit = permit;
+                    holder_started_clone.notify_one();
+                    release_holder_clone.notified().await;
+                    Ok(stub_manifest("feat-holder"))
+                },
+            )
+            .expect("spawn holder");
+
+        tokio::time::timeout(Duration::from_secs(1), holder_started.notified())
+            .await
+            .expect("holder should acquire the only permit");
+        assert_eq!(manager.global_sem.available_permits(), 0);
+
+        let (start_tx, start_rx) = oneshot::channel();
+        let gated_started = Arc::new(tokio::sync::Notify::new());
+        let gated_started_clone = gated_started.clone();
+        manager
+            .spawn_after_signal(
+                "feat-gated",
+                manager.next_run_id(),
+                env,
+                start_rx,
+                move |_env, permit, _cancel| async move {
+                    let _permit = permit;
+                    gated_started_clone.notify_one();
+                    Ok(stub_manifest("feat-gated"))
+                },
+            )
+            .expect("spawn gated");
+
+        release_holder.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            manager.global_sem.available_permits(),
+            1,
+            "gated job must not acquire provider concurrency before release"
+        );
+
+        start_tx.send(()).expect("release gated job");
+        tokio::time::timeout(Duration::from_secs(1), gated_started.notified())
+            .await
+            .expect("gated job should start after release");
+
+        for _ in 0..50 {
+            if manager.active_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(manager.active_count(), 0);
+    }
+
+    #[tokio::test]
     async fn cancel_fires_token_on_live_feature() {
         let events = EventBus::new();
         let manager = FeatureJobManager::new(events, 4);
@@ -500,6 +578,7 @@ mod tests {
         manager
             .spawn(
                 "feat-cancel",
+                manager.next_run_id(),
                 env,
                 move |_env, _permit, cancel| async move {
                     // Wait for cancel OR a long delay.
@@ -549,6 +628,7 @@ mod tests {
         let run_id = manager
             .spawn(
                 "feat-panic",
+                manager.next_run_id(),
                 env,
                 move |_env, _permit, _cancel| async move {
                     panic!("intentional panic for supervisor test");
@@ -597,6 +677,7 @@ mod tests {
             manager
                 .spawn(
                     name,
+                    manager.next_run_id(),
                     env.clone(),
                     move |_env, _permit, _cancel| async move {
                         g.notified().await;
@@ -629,10 +710,15 @@ mod tests {
         let env = stub_env();
 
         manager
-            .spawn("feat-drain", env, move |_env, _permit, cancel| async move {
-                cancel.cancelled().await;
-                Ok(stub_manifest("feat-drain"))
-            })
+            .spawn(
+                "feat-drain",
+                manager.next_run_id(),
+                env,
+                move |_env, _permit, cancel| async move {
+                    cancel.cancelled().await;
+                    Ok(stub_manifest("feat-drain"))
+                },
+            )
             .expect("spawn");
 
         // Give the worker time to register the cancel handle.
@@ -653,6 +739,7 @@ mod tests {
         manager
             .spawn(
                 "feat-stuck",
+                manager.next_run_id(),
                 env,
                 move |_env, _permit, _cancel| async move {
                     tokio::time::sleep(Duration::from_secs(10)).await;

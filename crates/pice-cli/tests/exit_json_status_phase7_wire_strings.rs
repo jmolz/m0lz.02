@@ -20,9 +20,7 @@
 
 use assert_cmd::Command;
 use pice_core::cli::ExitJsonStatus;
-use pice_core::layers::manifest::{
-    LayerResult, LayerStatus, ManifestStatus, VerificationManifest,
-};
+use pice_core::layers::manifest::{LayerResult, LayerStatus, ManifestStatus, VerificationManifest};
 use std::fs;
 use std::path::Path;
 
@@ -139,7 +137,10 @@ fn failed_interrupted_wire_string_is_pinned() {
     //
     // macOS tempdir returns symlinked paths (/var → /private/var); canonicalize
     // so the hash here matches `std::env::current_dir()` inside the binary.
-    let project_root = dir.path().canonicalize().unwrap_or_else(|_| dir.path().to_path_buf());
+    let project_root = dir
+        .path()
+        .canonicalize()
+        .unwrap_or_else(|_| dir.path().to_path_buf());
     let feature_id = "feat-fi-p7cr10";
 
     let manifest_path = {
@@ -212,9 +213,9 @@ fn failed_interrupted_wire_string_is_pinned() {
     });
 
     let layers = json["layers"].as_array().expect("layers array in manifest");
-    let has_failed_interrupted = layers.iter().any(|l| {
-        l["halted_by"].as_str() == Some(ExitJsonStatus::FailedInterrupted.as_str())
-    });
+    let has_failed_interrupted = layers
+        .iter()
+        .any(|l| l["halted_by"].as_str() == Some(ExitJsonStatus::FailedInterrupted.as_str()));
     assert!(
         has_failed_interrupted,
         "at least one layer must carry halted_by == ExitJsonStatus::FailedInterrupted.as_str() \

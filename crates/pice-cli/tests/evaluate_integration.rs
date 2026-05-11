@@ -438,6 +438,36 @@ paths = ["src/**"]
     assert!(json["error"].is_string());
 }
 
+/// Phase 7 remediation: background evaluate is Stack-Loops-only. Without
+/// `.pice/layers.toml`, it must reject before dispatch and emit a typed
+/// structured status instead of writing a synthetic Passed manifest.
+#[test]
+fn evaluate_background_json_missing_layers_toml_emits_exit_json_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    git_init(dir.path());
+    let plan = write_minimal_plan(dir.path());
+
+    let output = pice_cmd()
+        .current_dir(dir.path())
+        .args(["evaluate", plan.to_str().unwrap(), "--background", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "missing layers.toml must exit 1; stderr: {}, stdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!("layers-toml-missing must emit JSON on stdout; parse error: {e}\n{stdout}")
+    });
+    assert_eq!(json["status"], ExitJsonStatus::LayersTomlMissing.as_str());
+    assert!(json["layers_path"].is_string());
+}
+
 /// Phase 3 round-4 adversarial fix: workflow.yaml validation failure under
 /// `--json` must emit ExitJson on stdout with exit 1, not plain text on
 /// stderr. Two of three round-2 ExitJson statuses lacked CLI binary tests

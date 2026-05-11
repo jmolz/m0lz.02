@@ -63,10 +63,10 @@ const INVALID_PARAMS_CODE: i32 = -32602;
 ///
 /// Flow:
 /// 1. Parse `SubscribeManifestRequest` from `req.params`.
-/// 2. Scan the state dir for matching manifests → `snapshots`.
-/// 3. Placeholder `run_ids` (Task 7 wires `FeatureJobManager::run_id_for`).
-/// 4. Write the snapshot as the RPC response body.
-/// 5. Acquire a per-feature (or wildcard) event receiver.
+/// 2. Acquire a per-feature (or wildcard) event receiver.
+/// 3. Scan the state dir for matching manifests → `snapshots`.
+/// 4. Snapshot live `feature_id → run_id` state.
+/// 5. Write the snapshot as the RPC response body.
 /// 6. Loop: `tokio::select!` between inbound read + outbound event, writing
 ///    `manifest/event` notifications until one side closes.
 pub async fn manifest(
@@ -87,6 +87,13 @@ pub async fn manifest(
         }
     };
 
+    // Subscribe before the snapshot scan so terminal events emitted during
+    // filesystem reads are queued in this receiver instead of lost.
+    let mut rx = match parsed.feature_id.as_deref() {
+        Some(feat) => ctx.events().subscribe_feature(feat),
+        None => ctx.events().subscribe_wildcard(),
+    };
+
     // Assemble the snapshot.
     let snapshots = match load_manifest_snapshots(ctx, parsed.feature_id.as_deref()) {
         Ok(v) => v,
@@ -101,22 +108,12 @@ pub async fn manifest(
         }
     };
 
-    // Task 7 will wire `ctx.job_manager().run_id_for(...)` here. For now the
-    // live-runs map is empty — subscribers see an empty `run_ids` and can
-    // still correlate events via the `feature_id` + `run_id` fields on each
-    // payload as they arrive.
-    let run_ids: BTreeMap<String, String> = BTreeMap::new();
+    let run_ids: BTreeMap<String, String> = ctx.jobs().live_runs();
 
     let response_body = SubscribeManifestResponse { snapshots, run_ids };
     let value = serde_json::to_value(&response_body)?;
     let resp = DaemonResponse::success(req.id, value);
     conn.write_response(&resp).await?;
-
-    // Acquire the event receiver.
-    let mut rx = match parsed.feature_id.as_deref() {
-        Some(feat) => ctx.events().subscribe_feature(feat),
-        None => ctx.events().subscribe_wildcard(),
-    };
 
     // Stream loop.
     loop {
@@ -267,7 +264,15 @@ pub async fn logs(
         }
     };
 
-    // Snapshot history (subject to `include_history` flag).
+    let rx = if parsed.follow {
+        Some(ctx.logs().subscribe(&parsed.feature_id).await)
+    } else {
+        None
+    };
+
+    // Snapshot history (subject to `include_history` flag). Follow-mode
+    // subscribes first so live chunks emitted during the snapshot read are
+    // queued in the receiver and drained after the response body.
     let history = if parsed.include_history {
         ctx.logs()
             .snapshot(&parsed.feature_id, parsed.layer.as_deref())
@@ -293,11 +298,7 @@ pub async fn logs(
         return Ok(());
     }
 
-    // Subscribe BEFORE the snapshot-vs-live race could drop frames. Callers
-    // that want no-duplicates behavior dedup on (timestamp, text) — the
-    // broadcast stream can overlap the snapshot by at most a handful of
-    // frames, which is inherent to the "snapshot then subscribe" pattern.
-    let mut rx = ctx.logs().subscribe(&parsed.feature_id).await;
+    let mut rx = rx.expect("follow=true initializes log receiver");
 
     loop {
         tokio::select! {
