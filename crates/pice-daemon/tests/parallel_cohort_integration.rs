@@ -346,6 +346,7 @@ fn make_cfg<'a>(
         pice_config,
         workflow: wf,
         merged_seams: seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     }
 }

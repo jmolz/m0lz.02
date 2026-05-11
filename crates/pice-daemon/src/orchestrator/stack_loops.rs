@@ -76,6 +76,10 @@ pub struct StackLoopsConfig<'a> {
     /// violations BEFORE invoking the orchestrator. This field is the
     /// execution-time source of truth; the orchestrator does not re-merge.
     pub merged_seams: &'a BTreeMap<String, Vec<String>>,
+    /// Optional dispatch-time snapshot of layer contract paths. Background
+    /// jobs pass this from `JobEnv` so contract path discovery cannot drift
+    /// after the job has been admitted but before provider work starts.
+    pub contract_paths: Option<&'a BTreeMap<String, PathBuf>>,
     /// Phase 7: manifest persistence + event-bus publication handle. Every
     /// manifest state transition in the orchestrator goes through this
     /// saver so the save + event emission are atomic. Inline mode and
@@ -281,32 +285,6 @@ pub async fn run_stack_loops_with_cancel(
         .unwrap_or_else(|| VerificationManifest::new(&feature_id, project_root));
     manifest.overall_status = ManifestStatus::InProgress;
 
-    // Persist the in-progress checkpoint (fresh or resumed) so that a
-    // mid-run crash leaves the manifest discoverable by the next evaluate.
-    // Phase 7: the per-cohort LayerStarted loop below is the canonical
-    // place for the "layer is starting" event. The initial checkpoint
-    // here predates any specific layer transition — it just locks in the
-    // resumed/fresh manifest so crash discovery works. We classify its
-    // intent as the first cohort's first layer going LayerStarted when a
-    // cohort exists; otherwise we skip the save (an empty DAG has nothing
-    // to checkpoint beyond what the dispatcher's `Queued` write already
-    // captured).
-    if let Some(ref path) = manifest_path {
-        if let Some(first_cohort) = dag.cohorts.first() {
-            if let Some(first_layer) = first_cohort.first() {
-                if let Err(e) = cfg.saver.save_and_emit(
-                    &manifest,
-                    path,
-                    SaveIntent::LayerStarted {
-                        layer: first_layer.clone(),
-                    },
-                ) {
-                    warn!("failed to persist initial manifest: {e}");
-                }
-            }
-        }
-    }
-
     // Phase 5 cohort parallelism: compute the concurrency cap once per
     // evaluation. `defaults.max_parallelism: None` → `num_cpus::get()`
     // (defensive minimum of 1). Hard-capped at
@@ -350,6 +328,24 @@ pub async fn run_stack_loops_with_cancel(
     // covered by `parallel_cohort_integration.rs`.
     for (cohort_idx, cohort) in dag.cohorts.iter().enumerate() {
         debug!(cohort = cohort_idx, layers = ?cohort, "processing cohort");
+
+        // Phase 7: emit exactly one LayerStarted event per layer in DAG
+        // order as the cohort begins. This is the canonical start-event
+        // site; background dispatch's Queued→InProgress checkpoint is a
+        // no-event save specifically to avoid duplicating the first layer.
+        if let Some(ref path) = manifest_path {
+            for layer_name in cohort {
+                if let Err(e) = cfg.saver.save_and_emit(
+                    &manifest,
+                    path,
+                    SaveIntent::LayerStarted {
+                        layer: layer_name.clone(),
+                    },
+                ) {
+                    warn!(layer = %layer_name, "failed to persist LayerStarted checkpoint: {e}");
+                }
+            }
+        }
 
         // Partition cohort into immediate results (skip / missing-def /
         // empty-diff) and "real work" that runs the adaptive pipeline.
@@ -496,7 +492,8 @@ pub async fn run_stack_loops_with_cancel(
                 continue;
             }
 
-            let contract_content = load_layer_contract(project_root, layer_name, layer_def);
+            let contract_content =
+                load_layer_contract(project_root, layer_name, layer_def, cfg.contract_paths);
             let _prompt = build_layer_evaluation_prompt(
                 layer_name,
                 &contract_content,
@@ -1337,7 +1334,15 @@ fn load_layer_contract(
     project_root: &Path,
     layer_name: &str,
     layer_def: &pice_core::layers::LayerDef,
+    contract_paths: Option<&BTreeMap<String, PathBuf>>,
 ) -> String {
+    if let Some(paths) = contract_paths {
+        if let Some(full_path) = paths.get(layer_name) {
+            return std::fs::read_to_string(full_path)
+                .unwrap_or_else(|_| generic_layer_contract(layer_name));
+        }
+    }
+
     // Try layer's explicit contract path
     if let Some(ref contract_path) = layer_def.contract {
         let full_path = project_root.join(contract_path);
@@ -1355,6 +1360,10 @@ fn load_layer_contract(
     }
 
     // Fallback: generic contract
+    generic_layer_contract(layer_name)
+}
+
+fn generic_layer_contract(layer_name: &str) -> String {
     format!(
         "[criteria]\n{layer_name}_correctness = \"Code changes in the {layer_name} layer are correct and complete\""
     )
@@ -1664,6 +1673,7 @@ async fn try_run_layer_adaptive_owned(
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &dummy_seams,
+        contract_paths: None,
         saver: &saver,
     };
     try_run_layer_adaptive(
@@ -1834,6 +1844,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
+            contract_paths: None,
             saver: &saver,
         };
 
@@ -1937,6 +1948,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
+            contract_paths: None,
             saver: &saver,
         };
 
@@ -1987,7 +1999,7 @@ mod tests {
             environment_variants: None,
         };
 
-        let content = load_layer_contract(dir.path(), "backend", &def);
+        let content = load_layer_contract(dir.path(), "backend", &def, None);
         assert!(content.contains("[criteria]"));
         assert!(content.contains("backend"));
     }
@@ -2012,9 +2024,36 @@ mod tests {
             environment_variants: None,
         };
 
-        let content = load_layer_contract(dir.path(), "api", &def);
+        let content = load_layer_contract(dir.path(), "api", &def, None);
         assert!(content.contains("response_format"));
         assert!(content.contains("JSON"));
+    }
+
+    #[test]
+    fn load_layer_contract_prefers_dispatch_snapshot_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_dir = dir.path().join("snapshot");
+        let live_dir = dir.path().join("live");
+        std::fs::create_dir_all(&snapshot_dir).unwrap();
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let snapshot_path = snapshot_dir.join("backend.toml");
+        std::fs::write(&snapshot_path, "[criteria]\nsnapshot = \"dispatch\"").unwrap();
+        std::fs::write(live_dir.join("backend.toml"), "[criteria]\nlive = \"late\"").unwrap();
+
+        let def = LayerDef {
+            paths: vec!["src/**".to_string()],
+            always_run: false,
+            contract: Some("live/backend.toml".to_string()),
+            depends_on: Vec::new(),
+            layer_type: None,
+            environment_variants: None,
+        };
+        let mut snapshot = BTreeMap::new();
+        snapshot.insert("backend".to_string(), snapshot_path);
+
+        let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot));
+        assert!(content.contains("snapshot = \"dispatch\""));
+        assert!(!content.contains("live = \"late\""));
     }
 
     /// Seam-fail fixture: changes touch backend + infrastructure with
@@ -2078,6 +2117,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &seams,
+            contract_paths: None,
             saver: &saver,
         };
 

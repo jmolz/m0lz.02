@@ -123,6 +123,7 @@ async fn env_var_mismatch() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 
@@ -205,6 +206,7 @@ async fn orm_schema_drift() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 
@@ -285,6 +287,7 @@ async fn openapi_drift() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 
@@ -360,6 +363,7 @@ async fn clean_fixture_passes_all_checks() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 

@@ -214,6 +214,7 @@ async fn time_one_run(parallel: bool) -> Duration {
         pice_config: &pice_config,
         workflow: &wf,
         merged_seams: &seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 

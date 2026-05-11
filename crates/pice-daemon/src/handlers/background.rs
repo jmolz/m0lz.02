@@ -97,6 +97,20 @@ fn inline_unsupported_response(plan_path: &Path, json_mode: bool) -> CommandResp
     }
 }
 
+/// Return the typed inline-mode rejection when the current process is
+/// running under `PICE_DAEMON_INLINE=1`.
+///
+/// Callers that have pre-flight checks before `dispatch_background`
+/// should use this before those checks so inline mode always reports
+/// the Phase 7 typed error rather than a lower-level precondition such
+/// as `layers-toml-missing`.
+pub fn reject_inline_background_if_active(
+    plan_path: &Path,
+    json_mode: bool,
+) -> Option<CommandResponse> {
+    inline_mode_active().then(|| inline_unsupported_response(plan_path, json_mode))
+}
+
 /// Response shape for `ExitJsonStatus::FeatureAlreadyRunning`.
 fn feature_already_running_response(
     feature_id: &str,
@@ -145,7 +159,11 @@ fn background_dispatched_response(feature_id: &str, run_id: &str) -> CommandResp
 /// The snapshot captures every env-derived value at dispatch time so
 /// the spawned future never re-reads `std::env::var` or the daemon's
 /// live `PiceConfig`. Contract criterion #16 (`job_env_snapshot_integration.rs`).
-fn build_job_env(project_root: &Path, workflow_snapshot: WorkflowConfig) -> Result<JobEnv> {
+fn build_job_env(
+    project_root: &Path,
+    workflow_snapshot: WorkflowConfig,
+    contract_paths: BTreeMap<String, PathBuf>,
+) -> Result<JobEnv> {
     let state_dir = VerificationManifest::state_dir()
         .context("resolving ~/.pice/state directory for JobEnv snapshot")?;
 
@@ -159,10 +177,38 @@ fn build_job_env(project_root: &Path, workflow_snapshot: WorkflowConfig) -> Resu
         state_dir,
         project_root: project_root.to_path_buf(),
         workflow_snapshot,
-        contracts: BTreeMap::new(),
+        contracts: contract_paths,
         pice_state_dir_override,
         pice_user_workflow_file,
     })
+}
+
+/// Resolve layer contract paths at dispatch time so the spawned job
+/// uses a stable path snapshot instead of re-running discovery after
+/// it eventually acquires a provider permit.
+pub fn collect_contract_paths(project_root: &Path) -> BTreeMap<String, PathBuf> {
+    let layers_path = project_root.join(".pice/layers.toml");
+    let Ok(layers) = pice_core::layers::LayersConfig::load(&layers_path) else {
+        return BTreeMap::new();
+    };
+
+    let mut contracts = BTreeMap::new();
+    for layer in &layers.layers.order {
+        let Some(def) = layers.layers.defs.get(layer) else {
+            continue;
+        };
+        let path = def
+            .contract
+            .as_ref()
+            .map(|p| project_root.join(p))
+            .unwrap_or_else(|| {
+                project_root
+                    .join(".pice/contracts")
+                    .join(format!("{layer}.toml"))
+            });
+        contracts.insert(layer.clone(), path);
+    }
+    contracts
 }
 
 /// Pre-write the `ManifestStatus::Queued` manifest to disk. Must use
@@ -240,7 +286,12 @@ where
     let run_id = ctx.jobs().next_run_id();
 
     // Step 5: snapshot env into JobEnv.
-    let env = Arc::new(build_job_env(ctx.project_root(), workflow_snapshot)?);
+    let contract_paths = collect_contract_paths(ctx.project_root());
+    let env = Arc::new(build_job_env(
+        ctx.project_root(),
+        workflow_snapshot,
+        contract_paths,
+    )?);
 
     // Step 6: derive the manifest path. The actual Queued write happens
     // only after `spawn` admits this feature as the single live run.
@@ -293,15 +344,12 @@ where
 ///
 /// Loads the just-written Queued manifest from disk, flips
 /// `overall_status` to `InProgress`, stamps `run_id`, and saves via an
-/// [`EventEmittingSaver`] so subscribers observe the `LayerStarted`
-/// event. Used by both the evaluate and execute spawn closures before
-/// they invoke the real orchestrator.
+/// [`NullSaver`] so subscribers do not see a duplicate
+/// `LayerStarted`. The Stack Loops orchestrator emits one
+/// `LayerStarted` event per DAG layer when each cohort begins.
 ///
-/// `layer_hint` seeds the `LayerStarted` event's payload. For evaluate
-/// we pass the first cohort layer name (recovered inside the spawned
-/// future); for execute we pass the feature_id — execute does not have
-/// per-layer cohorts, so the event acts as the "feature started"
-/// marker on the wildcard channel.
+/// `layer_hint` is retained only for the `SaveIntent` shape consumed by
+/// the saver trait; [`NullSaver`] ignores it.
 pub fn transition_queued_to_in_progress(
     args: &OrchestratorSpawnArgs,
     events: &crate::events::EventBus,
@@ -315,8 +363,8 @@ pub fn transition_queued_to_in_progress(
     })?;
     manifest.overall_status = ManifestStatus::InProgress;
     manifest.run_id = Some(args.run_id.clone());
-    let saver = crate::events::EventEmittingSaver::new(events);
-    saver.save_and_emit(
+    let _ = events;
+    NullSaver.save_and_emit(
         &manifest,
         &args.manifest_path,
         SaveIntent::LayerStarted {
@@ -389,6 +437,38 @@ mod tests {
     }
 
     #[test]
+    fn collect_contract_paths_snapshots_explicit_and_default_paths() {
+        let project_tmp = tempfile::tempdir().unwrap();
+        let pice_dir = project_tmp.path().join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["backend", "frontend"]
+
+[layers.backend]
+paths = ["src/backend/**"]
+contract = "contracts/backend-contract.toml"
+
+[layers.frontend]
+paths = ["src/frontend/**"]
+"#,
+        )
+        .unwrap();
+
+        let paths = collect_contract_paths(project_tmp.path());
+        assert_eq!(
+            paths.get("backend").unwrap(),
+            &project_tmp.path().join("contracts/backend-contract.toml")
+        );
+        assert_eq!(
+            paths.get("frontend").unwrap(),
+            &project_tmp.path().join(".pice/contracts/frontend.toml")
+        );
+    }
+
+    #[test]
     fn background_dispatched_response_shape() {
         let resp = background_dispatched_response("feat-y", "r-abc");
         match resp {
@@ -416,7 +496,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transition_queued_to_in_progress_writes_in_progress_and_emits_event() {
+    async fn transition_queued_to_in_progress_writes_in_progress_without_event() {
         let state_tmp = tempfile::tempdir().unwrap();
         let _guard = StateDirGuard::new(state_tmp.path());
         let project_tmp = tempfile::tempdir().unwrap();
@@ -424,7 +504,9 @@ mod tests {
             write_queued_manifest("feat-transition", "r-xyz", project_tmp.path()).unwrap();
 
         let events = EventBus::new();
-        // Subscribe BEFORE the transition so we observe the event.
+        // Subscribe BEFORE the transition. The transition helper itself
+        // must not emit LayerStarted; stack_loops owns exactly-once
+        // LayerStarted emission for DAG layers.
         let mut rx = events.subscribe_feature("feat-transition");
 
         let args = OrchestratorSpawnArgs {
@@ -447,15 +529,11 @@ mod tests {
         let loaded = VerificationManifest::load(&manifest_path).unwrap();
         assert_eq!(loaded.overall_status, ManifestStatus::InProgress);
 
-        // Event should have fired.
-        let payload = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
-            .await
-            .expect("event received within 500ms")
-            .expect("receiver alive");
-        assert_eq!(
-            payload.event,
-            pice_core::events::ManifestEvent::LayerStarted
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "Queued→InProgress save must not emit a duplicate LayerStarted event"
         );
-        assert_eq!(payload.run_id, "r-xyz");
     }
 }

@@ -116,12 +116,13 @@ fn layers_toml_missing_response(
 /// without the background reconciler. A gate that times out is only
 /// caught when the next `pice evaluate` runs, not in real time. The
 /// full background reconciler lands in a follow-up.
-fn reconcile_expired_gates_inline(
+#[doc(hidden)]
+pub fn reconcile_expired_gates_inline(
     manifest: &mut pice_core::layers::manifest::VerificationManifest,
     now: chrono::DateTime<chrono::Utc>,
     project_root: &std::path::Path,
 ) -> usize {
-    use pice_core::gate::{GateDecision, GateDecisionOutcome};
+    use pice_core::gate::{GateDecision, GateDecisionOrigin, GateDecisionOutcome};
     use pice_core::layers::manifest::{GateStatus, LayerStatus};
 
     let db_path = project_root.join(".pice").join("metrics.db");
@@ -266,7 +267,14 @@ fn reconcile_expired_gates_inline(
                             GateStatus::Rejected,
                             LayerStatus::Failed,
                             0,
-                            Some(ExitJsonStatus::HALTED_GATE_REJECTED.to_string()),
+                            Some(
+                                if action.outcome.origin == GateDecisionOrigin::Timeout {
+                                    ExitJsonStatus::HALTED_GATE_TIMEOUT_REJECT
+                                } else {
+                                    ExitJsonStatus::HALTED_GATE_REJECTED
+                                }
+                                .to_string(),
+                            ),
                         )
                     }
                 }
@@ -557,6 +565,7 @@ pub async fn run(
             pice_config: config,
             workflow: &workflow,
             merged_seams: &merged_seams,
+            contract_paths: None,
             saver: &saver,
         };
 
@@ -1458,6 +1467,10 @@ async fn run_background(
     plan_path: &std::path::Path,
 ) -> Result<CommandResponse> {
     let feature_id = feature_id_from_plan_path(plan_path);
+    if let Some(resp) = super::background::reject_inline_background_if_active(plan_path, req.json) {
+        return Ok(resp);
+    }
+
     let layers_path = ctx.project_root().join(".pice/layers.toml");
     if !layers_path.exists() {
         return Ok(layers_toml_missing_response(
@@ -1483,7 +1496,8 @@ async fn run_background(
         plan_path,
         ctx,
         workflow_snapshot.clone(),
-        move |args, _permit, cancel| async move {
+        move |args, permit, cancel| async move {
+            let _global_provider_permit = permit;
             // First-layer hint: peek at layers.toml to name the first
             // cohort. The hint is best-effort — if layers.toml is
             // missing we fall back to the feature_id so the
@@ -1665,6 +1679,7 @@ async fn run_evaluate_orchestrator(
         pice_config: config,
         workflow: workflow_snapshot,
         merged_seams: &merged_seams,
+        contract_paths: Some(&args.env.contracts),
         saver: &saver,
     };
 

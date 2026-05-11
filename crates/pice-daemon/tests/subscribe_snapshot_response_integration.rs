@@ -30,6 +30,7 @@ use pice_core::protocol::{
     DaemonRequest, DaemonResponse,
 };
 use pice_core::transport::SocketPath;
+use pice_daemon::events::EventBus;
 use pice_daemon::lifecycle;
 use pice_daemon::server::auth;
 use pice_daemon::server::unix::UnixConnection;
@@ -313,6 +314,38 @@ async fn connection_drop_cleans_up() {
         .await
         .expect("daemon exits within 5s after shutdown");
     result.expect("join ok").expect("clean exit");
+}
+
+#[test]
+fn event_bus_receiver_counts_return_to_zero_for_varied_features() {
+    let bus = EventBus::new();
+    let feature_ids = ["cleanup-a", "cleanup-b", "cleanup-c", "cleanup-d"];
+    let mut receivers = Vec::new();
+
+    for feature_id in feature_ids {
+        receivers.push(bus.subscribe_feature(feature_id));
+        receivers.push(bus.subscribe_feature(feature_id));
+        assert_eq!(
+            bus.feature_receiver_count(feature_id),
+            2,
+            "setup should create two receivers for {feature_id}"
+        );
+    }
+    receivers.push(bus.subscribe_wildcard());
+    assert_eq!(bus.wildcard_receiver_count(), 1);
+    assert_eq!(bus.total_receiver_count(), 9);
+
+    drop(receivers);
+
+    for feature_id in feature_ids {
+        assert_eq!(
+            bus.feature_receiver_count(feature_id),
+            0,
+            "dropping receivers should decrement count for {feature_id}"
+        );
+    }
+    assert_eq!(bus.wildcard_receiver_count(), 0);
+    assert_eq!(bus.total_receiver_count(), 0);
 }
 
 #[tokio::test]

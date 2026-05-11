@@ -127,6 +127,7 @@ layer_overrides:
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &empty_seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 
@@ -223,6 +224,7 @@ paths = ["src/server/**"]
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &empty_seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 

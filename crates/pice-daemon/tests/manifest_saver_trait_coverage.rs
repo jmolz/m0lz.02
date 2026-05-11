@@ -71,10 +71,10 @@ async fn event_emitting_saver_satisfies_trait() {
 /// sanctioned file (`crates/pice-daemon/src/events/saver.rs`). Every
 /// other call site routes through `ManifestSaver::save_and_emit`.
 ///
-/// Implementation: scan the daemon source tree for `manifest.save(`
-/// occurrences and fail if any land outside the allow-list. `#[ignore]`
-/// while Task 9 is pending so CI stays green — un-ignoring is the last
-/// Task 9 step.
+/// Implementation: scan the daemon transition-write surface for raw
+/// `.save(` calls and fail if any land outside the allow-list. The
+/// matcher intentionally catches `rewritten.save(` and similar receiver
+/// names, not just the literal `manifest.save(`.
 #[test]
 fn zero_raw_manifest_save_calls_in_orchestrator() {
     use std::fs;
@@ -85,21 +85,36 @@ fn zero_raw_manifest_save_calls_in_orchestrator() {
     let allowed = [Path::new("src/events/saver.rs")];
 
     let daemon_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let scopes = [
+        daemon_src.join("orchestrator"),
+        daemon_src.join("handlers/evaluate.rs"),
+        daemon_src.join("handlers/review_gate.rs"),
+        daemon_src.join("jobs/recovery.rs"),
+    ];
     let mut offenders = Vec::<String>::new();
 
-    walk(&daemon_src, &mut |rel, content| {
-        if allowed
-            .iter()
-            .any(|p| rel.ends_with(p.file_name().unwrap_or_default()))
-        {
-            return;
-        }
-        for (i, line) in content.lines().enumerate() {
-            if line.contains("manifest.save(") {
-                offenders.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
+    for scope in scopes {
+        walk(&scope, &mut |rel, content| {
+            if allowed
+                .iter()
+                .any(|p| rel.ends_with(p.file_name().unwrap_or_default()))
+            {
+                return;
             }
-        }
-    });
+            let mut in_test_module = false;
+            for (i, line) in content.lines().enumerate() {
+                if line.trim() == "#[cfg(test)]" {
+                    in_test_module = true;
+                }
+                if in_test_module {
+                    continue;
+                }
+                if line.contains(".save(") {
+                    offenders.push(format!("{}:{}: {}", rel.display(), i + 1, line.trim()));
+                }
+            }
+        });
+    }
 
     assert!(
         offenders.is_empty(),

@@ -213,7 +213,17 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
     }
 
     loop {
-        match stream.rx.recv().await {
+        tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                stream.close().await;
+                if stream_json {
+                    emit_stream_terminal(130)?;
+                }
+                std::process::exit(130);
+            }
+            recv = stream.rx.recv() => {
+        match recv {
             Some(notif) => {
                 if notif.method != MANIFEST_EVENT {
                     continue;
@@ -288,6 +298,8 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
                 }
                 eprintln!("subscribe stream closed before terminal event");
                 std::process::exit(ExitJsonStatus::DaemonDisconnected.exit_code());
+            }
+        }
             }
         }
     }

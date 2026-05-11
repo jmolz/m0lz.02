@@ -20,13 +20,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use pice_core::cli::ExitJsonStatus;
 use pice_core::layers::manifest::{LayerResult, LayerStatus, ManifestStatus, VerificationManifest};
 
 /// Marker written to `LayerResult.halted_by` (and accessible in the
 /// manifest's top-level `halted_by` field via per-layer aggregation) on
 /// every layer rewritten by the reconciler. CLI renderers pattern-match
 /// on this exact prefix to explain why the feature ended up Failed.
-pub const FAILED_INTERRUPTED: &str = "failed-interrupted";
+pub const FAILED_INTERRUPTED: &str = ExitJsonStatus::FAILED_INTERRUPTED_HALT;
 
 /// Summary of what the reconciler did during a single startup pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -150,7 +151,15 @@ fn reconcile_one(path: &Path, feature_id: &str, report: &mut ReconciliationRepor
         }
         ManifestStatus::InProgress => {
             let rewritten = rewrite_interrupted(manifest);
-            if let Err(e) = rewritten.save(path) {
+            let saver = crate::events::NullSaver;
+            if let Err(e) = crate::events::ManifestSaver::save_and_emit(
+                &saver,
+                &rewritten,
+                path,
+                crate::events::SaveIntent::Cancelled {
+                    reason: FAILED_INTERRUPTED.to_string(),
+                },
+            ) {
                 tracing::warn!(
                     path = %path.display(),
                     error = %e,

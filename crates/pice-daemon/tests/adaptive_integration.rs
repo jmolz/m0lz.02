@@ -382,6 +382,7 @@ fn make_cfg<'a>(
         pice_config,
         workflow,
         merged_seams: seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     }
 }
@@ -2288,6 +2289,7 @@ async fn unresolvable_provider_remains_phase1_pending_not_failed() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 

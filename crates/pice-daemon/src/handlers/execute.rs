@@ -82,8 +82,8 @@ pub async fn run(
 ///
 /// `execute` has no Stack Loops / cohort structure — it runs a single
 /// provider session. The spawned future:
-/// 1. Transitions `Queued → InProgress` (emits `LayerStarted` with
-///    the feature_id as the layer hint).
+/// 1. Transitions `Queued → InProgress` without a start event; execute
+///    has no DAG layer to report.
 /// 2. Starts the provider, runs `session::run_session`, captures
 ///    any provider error.
 /// 3. Writes the terminal manifest (`Passed` on success, `Failed`
@@ -117,10 +117,10 @@ async fn run_background(
         plan_path,
         ctx,
         workflow_snapshot,
-        move |args, _permit, cancel| async move {
-            // Step 1: Queued → InProgress. `layer_hint = feature_id` —
-            // `execute` does not have per-layer cohorts, so the event
-            // acts as the "feature started" marker.
+        move |args, permit, cancel| async move {
+            let _global_provider_permit = permit;
+            // Step 1: Queued → InProgress. `execute` has no per-layer
+            // cohorts, so this checkpoint is a no-event manifest save.
             let mut manifest =
                 transition_queued_to_in_progress(&args, &events_for_spawn, &args.feature_id)?;
 

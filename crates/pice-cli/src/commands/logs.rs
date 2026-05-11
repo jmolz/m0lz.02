@@ -136,6 +136,7 @@ async fn run_follow(args: &LogsArgs) -> Result<()> {
     // immediately (Codex Cycle 2 fix).
     if stream.snapshot.history.iter().any(|c| c.terminal) {
         stream.close().await;
+        emit_logs_stream_terminal(stream_json, 0)?;
         return maybe_emit_logs_stream_ended(args.json);
     }
 
@@ -159,6 +160,7 @@ async fn run_follow(args: &LogsArgs) -> Result<()> {
                 render_chunk(&chunk, stream_json)?;
                 if chunk.terminal {
                     stream.close().await;
+                    emit_logs_stream_terminal(stream_json, 0)?;
                     return maybe_emit_logs_stream_ended(args.json);
                 }
             }
@@ -208,6 +210,14 @@ fn maybe_emit_logs_stream_ended(json: bool) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
         );
+    }
+    Ok(())
+}
+
+fn emit_logs_stream_terminal(stream_json: bool, exit_code: i32) -> Result<()> {
+    if stream_json {
+        let frame = StreamJsonFrame::Terminal { exit_code };
+        println!("{}", serde_json::to_string(&frame)?);
     }
     Ok(())
 }
@@ -312,5 +322,11 @@ mod tests {
             reason: Some("passed".to_string()),
         };
         assert!(render_chunk(&chunk, true).is_ok());
+    }
+
+    #[test]
+    fn emit_logs_stream_terminal_is_available_for_stream_json_follow() {
+        assert!(emit_logs_stream_terminal(true, 0).is_ok());
+        assert!(emit_logs_stream_terminal(false, 0).is_ok());
     }
 }

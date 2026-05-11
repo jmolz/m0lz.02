@@ -169,6 +169,7 @@ async fn run_once(parallel: bool, latency_ms: u64) {
         pice_config: &pice_config,
         workflow: &wf,
         merged_seams: &seams,
+        contract_paths: None,
         saver: &NULL_SAVER,
     };
 

@@ -270,11 +270,29 @@ impl EventBus {
         }
     }
 
-    /// Receiver count across all channels — used by tests and
-    /// `pice daemon status` diagnostics.
-    #[cfg(test)]
-    pub(crate) fn wildcard_receiver_count(&self) -> usize {
+    /// Receiver count for the wildcard channel — used by tests and
+    /// diagnostics.
+    pub fn wildcard_receiver_count(&self) -> usize {
         self.wildcard.receiver_count()
+    }
+
+    /// Receiver count for one feature channel. Missing feature channels
+    /// have zero receivers.
+    pub fn feature_receiver_count(&self, feature_id: &str) -> usize {
+        self.per_feature
+            .get(feature_id)
+            .map(|sender| sender.receiver_count())
+            .unwrap_or(0)
+    }
+
+    /// Receiver count across wildcard and every per-feature channel.
+    pub fn total_receiver_count(&self) -> usize {
+        self.wildcard_receiver_count()
+            + self
+                .per_feature
+                .iter()
+                .map(|entry| entry.receiver_count())
+                .sum::<usize>()
     }
 }
 
