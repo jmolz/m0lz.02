@@ -104,6 +104,35 @@ fn layers_toml_missing_response(
     }
 }
 
+fn layers_toml_load_failed_response(
+    layers_path: &std::path::Path,
+    error: &anyhow::Error,
+    json_mode: bool,
+) -> CommandResponse {
+    let message = format!("{error:#}");
+    if json_mode {
+        return CommandResponse::ExitJson {
+            code: ExitJsonStatus::WorkflowValidationFailed.exit_code(),
+            value: json!({
+                "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
+                "errors": [{
+                    "field": ".pice/layers.toml",
+                    "message": message,
+                }],
+                "hint": "Fix .pice/layers.toml or rerun `pice layers detect --write`, then retry.",
+            }),
+        };
+    }
+    CommandResponse::Exit {
+        code: ExitJsonStatus::WorkflowValidationFailed.exit_code(),
+        message: format!(
+            "failed to load .pice/layers.toml at {}:\n  - {}\n",
+            layers_path.display(),
+            message
+        ),
+    }
+}
+
 fn workflow_validation_failed_response(
     errors: &[pice_core::workflow::validate::ValidationError],
     json_mode: bool,
@@ -224,10 +253,26 @@ fn merged_seam_validation_failed_response(
 fn preflight_stack_loops_workflow(
     project_root: &std::path::Path,
     json_mode: bool,
-) -> Result<std::result::Result<pice_core::workflow::WorkflowConfig, CommandResponse>> {
+) -> Result<
+    std::result::Result<
+        (
+            pice_core::workflow::WorkflowConfig,
+            pice_core::layers::LayersConfig,
+        ),
+        CommandResponse,
+    >,
+> {
     let layers_path = project_root.join(".pice/layers.toml");
-    let layers_config = pice_core::layers::LayersConfig::load(&layers_path)
-        .context("failed to load layers config in background preflight")?;
+    let layers_config = match pice_core::layers::LayersConfig::load(&layers_path) {
+        Ok(config) => config,
+        Err(e) => {
+            return Ok(Err(layers_toml_load_failed_response(
+                &layers_path,
+                &e,
+                json_mode,
+            )));
+        }
+    };
 
     let workflow = match pice_core::workflow::loader::resolve(project_root) {
         Ok(workflow) => workflow,
@@ -276,7 +321,7 @@ fn preflight_stack_loops_workflow(
         )));
     }
 
-    Ok(Ok(workflow))
+    Ok(Ok((workflow, layers_config)))
 }
 
 /// Reconcile expired review gates against the current clock. For each
@@ -668,7 +713,7 @@ pub async fn run(
             pice_config: config,
             workflow: &workflow,
             merged_seams: &merged_seams,
-            contract_paths: None,
+            contract_contents: None,
             manifest_path: None,
             global_provider_semaphore: Some(ctx.jobs().provider_semaphore()),
             global_provider_capacity: Some(ctx.jobs().provider_capacity()),
@@ -1586,10 +1631,11 @@ async fn run_background(
         ));
     }
 
-    let workflow_snapshot = match preflight_stack_loops_workflow(ctx.project_root(), req.json)? {
-        Ok(workflow) => workflow,
-        Err(resp) => return Ok(resp),
-    };
+    let (workflow_snapshot, layers_snapshot) =
+        match preflight_stack_loops_workflow(ctx.project_root(), req.json)? {
+            Ok(snapshot) => snapshot,
+            Err(resp) => return Ok(resp),
+        };
 
     // Capture owned clones of every ctx field the spawn future needs.
     let config_owned = ctx.config().clone();
@@ -1597,7 +1643,6 @@ async fn run_background(
     let logs_for_spawn = ctx.logs().clone();
     let provider_semaphore_for_spawn = ctx.jobs().provider_semaphore();
     let provider_capacity_for_spawn = ctx.jobs().provider_capacity();
-    let plan_path_owned = plan_path.to_path_buf();
     let json_mode = req.json;
 
     dispatch_background(
@@ -1606,6 +1651,7 @@ async fn run_background(
         plan_path,
         ctx,
         workflow_snapshot.clone(),
+        Some(layers_snapshot.clone()),
         move |args, permit, cancel| async move {
             // Background evaluate now enforces global concurrency at the
             // provider-session boundary inside Stack Loops. Release the
@@ -1642,7 +1688,6 @@ async fn run_background(
             // preserved.
             let manifest = match run_evaluate_orchestrator(
                 &args,
-                &plan_path_owned,
                 &config_owned,
                 &workflow_snapshot,
                 &events_for_spawn,
@@ -1712,7 +1757,6 @@ async fn run_background(
 #[allow(clippy::too_many_arguments)]
 async fn run_evaluate_orchestrator(
     args: &super::background::OrchestratorSpawnArgs,
-    plan_path: &std::path::Path,
     config: &pice_core::config::PiceConfig,
     workflow_snapshot: &pice_core::workflow::WorkflowConfig,
     events: &crate::events::EventBus,
@@ -1724,24 +1768,16 @@ async fn run_evaluate_orchestrator(
 ) -> Result<pice_core::layers::manifest::VerificationManifest> {
     use pice_core::layers::manifest::VerificationManifest;
 
-    // Plan parse happens inside the spawn (per plan: dispatch-SLO
-    // absorbs only the cheap handshake, not plan parse latency).
-    let plan = ParsedPlan::load(plan_path)?;
+    let plan = ParsedPlan::parse(&args.plan_path, args.plan_content.clone())?;
     let _contract = plan
         .contract
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no contract section found in plan"))?;
 
-    let layers_path = args.env.project_root.join(".pice/layers.toml");
-    if !layers_path.exists() {
-        return Err(anyhow::anyhow!(
-            "background evaluation requires .pice/layers.toml; missing {}",
-            layers_path.display()
-        ));
-    }
-
-    let layers_config = pice_core::layers::LayersConfig::load(&layers_path)
-        .context("failed to load layers config in background path")?;
+    let layers_config = args
+        .layers_config
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("background evaluation missing layers snapshot"))?;
 
     // Floor-merged seam map. Background path uses the same merge as
     // the foreground handler; a floor violation results in a
@@ -1785,15 +1821,15 @@ async fn run_evaluate_orchestrator(
     // per-layer / per-gate events fired during the cohort drain.
     let saver = crate::events::EventEmittingSaver::new(events);
     let cfg = crate::orchestrator::stack_loops::StackLoopsConfig {
-        layers: &layers_config,
-        plan_path,
+        layers: layers_config,
+        plan_path: args.plan_path.as_path(),
         project_root: args.env.project_root.as_path(),
         primary_provider: &config.evaluation.primary.provider,
         primary_model: &config.evaluation.primary.model,
         pice_config: config,
         workflow: workflow_snapshot,
         merged_seams: &merged_seams,
-        contract_paths: Some(&args.env.contracts),
+        contract_contents: Some(&args.contract_contents),
         manifest_path: Some(args.manifest_path.as_path()),
         global_provider_semaphore: Some(provider_semaphore),
         global_provider_capacity: Some(provider_capacity),
@@ -2011,9 +2047,12 @@ paths = ["Dockerfile"]
         let events = crate::events::EventBus::new();
         let mut rx = events.subscribe_feature(feature_id);
         let logs = crate::logs::LogStore::new();
+        let layers_snapshot =
+            pice_core::layers::LayersConfig::load(&pice_dir.join("layers.toml")).unwrap();
         let args = super::super::background::OrchestratorSpawnArgs {
             feature_id: feature_id.to_string(),
             run_id: run_id.to_string(),
+            plan_path: plan_path.clone(),
             manifest_path: manifest_path.clone(),
             env: Arc::new(JobEnv {
                 state_dir: tmp.path().to_path_buf(),
@@ -2023,11 +2062,13 @@ paths = ["Dockerfile"]
                 pice_state_dir_override: None,
                 pice_user_workflow_file: None,
             }),
+            plan_content: std::fs::read_to_string(&plan_path).unwrap(),
+            layers_config: Some(layers_snapshot),
+            contract_contents: BTreeMap::new(),
         };
 
         let manifest = run_evaluate_orchestrator(
             &args,
-            &plan_path,
             &pice_core::config::PiceConfig::default(),
             &workflow_snapshot,
             &events,

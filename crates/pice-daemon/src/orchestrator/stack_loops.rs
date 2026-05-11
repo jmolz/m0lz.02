@@ -76,10 +76,10 @@ pub struct StackLoopsConfig<'a> {
     /// violations BEFORE invoking the orchestrator. This field is the
     /// execution-time source of truth; the orchestrator does not re-merge.
     pub merged_seams: &'a BTreeMap<String, Vec<String>>,
-    /// Optional dispatch-time snapshot of layer contract paths. Background
-    /// jobs pass this from `JobEnv` so contract path discovery cannot drift
-    /// after the job has been admitted but before provider work starts.
-    pub contract_paths: Option<&'a BTreeMap<String, PathBuf>>,
+    /// Optional dispatch-time snapshot of layer contract file contents.
+    /// Background jobs pass this so queued work cannot evaluate different
+    /// contract text if project files change before provider work starts.
+    pub contract_contents: Option<&'a BTreeMap<String, String>>,
     /// Optional dispatch-time manifest path. Background jobs pass the path
     /// derived from `JobEnv.state_dir`; foreground calls leave this unset and
     /// compute from the live environment.
@@ -503,7 +503,7 @@ pub async fn run_stack_loops_with_cancel(
             }
 
             let contract_content =
-                load_layer_contract(project_root, layer_name, layer_def, cfg.contract_paths);
+                load_layer_contract(project_root, layer_name, layer_def, cfg.contract_contents);
             let _prompt = build_layer_evaluation_prompt(
                 layer_name,
                 &contract_content,
@@ -1421,13 +1421,13 @@ fn load_layer_contract(
     project_root: &Path,
     layer_name: &str,
     layer_def: &pice_core::layers::LayerDef,
-    contract_paths: Option<&BTreeMap<String, PathBuf>>,
+    contract_contents: Option<&BTreeMap<String, String>>,
 ) -> String {
-    if let Some(paths) = contract_paths {
-        if let Some(full_path) = paths.get(layer_name) {
-            return std::fs::read_to_string(full_path)
-                .unwrap_or_else(|_| generic_layer_contract(layer_name));
+    if let Some(contents) = contract_contents {
+        if let Some(content) = contents.get(layer_name) {
+            return content.clone();
         }
+        return generic_layer_contract(layer_name);
     }
 
     // Try layer's explicit contract path
@@ -1768,7 +1768,7 @@ async fn try_run_layer_adaptive_owned(
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &dummy_seams,
-        contract_paths: None,
+        contract_contents: None,
         manifest_path: None,
         global_provider_semaphore,
         global_provider_capacity,
@@ -1958,7 +1958,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
-            contract_paths: None,
+            contract_contents: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2066,7 +2066,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
-            contract_paths: None,
+            contract_contents: None,
             manifest_path: Some(manifest_path.as_path()),
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2128,7 +2128,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
-            contract_paths: None,
+            contract_contents: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2213,14 +2213,10 @@ mod tests {
     }
 
     #[test]
-    fn load_layer_contract_prefers_dispatch_snapshot_paths() {
+    fn load_layer_contract_prefers_dispatch_snapshot_contents() {
         let dir = tempfile::tempdir().unwrap();
-        let snapshot_dir = dir.path().join("snapshot");
         let live_dir = dir.path().join("live");
-        std::fs::create_dir_all(&snapshot_dir).unwrap();
         std::fs::create_dir_all(&live_dir).unwrap();
-        let snapshot_path = snapshot_dir.join("backend.toml");
-        std::fs::write(&snapshot_path, "[criteria]\nsnapshot = \"dispatch\"").unwrap();
         std::fs::write(live_dir.join("backend.toml"), "[criteria]\nlive = \"late\"").unwrap();
 
         let def = LayerDef {
@@ -2232,11 +2228,40 @@ mod tests {
             environment_variants: None,
         };
         let mut snapshot = BTreeMap::new();
-        snapshot.insert("backend".to_string(), snapshot_path);
+        snapshot.insert(
+            "backend".to_string(),
+            "[criteria]\nsnapshot = \"dispatch\"".to_string(),
+        );
 
         let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot));
         assert!(content.contains("snapshot = \"dispatch\""));
         assert!(!content.contains("live = \"late\""));
+    }
+
+    #[test]
+    fn load_layer_contract_snapshot_mode_does_not_read_late_live_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let live_dir = dir.path().join(".pice/contracts");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        std::fs::write(
+            live_dir.join("backend.toml"),
+            "[criteria]\nlate = \"should-not-load\"",
+        )
+        .unwrap();
+
+        let def = LayerDef {
+            paths: vec!["src/backend/**".to_string()],
+            always_run: false,
+            contract: None,
+            depends_on: Vec::new(),
+            layer_type: None,
+            environment_variants: None,
+        };
+        let snapshot = BTreeMap::new();
+
+        let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot));
+        assert!(!content.contains("should-not-load"));
+        assert!(content.contains("backend_correctness"));
     }
 
     /// Seam-fail fixture: changes touch backend + infrastructure with
@@ -2300,7 +2325,7 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &seams,
-            contract_paths: None,
+            contract_contents: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,

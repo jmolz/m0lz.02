@@ -192,7 +192,6 @@ async fn run_background(
     let config_owned = ctx.config().clone();
     let events_for_spawn = ctx.events().clone();
     let logs_for_spawn = ctx.logs().clone();
-    let plan_path_owned = plan_path.to_path_buf();
 
     dispatch_background(
         feature_id,
@@ -200,6 +199,7 @@ async fn run_background(
         plan_path,
         ctx,
         workflow_snapshot,
+        None,
         move |args, permit, cancel| async move {
             let _global_provider_permit = permit;
             // Step 1: Queued → InProgress. `execute` has no per-layer
@@ -207,11 +207,12 @@ async fn run_background(
             let mut manifest = transition_queued_to_in_progress(&args)?;
 
             // Step 2: run the provider session under a cancel token.
-            // The plan parse / prompt build / provider start happen
-            // INSIDE the spawned future so their latency is absorbed
-            // by the background task, not the dispatch-return SLO.
+            // Prompt build / provider start happen INSIDE the spawned future
+            // so their latency is absorbed by the background task, not the
+            // dispatch-return SLO. Plan content itself is snapshotted by the
+            // dispatch helper before admission can drift.
             let run_outcome = run_execute_session(
-                &plan_path_owned,
+                &args.plan_content,
                 &config_owned,
                 args.env.project_root.as_path(),
                 &logs_for_spawn,
@@ -272,7 +273,7 @@ async fn run_background(
 /// the daemon's [`LogStore`] so `pice logs --follow <feature>` can
 /// replay them. Returns `Ok(())` on success.
 async fn run_execute_session(
-    plan_path: &std::path::Path,
+    plan_content: &str,
     config: &pice_core::config::PiceConfig,
     project_root: &std::path::Path,
     logs: &crate::logs::LogStore,
@@ -287,8 +288,7 @@ async fn run_execute_session(
         anyhow::bail!("cancelled before provider startup");
     }
 
-    let plan = ParsedPlan::load(plan_path)?;
-    let prompt = builders::build_execute_prompt(&plan.content, project_root)?;
+    let prompt = builders::build_execute_prompt(plan_content, project_root)?;
 
     let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, config).await?;
 

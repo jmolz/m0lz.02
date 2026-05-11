@@ -15,11 +15,14 @@
 //! - `append_chunk` writes a non-terminal `LogChunk` — enqueues to
 //!   `history`, evicts from the front until under the byte cap, then
 //!   broadcasts.
-//! - `append_terminal_frame` is called EXACTLY ONCE per feature at
+//! - `append_terminal_frame` is called EXACTLY ONCE per feature run at
 //!   the `FeatureComplete` / `Cancelled` transition. It enqueues +
 //!   broadcasts a `LogChunk { terminal: true, reason: Some(_), ... }`.
 //!   Follow subscribers watch for `terminal: true` and close their
-//!   loops. A second terminal write is a no-op (defensive).
+//!   loops. A second terminal write in the same run is a no-op (defensive).
+//!   A new dispatch for the same feature calls `reset_feature` before the
+//!   worker starts, so a prior run's terminal frame cannot close the next
+//!   run's `logs --follow`.
 //! - `snapshot` clones the buffer for the non-follow read path.
 //! - `subscribe` returns a `broadcast::Receiver` that begins delivery
 //!   at the next `append_*` call (history is NOT replayed — callers
@@ -121,6 +124,13 @@ impl LogStore {
             .entry(feature_id.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(LogBuffer::new())))
             .clone()
+    }
+
+    /// Reset buffered logs for a newly admitted run of `feature_id`.
+    pub async fn reset_feature(&self, feature_id: &str) {
+        let buffer = self.buffer_for(feature_id);
+        let mut guard = buffer.lock().await;
+        *guard = LogBuffer::new();
     }
 
     /// Append a non-terminal log chunk. Enqueues to history, evicts
@@ -499,6 +509,32 @@ mod tests {
         assert!(second.is_none(), "second terminal must be a no-op");
         let snap = store.snapshot("feat-dup", None).await;
         assert_eq!(snap.len(), 1, "only the first terminal frame is retained");
+    }
+
+    #[tokio::test]
+    async fn reset_feature_starts_new_run_without_prior_terminal() {
+        let store = LogStore::new();
+        store
+            .append_chunk("feat-repeat", "r-1", "backend", "old".into())
+            .await;
+        store
+            .append_terminal_frame("feat-repeat", "r-1", "passed")
+            .await;
+
+        store.reset_feature("feat-repeat").await;
+        store
+            .append_chunk("feat-repeat", "r-2", "backend", "new".into())
+            .await;
+        let terminal = store
+            .append_terminal_frame("feat-repeat", "r-2", "failed")
+            .await;
+
+        assert!(terminal.is_some(), "new run should get its own terminal");
+        let snap = store.snapshot("feat-repeat", None).await;
+        assert_eq!(snap.len(), 2);
+        assert!(snap.iter().all(|chunk| chunk.run_id == "r-2"));
+        assert_eq!(snap[0].text, "new");
+        assert_eq!(snap[1].reason.as_deref(), Some("failed"));
     }
 
     #[tokio::test]

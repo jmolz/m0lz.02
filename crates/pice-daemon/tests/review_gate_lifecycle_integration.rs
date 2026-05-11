@@ -545,7 +545,7 @@ async fn scenario_8_cancellation_during_pending_review() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &merged_seams,
-        contract_paths: None,
+        contract_contents: None,
         manifest_path: None,
         global_provider_semaphore: None,
         global_provider_capacity: None,

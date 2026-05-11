@@ -228,7 +228,7 @@ async fn stack_loops_uses_dispatch_manifest_path_after_env_mutation() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
-        contract_paths: None,
+        contract_contents: None,
         manifest_path: Some(dispatch_path.as_path()),
         global_provider_semaphore: None,
         global_provider_capacity: None,

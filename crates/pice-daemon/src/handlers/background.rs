@@ -184,12 +184,10 @@ fn build_job_env(
 /// Resolve layer contract paths at dispatch time so the spawned job
 /// uses a stable path snapshot instead of re-running discovery after
 /// it eventually acquires a provider permit.
-pub fn collect_contract_paths(project_root: &Path) -> BTreeMap<String, PathBuf> {
-    let layers_path = project_root.join(".pice/layers.toml");
-    let Ok(layers) = pice_core::layers::LayersConfig::load(&layers_path) else {
-        return BTreeMap::new();
-    };
-
+pub fn collect_contract_paths_from_layers(
+    project_root: &Path,
+    layers: &pice_core::layers::LayersConfig,
+) -> BTreeMap<String, PathBuf> {
     let mut contracts = BTreeMap::new();
     for layer in &layers.layers.order {
         let Some(def) = layers.layers.defs.get(layer) else {
@@ -205,6 +203,27 @@ pub fn collect_contract_paths(project_root: &Path) -> BTreeMap<String, PathBuf> 
                     .join(format!("{layer}.toml"))
             });
         contracts.insert(layer.clone(), path);
+    }
+    contracts
+}
+
+pub fn collect_contract_paths(project_root: &Path) -> BTreeMap<String, PathBuf> {
+    let layers_path = project_root.join(".pice/layers.toml");
+    let Ok(layers) = pice_core::layers::LayersConfig::load(&layers_path) else {
+        return BTreeMap::new();
+    };
+    collect_contract_paths_from_layers(project_root, &layers)
+}
+
+pub fn collect_contract_contents(
+    project_root: &Path,
+    layers: &pice_core::layers::LayersConfig,
+) -> BTreeMap<String, String> {
+    let mut contracts = BTreeMap::new();
+    for (layer, path) in collect_contract_paths_from_layers(project_root, layers) {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            contracts.insert(layer, content);
+        }
     }
     contracts
 }
@@ -230,11 +249,16 @@ pub fn write_queued_manifest(
 
 /// Arguments passed into the spawned orchestrator closure. Owned so the
 /// future satisfies `'static`.
+#[derive(Clone)]
 pub struct OrchestratorSpawnArgs {
     pub feature_id: String,
     pub run_id: String,
+    pub plan_path: PathBuf,
     pub manifest_path: PathBuf,
     pub env: Arc<JobEnv>,
+    pub plan_content: String,
+    pub layers_config: Option<pice_core::layers::LayersConfig>,
+    pub contract_contents: BTreeMap<String, String>,
 }
 
 /// Dispatch a background `{evaluate, execute}` request.
@@ -257,6 +281,7 @@ pub async fn dispatch_background<F, Fut>(
     plan_path: &Path,
     ctx: &DaemonContext,
     workflow_snapshot: WorkflowConfig,
+    layers_config: Option<pice_core::layers::LayersConfig>,
     future_builder: F,
 ) -> Result<CommandResponse>
 where
@@ -282,8 +307,21 @@ where
     // Step 4: allocate a fresh run_id.
     let run_id = ctx.jobs().next_run_id();
 
-    // Step 5: snapshot env into JobEnv.
-    let contract_paths = collect_contract_paths(ctx.project_root());
+    // Step 5: snapshot env and dispatch-time file content.
+    let plan_content = std::fs::read_to_string(plan_path).with_context(|| {
+        format!(
+            "reading plan content at dispatch from {}",
+            plan_path.display()
+        )
+    })?;
+    let contract_paths = layers_config
+        .as_ref()
+        .map(|layers| collect_contract_paths_from_layers(ctx.project_root(), layers))
+        .unwrap_or_else(|| collect_contract_paths(ctx.project_root()));
+    let contract_contents = layers_config
+        .as_ref()
+        .map(|layers| collect_contract_contents(ctx.project_root(), layers))
+        .unwrap_or_default();
     let env = Arc::new(build_job_env(
         ctx.project_root(),
         workflow_snapshot,
@@ -303,18 +341,43 @@ where
     let spawn_args = OrchestratorSpawnArgs {
         feature_id: feature_id.clone(),
         run_id: run_id.clone(),
+        plan_path: plan_path.to_path_buf(),
         manifest_path: manifest_path.clone(),
         env: Arc::clone(&env),
+        plan_content,
+        layers_config,
+        contract_contents,
     };
+    let events_for_rescue = ctx.events().clone();
+    let logs_for_rescue = ctx.logs().clone();
     let spawn_result = ctx.jobs().spawn_after_signal(
         feature_id.clone(),
         run_id.clone(),
         env,
         start_rx,
-        move |_env, permit, cancel| future_builder(spawn_args, permit, cancel),
+        move |_env, permit, cancel| {
+            let rescue_args = spawn_args.clone();
+            let events_for_rescue = events_for_rescue.clone();
+            let logs_for_rescue = logs_for_rescue.clone();
+            async move {
+                match future_builder(spawn_args, permit, cancel).await {
+                    Ok(manifest) => Ok(manifest),
+                    Err(err) => {
+                        fail_closed_after_background_error(
+                            &rescue_args,
+                            &events_for_rescue,
+                            &logs_for_rescue,
+                            err,
+                        )
+                        .await
+                    }
+                }
+            }
+        },
     );
     match spawn_result {
         Ok(_actual_run_id) => {
+            ctx.logs().reset_feature(&feature_id).await;
             if let Err(e) =
                 write_queued_manifest(&feature_id, &run_id, ctx.project_root(), &manifest_path)
             {
@@ -338,6 +401,52 @@ where
                 &existing,
                 json_mode,
             ))
+        }
+    }
+}
+
+async fn fail_closed_after_background_error(
+    args: &OrchestratorSpawnArgs,
+    events: &crate::events::EventBus,
+    logs: &crate::logs::LogStore,
+    err: anyhow::Error,
+) -> Result<VerificationManifest> {
+    tracing::error!(
+        feature_id = %args.feature_id,
+        run_id = %args.run_id,
+        error = %err,
+        "background worker returned Err; attempting fail-closed terminalization"
+    );
+    let mut manifest = VerificationManifest::load(&args.manifest_path)
+        .unwrap_or_else(|_| VerificationManifest::new(&args.feature_id, &args.env.project_root));
+    manifest.run_id = Some(args.run_id.clone());
+    manifest.overall_status = ManifestStatus::Failed;
+    manifest
+        .layers
+        .push(pice_core::layers::manifest::LayerResult {
+            name: args.feature_id.clone(),
+            status: pice_core::layers::manifest::LayerStatus::Failed,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: Some(format!("runtime_error:{err:#}")),
+            final_confidence: None,
+            total_cost_usd: None,
+            escalation_events: None,
+        });
+
+    match finalize_terminal_manifest(&manifest, &args.manifest_path, events) {
+        Ok(()) => {
+            logs.append_terminal_frame(&args.feature_id, &args.run_id, "failed")
+                .await;
+            Ok(manifest)
+        }
+        Err(save_err) => {
+            events.emit_cancelled(&args.feature_id, &args.run_id, "terminal-save-failed");
+            logs.append_terminal_frame(&args.feature_id, &args.run_id, "terminal-save-failed")
+                .await;
+            Err(save_err.context(format!(
+                "failed to terminalize background error after worker failure: {err:#}"
+            )))
         }
     }
 }
@@ -389,6 +498,7 @@ pub fn finalize_terminal_manifest(
 mod tests {
     use super::*;
     use crate::events::EventBus;
+    use crate::server::router::DaemonContext;
     use crate::test_support::StateDirGuard;
 
     #[test]
@@ -467,6 +577,43 @@ paths = ["src/frontend/**"]
     }
 
     #[test]
+    fn collect_contract_contents_snapshots_file_text() {
+        let project_tmp = tempfile::tempdir().unwrap();
+        let pice_dir = project_tmp.path().join(".pice");
+        let contracts_dir = pice_dir.join("contracts");
+        std::fs::create_dir_all(&contracts_dir).unwrap();
+        std::fs::write(contracts_dir.join("backend.toml"), "original").unwrap();
+
+        let layers = pice_core::layers::LayersConfig {
+            layers: pice_core::layers::LayersTable {
+                order: vec!["backend".to_string()],
+                defs: BTreeMap::from([(
+                    "backend".to_string(),
+                    pice_core::layers::LayerDef {
+                        paths: vec!["src/**".to_string()],
+                        always_run: false,
+                        contract: None,
+                        depends_on: Vec::new(),
+                        layer_type: None,
+                        environment_variants: None,
+                    },
+                )]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+
+        let contents = collect_contract_contents(project_tmp.path(), &layers);
+        std::fs::write(contracts_dir.join("backend.toml"), "mutated").unwrap();
+
+        assert_eq!(
+            contents.get("backend").map(String::as_str),
+            Some("original")
+        );
+    }
+
+    #[test]
     fn background_dispatched_response_shape() {
         let resp = background_dispatched_response("feat-y", "r-abc");
         match resp {
@@ -522,6 +669,7 @@ paths = ["src/frontend/**"]
         let args = OrchestratorSpawnArgs {
             feature_id: "feat-transition".into(),
             run_id: "r-xyz".into(),
+            plan_path: project_tmp.path().join("plan.md"),
             manifest_path: manifest_path.clone(),
             env: Arc::new(JobEnv {
                 state_dir: state_tmp.path().to_path_buf(),
@@ -531,6 +679,9 @@ paths = ["src/frontend/**"]
                 pice_state_dir_override: None,
                 pice_user_workflow_file: None,
             }),
+            plan_content: "# Plan\n".to_string(),
+            layers_config: None,
+            contract_contents: BTreeMap::new(),
         };
         let manifest = transition_queued_to_in_progress(&args).unwrap();
         assert_eq!(manifest.overall_status, ManifestStatus::InProgress);
@@ -543,5 +694,149 @@ paths = ["src/frontend/**"]
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
             other => panic!("Queued→InProgress must not emit LayerStarted, got {other:?}"),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_background_snapshots_plan_layers_and_contract_contents() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::new(state_tmp.path());
+        let project_tmp = tempfile::tempdir().unwrap();
+        let project_root = project_tmp.path();
+        let pice_dir = project_root.join(".pice");
+        let contracts_dir = pice_dir.join("contracts");
+        std::fs::create_dir_all(&contracts_dir).unwrap();
+        std::fs::write(contracts_dir.join("backend.toml"), "contract-original").unwrap();
+        let plan_path = project_root.join("plan.md");
+        std::fs::write(&plan_path, "# Original\n").unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#,
+        )
+        .unwrap();
+        let layers_snapshot = pice_core::layers::LayersConfig::load(&pice_dir.join("layers.toml"))
+            .expect("layers load");
+        let ctx = DaemonContext::new("tok".to_string(), project_root.to_path_buf());
+
+        let held = ctx
+            .jobs()
+            .provider_semaphore()
+            .try_acquire_many_owned(ctx.jobs().provider_capacity())
+            .expect("hold all provider permits");
+        let (obs_tx, obs_rx) = tokio::sync::oneshot::channel();
+
+        let resp = dispatch_background(
+            "snapshot-feature".to_string(),
+            true,
+            &plan_path,
+            &ctx,
+            pice_core::workflow::loader::embedded_defaults(),
+            Some(layers_snapshot),
+            move |args, _permit, _cancel| async move {
+                let observed = (
+                    args.plan_content.clone(),
+                    args.layers_config
+                        .as_ref()
+                        .map(|layers| layers.layers.order.clone())
+                        .unwrap_or_default(),
+                    args.contract_contents.get("backend").cloned(),
+                );
+                let _ = obs_tx.send(observed);
+                Ok(VerificationManifest::new(
+                    &args.feature_id,
+                    &args.env.project_root,
+                ))
+            },
+        )
+        .await
+        .expect("dispatch");
+        assert!(matches!(resp, CommandResponse::Json { .. }));
+
+        std::fs::write(&plan_path, "# Mutated\n").unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["frontend"]
+
+[layers.frontend]
+paths = ["web/**"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(contracts_dir.join("backend.toml"), "contract-mutated").unwrap();
+        drop(held);
+
+        let (plan_content, layer_order, contract_content) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), obs_rx)
+                .await
+                .expect("worker observed snapshots")
+                .expect("snapshot sender");
+        assert_eq!(plan_content, "# Original\n");
+        assert_eq!(layer_order, vec!["backend".to_string()]);
+        assert_eq!(contract_content.as_deref(), Some("contract-original"));
+    }
+
+    #[tokio::test]
+    async fn background_error_path_terminalizes_failed_manifest_and_log() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::new(state_tmp.path());
+        let project_tmp = tempfile::tempdir().unwrap();
+        let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+            "feat-error",
+            project_tmp.path(),
+            state_tmp.path(),
+        );
+        let manifest_path =
+            write_queued_manifest("feat-error", "r-error", project_tmp.path(), &manifest_path)
+                .unwrap();
+        let events = EventBus::new();
+        let mut rx = events.subscribe_feature("feat-error");
+        let logs = crate::logs::LogStore::new();
+        let args = OrchestratorSpawnArgs {
+            feature_id: "feat-error".into(),
+            run_id: "r-error".into(),
+            plan_path: project_tmp.path().join("plan.md"),
+            manifest_path: manifest_path.clone(),
+            env: Arc::new(JobEnv {
+                state_dir: state_tmp.path().to_path_buf(),
+                project_root: project_tmp.path().to_path_buf(),
+                workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+                contracts: BTreeMap::new(),
+                pice_state_dir_override: None,
+                pice_user_workflow_file: None,
+            }),
+            plan_content: "# Plan\n".to_string(),
+            layers_config: None,
+            contract_contents: BTreeMap::new(),
+        };
+
+        let manifest =
+            fail_closed_after_background_error(&args, &events, &logs, anyhow::anyhow!("boom"))
+                .await
+                .expect("fail-closed terminalization");
+        assert_eq!(manifest.overall_status, ManifestStatus::Failed);
+        let persisted = VerificationManifest::load(&manifest_path).unwrap();
+        assert_eq!(persisted.overall_status, ManifestStatus::Failed);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("terminal event")
+            .expect("event");
+        assert_eq!(
+            event.event,
+            pice_core::events::ManifestEvent::FeatureComplete
+        );
+        assert_eq!(event.data["status"].as_str(), Some("failed"));
+
+        let history = logs.snapshot("feat-error", None).await;
+        assert!(history.iter().any(|chunk| {
+            chunk.terminal && chunk.run_id == "r-error" && chunk.reason.as_deref() == Some("failed")
+        }));
     }
 }
