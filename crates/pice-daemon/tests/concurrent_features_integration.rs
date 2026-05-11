@@ -11,7 +11,9 @@
 //!    their feature's events; a wildcard subscriber sees all three.
 //! 4. **Global-provider-semaphore correctness** — with `max_global_
 //!    provider_concurrency = 2`, at most 2 features can be holding a
-//!    provider permit simultaneously. A third feature waits.
+//!    provider permit simultaneously. A third feature waits, and a queued
+//!    feature emits `LayerStarted` within a bounded interval after the
+//!    earlier holder releases its permit.
 //! 5. **Cancel mid-run propagates** — cancelling feat-B while it's
 //!    blocked on a gate future lets feat-A and feat-C continue, and
 //!    the supervisor emits `ManifestEvent::Cancelled` for B's run
@@ -28,6 +30,7 @@
 
 #![cfg(unix)]
 
+use pice_core::events::ManifestEvent;
 use pice_core::jobs::JobEnv;
 use pice_core::layers::manifest::VerificationManifest;
 use pice_core::workflow::loader::embedded_defaults;
@@ -36,7 +39,7 @@ use pice_daemon::jobs::FeatureJobManager;
 use pice_daemon::logs::store::LogStore;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
 fn test_env(state_dir: &std::path::Path, project_root: &std::path::Path) -> Arc<JobEnv> {
@@ -277,6 +280,99 @@ async fn global_semaphore_bounds_concurrent_provider_holds() {
         peak <= 2,
         "max simultaneous in-flight ({peak}) exceeded permit cap (2)"
     );
+}
+
+/// Starvation-bound correctness: a feature already queued behind the
+/// global provider-session semaphore must make progress promptly once the
+/// current permit holder releases. This pins the plan's "feature B
+/// LayerStarted within 2× feature A's permit-hold-time" assertion without
+/// relying on provider process sleeps or wall-clock races inside Stack Loops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_semaphore_waiting_feature_starts_within_two_hold_times() {
+    let state_tmp = tempfile::tempdir().unwrap();
+    let project_tmp = tempfile::tempdir().unwrap();
+    let env = test_env(state_tmp.path(), project_tmp.path());
+
+    let bus = EventBus::new();
+    let mut rx = bus.subscribe_wildcard();
+    let jobs = FeatureJobManager::new(bus.clone(), 1);
+
+    let release_a = Arc::new(Notify::new());
+    let run_a = jobs.next_run_id();
+    let run_b = jobs.next_run_id();
+    let bus_a = bus.clone();
+    let release_a_for_task = release_a.clone();
+    jobs.spawn(
+        "feat-a",
+        run_a.clone(),
+        env.clone(),
+        move |_env, permit, _cancel| {
+            let run_a = run_a.clone();
+            async move {
+                let _permit = permit;
+                bus_a.emit_layer_started("feat-a", &run_a, "backend");
+                release_a_for_task.notified().await;
+                Ok(VerificationManifest::new(
+                    "feat-a",
+                    std::path::Path::new("/irrelevant"),
+                ))
+            }
+        },
+    )
+    .expect("spawn feat-a");
+
+    let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("feat-a LayerStarted within 1s")
+        .expect("recv feat-a LayerStarted");
+    assert_eq!(first.feature_id, "feat-a");
+    assert_eq!(first.event, ManifestEvent::LayerStarted);
+    let a_started = Instant::now();
+
+    let bus_b = bus.clone();
+    jobs.spawn(
+        "feat-b",
+        run_b.clone(),
+        env,
+        move |_env, permit, _cancel| {
+            let run_b = run_b.clone();
+            async move {
+                let _permit = permit;
+                bus_b.emit_layer_started("feat-b", &run_b, "backend");
+                Ok(VerificationManifest::new(
+                    "feat-b",
+                    std::path::Path::new("/irrelevant"),
+                ))
+            }
+        },
+    )
+    .expect("spawn feat-b");
+
+    let hold_time = Duration::from_millis(150);
+    tokio::time::sleep(hold_time).await;
+    release_a.notify_one();
+
+    let second = tokio::time::timeout(hold_time * 2, rx.recv())
+        .await
+        .expect("feat-b LayerStarted within 2x feat-a hold time after release")
+        .expect("recv feat-b LayerStarted");
+    let b_started = Instant::now();
+    assert_eq!(second.feature_id, "feat-b");
+    assert_eq!(second.event, ManifestEvent::LayerStarted);
+    assert!(
+        b_started.duration_since(a_started) <= hold_time * 2,
+        "feat-b LayerStarted after {:?}, exceeding 2x feat-a hold time {:?}",
+        b_started.duration_since(a_started),
+        hold_time * 2
+    );
+
+    for _ in 0..50 {
+        if jobs.active_count() == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("features should drain after bounded-starvation test");
 }
 
 /// Cancel feat-B mid-run; feat-A and feat-C continue uninterrupted. The

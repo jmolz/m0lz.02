@@ -58,8 +58,15 @@ pub enum StreamJsonFrame {
     LogChunk { chunk: LogChunk },
     /// End-of-stream marker. Carries the process exit code the CLI will
     /// return after the stream closes (0 / 2 / 3 / 4 / 5 per
-    /// `ExitJsonStatus::exit_code`). Exactly one terminal frame per stream.
-    Terminal { exit_code: i32 },
+    /// `ExitJsonStatus::exit_code`). `status` is present when the terminal
+    /// frame maps to a typed `ExitJsonStatus` discriminant such as
+    /// `logs-stream-ended` or `daemon-disconnected`. Exactly one terminal
+    /// frame per stream.
+    Terminal {
+        exit_code: i32,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        status: Option<String>,
+    },
 }
 
 /// Eight-variant enum covering every real manifest state transition emitted
@@ -404,12 +411,39 @@ mod tests {
 
     #[test]
     fn stream_json_frame_terminal_carries_exit_code() {
-        let frame = StreamJsonFrame::Terminal { exit_code: 2 };
+        let frame = StreamJsonFrame::Terminal {
+            exit_code: 2,
+            status: None,
+        };
         let wire = serde_json::to_string(&frame).unwrap();
         assert_eq!(wire, r#"{"kind":"terminal","exit_code":2}"#);
         let back: StreamJsonFrame = serde_json::from_str(&wire).unwrap();
         match back {
-            StreamJsonFrame::Terminal { exit_code } => assert_eq!(exit_code, 2),
+            StreamJsonFrame::Terminal { exit_code, status } => {
+                assert_eq!(exit_code, 2);
+                assert_eq!(status, None);
+            }
+            other => panic!("expected Terminal frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_json_frame_terminal_can_carry_status() {
+        let frame = StreamJsonFrame::Terminal {
+            exit_code: 0,
+            status: Some("logs-stream-ended".to_string()),
+        };
+        let wire = serde_json::to_string(&frame).unwrap();
+        assert_eq!(
+            wire,
+            r#"{"kind":"terminal","exit_code":0,"status":"logs-stream-ended"}"#
+        );
+        let back: StreamJsonFrame = serde_json::from_str(&wire).unwrap();
+        match back {
+            StreamJsonFrame::Terminal { exit_code, status } => {
+                assert_eq!(exit_code, 0);
+                assert_eq!(status.as_deref(), Some("logs-stream-ended"));
+            }
             other => panic!("expected Terminal frame, got {other:?}"),
         }
     }

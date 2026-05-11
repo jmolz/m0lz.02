@@ -217,6 +217,7 @@ async fn time_one_run(parallel: bool) -> Duration {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
+        prestarted_layer: None,
         saver: &NULL_SAVER,
     };
 

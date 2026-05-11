@@ -20,7 +20,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use pice_core::cli::{CommandRequest, CommandResponse, EvaluateRequest, ExitJsonStatus};
+use pice_core::cli::{
+    CommandRequest, CommandResponse, EvaluateRequest, ExitJsonStatus, StatusMode, StatusRequest,
+};
 use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
 use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
 use pice_core::transport::SocketPath;
@@ -324,6 +326,35 @@ async fn run_id_persists_through_dispatch_and_restart() {
         Some(disk_run_id.as_str()),
         "run_id must be preserved after daemon restart + reconciliation (step f)"
     );
+
+    // Public status surface must report the same persisted run_id after
+    // restart. This pins the contract's `pice status {feature_id}` path,
+    // not just direct disk reload.
+    let status_resp = wire_dispatch(
+        &sock_path2,
+        &token2,
+        2,
+        CommandRequest::Status(StatusRequest {
+            json: true,
+            mode: StatusMode::Detail,
+            feature_id: Some("run-id-persist-feat".to_string()),
+            stream_json: false,
+            timeout_secs: None,
+        }),
+    )
+    .await;
+    match status_resp {
+        CommandResponse::Json { value } => {
+            let manifest: VerificationManifest =
+                serde_json::from_value(value).expect("status detail manifest");
+            assert_eq!(
+                manifest.run_id.as_deref(),
+                Some(disk_run_id.as_str()),
+                "pice status detail must surface the restart-preserved run_id"
+            );
+        }
+        other => panic!("expected Json status detail, got {other:?}"),
+    }
 
     // Cleanup.
     shutdown_daemon(&sock_path2, &token2, handle2).await;

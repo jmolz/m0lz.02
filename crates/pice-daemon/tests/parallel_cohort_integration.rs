@@ -350,6 +350,7 @@ fn make_cfg<'a>(
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
+        prestarted_layer: None,
         saver: &NULL_SAVER,
     }
 }
@@ -780,6 +781,7 @@ async fn global_provider_semaphore_bounds_parallel_layer_provider_sessions() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: Some(provider_sem),
+        prestarted_layer: None,
         saver: &NULL_SAVER,
     };
 

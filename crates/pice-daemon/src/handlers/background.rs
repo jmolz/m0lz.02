@@ -16,12 +16,10 @@
 //!    is a pre-work state and MUST NOT emit a `LayerStarted` event
 //!    (that event is the Queued → InProgress transition inside the
 //!    spawned future).
-//! 8. The closure
-//!    re-opens the manifest, transitions Queued → InProgress via the
-//!    `EventEmittingSaver`, invokes the caller-supplied orchestrator,
-//!    then persists the terminal manifest with the `FeatureCompleted`
-//!    save-intent so `manifest/subscribe` observers see the final
-//!    state.
+//! 8. The closure re-opens the manifest, transitions Queued → InProgress
+//!    via the `EventEmittingSaver`, invokes the caller-supplied
+//!    orchestrator, then persists any terminal manifest not already
+//!    persisted by that orchestrator.
 //! 9. Return `CommandResponse::Json { feature_id, run_id, status:
 //!    "background-dispatched" }`.
 //!
@@ -348,9 +346,11 @@ where
 ///
 /// Loads the just-written Queued manifest from disk, flips
 /// `overall_status` to `InProgress`, stamps `run_id`, and saves via an
-/// [`NullSaver`] so subscribers do not see a duplicate
-/// `LayerStarted`. The Stack Loops orchestrator emits one
-/// `LayerStarted` event per DAG layer when each cohort begins.
+/// [`EventEmittingSaver`] so subscribers see the background task start
+/// after the durable transition lands on disk. Stack Loops receives the
+/// same `layer_hint` as `prestarted_layer` and suppresses that one
+/// duplicate `LayerStarted` event while continuing to emit every other
+/// DAG layer start in order.
 ///
 /// `layer_hint` is retained only for the `SaveIntent` shape consumed by
 /// the saver trait; [`NullSaver`] ignores it.
@@ -367,8 +367,8 @@ pub fn transition_queued_to_in_progress(
     })?;
     manifest.overall_status = ManifestStatus::InProgress;
     manifest.run_id = Some(args.run_id.clone());
-    let _ = events;
-    NullSaver.save_and_emit(
+    let saver = crate::events::EventEmittingSaver::new(events);
+    saver.save_and_emit(
         &manifest,
         &args.manifest_path,
         SaveIntent::LayerStarted {
@@ -505,7 +505,7 @@ paths = ["src/frontend/**"]
     }
 
     #[tokio::test]
-    async fn transition_queued_to_in_progress_writes_in_progress_without_event() {
+    async fn transition_queued_to_in_progress_writes_in_progress_after_event() {
         let state_tmp = tempfile::tempdir().unwrap();
         let _guard = StateDirGuard::new(state_tmp.path());
         let project_tmp = tempfile::tempdir().unwrap();
@@ -523,9 +523,10 @@ paths = ["src/frontend/**"]
         .unwrap();
 
         let events = EventBus::new();
-        // Subscribe BEFORE the transition. The transition helper itself
-        // must not emit LayerStarted; stack_loops owns exactly-once
-        // LayerStarted emission for DAG layers.
+        // Subscribe BEFORE the transition. The transition helper emits
+        // the first LayerStarted event after the InProgress save lands;
+        // stack_loops suppresses that same layer as `prestarted_layer`
+        // so subscribers still see exactly one start per DAG layer.
         let mut rx = events.subscribe_feature("feat-transition");
 
         let args = OrchestratorSpawnArgs {
@@ -548,11 +549,12 @@ paths = ["src/frontend/**"]
         let loaded = VerificationManifest::load(&manifest_path).unwrap();
         assert_eq!(loaded.overall_status, ManifestStatus::InProgress);
 
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-                .await
-                .is_err(),
-            "Queued→InProgress save must not emit a duplicate LayerStarted event"
-        );
+        let payload = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+            .await
+            .expect("Queued→InProgress should emit after save")
+            .expect("event payload");
+        assert_eq!(payload.feature_id, "feat-transition");
+        assert_eq!(payload.run_id, "r-xyz");
+        assert_eq!(payload.layer.as_deref(), Some("backend"));
     }
 }

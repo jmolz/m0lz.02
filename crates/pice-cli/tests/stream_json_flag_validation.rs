@@ -279,8 +279,11 @@ fn stream_json_frame_ndjson_roundtrip_is_stable() {
         );
     }
     lines.push(
-        serde_json::to_string(&StreamJsonFrame::Terminal { exit_code: 0 })
-            .expect("terminal serializes"),
+        serde_json::to_string(&StreamJsonFrame::Terminal {
+            exit_code: 0,
+            status: None,
+        })
+        .expect("terminal serializes"),
     );
     assert_eq!(lines.len(), 50);
 
@@ -315,7 +318,11 @@ fn stream_json_frame_kind_discriminant_values() {
     // Pin the exact kebab-case discriminant wire strings so a future
     // serde rename on `StreamJsonFrame` is caught at CI.
     use pice_core::events::StreamJsonFrame;
-    let terminal = serde_json::to_value(StreamJsonFrame::Terminal { exit_code: 0 }).unwrap();
+    let terminal = serde_json::to_value(StreamJsonFrame::Terminal {
+        exit_code: 0,
+        status: None,
+    })
+    .unwrap();
     assert_eq!(terminal["kind"], "terminal");
     let log_chunk = serde_json::to_value(StreamJsonFrame::LogChunk {
         chunk: pice_core::events::LogChunk {

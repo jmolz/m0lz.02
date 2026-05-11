@@ -231,6 +231,7 @@ async fn stack_loops_uses_dispatch_manifest_path_after_env_mutation() {
         contract_paths: None,
         manifest_path: Some(dispatch_path.as_path()),
         global_provider_semaphore: None,
+        prestarted_layer: None,
         saver: &saver,
     };
     let pass_sink: Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = Arc::new(NullPassSink);

@@ -17,7 +17,7 @@
 use pice_core::layers::manifest::VerificationManifest;
 use pice_core::protocol::{
     methods,
-    subscribe::{SubscribeManifestRequest, SubscribeManifestResponse},
+    subscribe::{LogsStreamRequest, SubscribeManifestRequest, SubscribeManifestResponse},
     DaemonRequest, DaemonResponse,
 };
 use pice_core::transport::SocketPath;
@@ -258,6 +258,100 @@ async fn subscribe_notifications_follow_snapshot_on_same_connection_without_id()
 }
 
 #[tokio::test]
+async fn logs_chunk_notifications_follow_snapshot_on_same_connection_without_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let _guard = StateDirGuard::new(&state_dir);
+
+    let project = tempfile::tempdir().expect("project");
+    let sock_path = dir.path().join("daemon.sock");
+    let token = auth::generate_token().expect("token");
+    let ctx = Arc::new(DaemonContext::new(
+        token.clone(),
+        project.path().to_path_buf(),
+    ));
+    let handle = spawn_test_accept_loop(Arc::clone(&ctx), sock_path.clone());
+
+    wait_for_socket(&sock_path).await;
+
+    let stream = UnixStream::connect(&sock_path).await.expect("connect");
+    let mut conn = UnixConnection::new(stream);
+    let params = serde_json::to_value(&LogsStreamRequest {
+        feature_id: "wire-logs".to_string(),
+        layer: None,
+        follow: true,
+        include_history: true,
+    })
+    .unwrap();
+    let req = DaemonRequest::new(1, methods::LOGS_STREAM, &token, params);
+    conn.write_message(&req).await.expect("write logs/stream");
+
+    let resp: serde_json::Value = conn
+        .read_message()
+        .await
+        .expect("read response")
+        .expect("not EOF");
+    assert_eq!(resp["id"], 1);
+    assert!(
+        resp.get("result").is_some(),
+        "logs snapshot response: {resp}"
+    );
+
+    ctx.logs()
+        .append_chunk("wire-logs", "run-logs", "backend", "live log\n".to_string())
+        .await;
+
+    let notif: serde_json::Value = conn
+        .read_message()
+        .await
+        .expect("read logs/chunk notification")
+        .expect("not EOF");
+    assert_eq!(notif["jsonrpc"], "2.0");
+    assert_eq!(notif["method"], methods::LOGS_CHUNK);
+    assert!(
+        notif.get("id").is_none(),
+        "JSON-RPC logs/chunk notifications must not carry id: {notif}"
+    );
+    assert_eq!(notif["params"]["feature_id"], "wire-logs");
+    assert_eq!(notif["params"]["run_id"], "run-logs");
+    assert_eq!(notif["params"]["layer"], "backend");
+    assert_eq!(notif["params"]["text"], "live log\n");
+
+    ctx.logs()
+        .append_terminal_frame("wire-logs", "run-logs", "passed")
+        .await;
+    let terminal: serde_json::Value = conn
+        .read_message()
+        .await
+        .expect("read terminal logs/chunk notification")
+        .expect("not EOF");
+    assert_eq!(terminal["method"], methods::LOGS_CHUNK);
+    assert!(terminal.get("id").is_none());
+    assert_eq!(terminal["params"]["terminal"], true);
+
+    drop(conn);
+
+    let stream = UnixStream::connect(&sock_path)
+        .await
+        .expect("connect shutdown");
+    let mut shutdown_conn = UnixConnection::new(stream);
+    let shutdown_req =
+        DaemonRequest::new(2, methods::DAEMON_SHUTDOWN, &token, serde_json::json!({}));
+    shutdown_conn
+        .write_message(&shutdown_req)
+        .await
+        .expect("write shutdown");
+    let _: DaemonResponse = shutdown_conn
+        .read_message()
+        .await
+        .expect("read shutdown")
+        .expect("not EOF");
+    drop(shutdown_conn);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test]
 async fn subscribe_wildcard_snapshot_ignores_other_projects() {
     // Wildcard subscribe (feature_id: None) returns every manifest under the
     // project namespace. Project isolation across different root paths is
@@ -429,6 +523,125 @@ async fn connection_drop_cleans_up() {
         .await
         .expect("daemon exits within 5s after shutdown");
     result.expect("join ok").expect("clean exit");
+}
+
+#[tokio::test]
+async fn n_socket_subscriptions_across_varied_features_drop_receiver_counts_to_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let _guard = StateDirGuard::new(&state_dir);
+
+    let project = tempfile::tempdir().expect("project");
+    let sock_path = dir.path().join("daemon.sock");
+    let token = auth::generate_token().expect("token");
+    let ctx = Arc::new(DaemonContext::new(
+        token.clone(),
+        project.path().to_path_buf(),
+    ));
+    let handle = spawn_test_accept_loop(Arc::clone(&ctx), sock_path.clone());
+
+    wait_for_socket(&sock_path).await;
+
+    let feature_ids = ["cleanup-a", "cleanup-b", "cleanup-c", "cleanup-d"];
+    let mut conns = Vec::new();
+    for (idx, feature_id) in feature_ids.iter().enumerate() {
+        let stream = UnixStream::connect(&sock_path)
+            .await
+            .unwrap_or_else(|e| panic!("connect {feature_id}: {e}"));
+        let mut conn = UnixConnection::new(stream);
+        let params = serde_json::to_value(&SubscribeManifestRequest {
+            feature_id: Some((*feature_id).to_string()),
+        })
+        .unwrap();
+        let req = DaemonRequest::new(idx as u64 + 1, methods::MANIFEST_SUBSCRIBE, &token, params);
+        conn.write_message(&req).await.expect("write subscribe");
+        let resp: DaemonResponse = conn
+            .read_message()
+            .await
+            .expect("read snapshot")
+            .expect("not EOF");
+        assert_eq!(resp.id, idx as u64 + 1);
+        assert!(resp.error.is_none());
+        conns.push(conn);
+    }
+
+    let stream = UnixStream::connect(&sock_path)
+        .await
+        .expect("connect wildcard");
+    let mut wildcard = UnixConnection::new(stream);
+    let req = DaemonRequest::new(
+        99,
+        methods::MANIFEST_SUBSCRIBE,
+        &token,
+        serde_json::to_value(&SubscribeManifestRequest { feature_id: None }).unwrap(),
+    );
+    wildcard
+        .write_message(&req)
+        .await
+        .expect("write wildcard subscribe");
+    let resp: DaemonResponse = wildcard
+        .read_message()
+        .await
+        .expect("read wildcard snapshot")
+        .expect("not EOF");
+    assert_eq!(resp.id, 99);
+    assert!(resp.error.is_none());
+    conns.push(wildcard);
+
+    for feature_id in feature_ids {
+        assert_eq!(
+            ctx.events().feature_receiver_count(feature_id),
+            1,
+            "one socket receiver should be registered for {feature_id}"
+        );
+    }
+    assert_eq!(
+        ctx.events().wildcard_receiver_count(),
+        1,
+        "one wildcard socket receiver should be registered"
+    );
+
+    drop(conns);
+
+    for _ in 0..50 {
+        if ctx.events().total_receiver_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(
+        ctx.events().total_receiver_count(),
+        0,
+        "all socket-backed manifest subscriptions should clean up on close"
+    );
+    for feature_id in feature_ids {
+        assert_eq!(
+            ctx.events().feature_receiver_count(feature_id),
+            0,
+            "receiver count should return to zero for {feature_id}"
+        );
+    }
+    assert_eq!(ctx.events().wildcard_receiver_count(), 0);
+
+    let stream = UnixStream::connect(&sock_path)
+        .await
+        .expect("connect shutdown");
+    let mut shutdown_conn = UnixConnection::new(stream);
+    let shutdown_req =
+        DaemonRequest::new(100, methods::DAEMON_SHUTDOWN, &token, serde_json::json!({}));
+    shutdown_conn
+        .write_message(&shutdown_req)
+        .await
+        .expect("write shutdown");
+    let _: DaemonResponse = shutdown_conn
+        .read_message()
+        .await
+        .expect("read shutdown")
+        .expect("not EOF");
+    drop(shutdown_conn);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }
 
 #[test]

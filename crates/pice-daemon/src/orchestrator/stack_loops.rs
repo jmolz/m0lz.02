@@ -89,6 +89,11 @@ pub struct StackLoopsConfig<'a> {
     /// This is separate from `defaults.max_parallelism`, which only limits
     /// the number of cohort tasks spawned inside one feature.
     pub global_provider_semaphore: Option<Arc<Semaphore>>,
+    /// Layer whose `LayerStarted` event was already emitted by the
+    /// background Queued→InProgress transition before entering Stack Loops.
+    /// Foreground runs leave this unset. The orchestrator still evaluates
+    /// the layer normally; it only suppresses the duplicate start event.
+    pub prestarted_layer: Option<&'a str>,
     /// Phase 7: manifest persistence + event-bus publication handle. Every
     /// manifest state transition in the orchestrator goes through this
     /// saver so the save + event emission are atomic. Inline mode and
@@ -354,6 +359,9 @@ pub async fn run_stack_loops_with_cancel(
         // no-event save specifically to avoid duplicating the first layer.
         if let Some(ref path) = manifest_path {
             for layer_name in cohort {
+                if cfg.prestarted_layer == Some(layer_name.as_str()) {
+                    continue;
+                }
                 if let Err(e) = cfg.saver.save_and_emit(
                     &manifest,
                     path,
@@ -1746,6 +1754,7 @@ async fn try_run_layer_adaptive_owned(
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore,
+        prestarted_layer: None,
         saver: &saver,
     };
     try_run_layer_adaptive(
@@ -1919,6 +1928,7 @@ mod tests {
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
+            prestarted_layer: None,
             saver: &saver,
         };
 
@@ -2025,6 +2035,7 @@ mod tests {
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
+            prestarted_layer: None,
             saver: &saver,
         };
 
@@ -2196,6 +2207,7 @@ mod tests {
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
+            prestarted_layer: None,
             saver: &saver,
         };
 

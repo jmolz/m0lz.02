@@ -269,6 +269,7 @@ async fn concurrent_evaluations_on_shared_db_have_disjoint_pass_events() {
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
+            prestarted_layer: None,
             saver: &NULL_SAVER,
         };
         run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap()
@@ -293,6 +294,7 @@ async fn concurrent_evaluations_on_shared_db_have_disjoint_pass_events() {
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
+            prestarted_layer: None,
             saver: &NULL_SAVER,
         };
         run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap()

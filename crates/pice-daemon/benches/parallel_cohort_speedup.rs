@@ -172,6 +172,7 @@ async fn run_once(parallel: bool, latency_ms: u64) {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
+        prestarted_layer: None,
         saver: &NULL_SAVER,
     };
 

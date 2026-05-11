@@ -216,7 +216,9 @@ fn maybe_emit_logs_stream_ended(json: bool) -> Result<()> {
 
 fn emit_logs_stream_terminal(stream_json: bool, exit_code: i32) -> Result<()> {
     if stream_json {
-        let frame = StreamJsonFrame::Terminal { exit_code };
+        let status = (exit_code == ExitJsonStatus::LogsStreamEnded.exit_code())
+            .then(|| ExitJsonStatus::LogsStreamEnded.as_str().to_string());
+        let frame = StreamJsonFrame::Terminal { exit_code, status };
         println!("{}", serde_json::to_string(&frame)?);
     }
     Ok(())

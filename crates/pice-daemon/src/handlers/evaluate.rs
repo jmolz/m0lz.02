@@ -568,6 +568,7 @@ pub async fn run(
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: Some(ctx.jobs().provider_semaphore()),
+            prestarted_layer: None,
             saver: &saver,
         };
 
@@ -1544,7 +1545,7 @@ async fn run_background(
             // manifest (Passed / Failed / PendingReview). Errors
             // escape via a Failed layer so terminal observability is
             // preserved.
-            let manifest = run_evaluate_orchestrator(
+            let manifest = match run_evaluate_orchestrator(
                 &args,
                 &plan_path_owned,
                 &config_owned,
@@ -1552,35 +1553,42 @@ async fn run_background(
                 &events_for_spawn,
                 &logs_for_spawn,
                 provider_semaphore_for_spawn.clone(),
+                &first_layer_hint,
                 json_mode,
                 &cancel,
             )
             .await
-            .unwrap_or_else(|e| {
-                tracing::error!(
-                    feature_id = %args.feature_id,
-                    run_id = %args.run_id,
-                    error = %e,
-                    "background evaluate orchestrator returned Err"
-                );
-                let mut err_manifest = manifest.clone();
-                err_manifest.overall_status = ManifestStatus::Failed;
-                err_manifest
-                    .layers
-                    .push(pice_core::layers::manifest::LayerResult {
-                        name: first_layer_hint.clone(),
-                        status: pice_core::layers::manifest::LayerStatus::Failed,
-                        passes: Vec::new(),
-                        seam_checks: Vec::new(),
-                        halted_by: Some(format!("runtime_error:{e}")),
-                        final_confidence: None,
-                        total_cost_usd: None,
-                        escalation_events: None,
-                    });
-                err_manifest
-            });
-
-            finalize_terminal_manifest(&manifest, &args.manifest_path, &events_for_spawn)?;
+            {
+                Ok(manifest) => manifest,
+                Err(e) => {
+                    tracing::error!(
+                        feature_id = %args.feature_id,
+                        run_id = %args.run_id,
+                        error = %e,
+                        "background evaluate orchestrator returned Err"
+                    );
+                    let mut err_manifest = manifest.clone();
+                    err_manifest.overall_status = ManifestStatus::Failed;
+                    err_manifest
+                        .layers
+                        .push(pice_core::layers::manifest::LayerResult {
+                            name: first_layer_hint.clone(),
+                            status: pice_core::layers::manifest::LayerStatus::Failed,
+                            passes: Vec::new(),
+                            seam_checks: Vec::new(),
+                            halted_by: Some(format!("runtime_error:{e}")),
+                            final_confidence: None,
+                            total_cost_usd: None,
+                            escalation_events: None,
+                        });
+                    finalize_terminal_manifest(
+                        &err_manifest,
+                        &args.manifest_path,
+                        &events_for_spawn,
+                    )?;
+                    err_manifest
+                }
+            };
             let reason = match manifest.overall_status {
                 ManifestStatus::Passed => "passed",
                 ManifestStatus::Failed => "failed",
@@ -1615,6 +1623,7 @@ async fn run_evaluate_orchestrator(
     events: &crate::events::EventBus,
     logs: &crate::logs::LogStore,
     provider_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    prestarted_layer: &str,
     _json_mode: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<pice_core::layers::manifest::VerificationManifest> {
@@ -1690,6 +1699,7 @@ async fn run_evaluate_orchestrator(
         contract_paths: Some(&args.env.contracts),
         manifest_path: Some(args.manifest_path.as_path()),
         global_provider_semaphore: Some(provider_semaphore),
+        prestarted_layer: Some(prestarted_layer),
         saver: &saver,
     };
 

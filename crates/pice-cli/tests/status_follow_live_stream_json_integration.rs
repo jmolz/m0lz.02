@@ -191,7 +191,10 @@ fn status_follow_stream_json_drains_live_burst_and_terminal_status_alias() {
     let terminal: StreamJsonFrame = serde_json::from_str(lines[51]).expect("terminal frame");
     assert!(matches!(
         terminal,
-        StreamJsonFrame::Terminal { exit_code: 0 }
+        StreamJsonFrame::Terminal {
+            exit_code: 0,
+            status: None
+        }
     ));
 }
 
@@ -263,7 +266,8 @@ fn status_follow_stream_json_exits_five_on_disconnect_before_terminal() {
     assert!(matches!(
         frame,
         StreamJsonFrame::Terminal {
-            exit_code
+            exit_code,
+            ..
         } if exit_code == ExitJsonStatus::DaemonDisconnected.exit_code()
     ));
 }
@@ -350,6 +354,9 @@ fn status_follow_stream_json_sigint_emits_terminal_130() {
     let frame: StreamJsonFrame = serde_json::from_str(terminal).expect("parse terminal");
     assert!(matches!(
         frame,
-        StreamJsonFrame::Terminal { exit_code: 130 }
+        StreamJsonFrame::Terminal {
+            exit_code: 130,
+            status: None
+        }
     ));
 }

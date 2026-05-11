@@ -130,6 +130,7 @@ layer_overrides:
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
+        prestarted_layer: None,
         saver: &NULL_SAVER,
     };
 
@@ -229,6 +230,7 @@ paths = ["src/server/**"]
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
+        prestarted_layer: None,
         saver: &NULL_SAVER,
     };
 

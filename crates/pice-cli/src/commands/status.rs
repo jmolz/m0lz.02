@@ -463,7 +463,10 @@ fn emit_stream_event(payload: &ManifestEventPayload) -> Result<()> {
 }
 
 fn emit_stream_terminal(code: i32) -> Result<()> {
-    let frame = StreamJsonFrame::Terminal { exit_code: code };
+    let frame = StreamJsonFrame::Terminal {
+        exit_code: code,
+        status: None,
+    };
     println!("{}", serde_json::to_string(&frame)?);
     Ok(())
 }

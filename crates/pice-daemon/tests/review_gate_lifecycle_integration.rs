@@ -548,6 +548,7 @@ async fn scenario_8_cancellation_during_pending_review() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
+        prestarted_layer: None,
         saver: &null_saver,
     };
 
