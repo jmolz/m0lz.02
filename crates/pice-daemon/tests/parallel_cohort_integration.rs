@@ -65,6 +65,14 @@ struct ParallelStubGuard {
 
 impl ParallelStubGuard {
     fn new(per_layer_scores: &[(&str, &str)], latency_ms: Option<u64>) -> Self {
+        Self::new_with_adversarial(per_layer_scores, latency_ms, None)
+    }
+
+    fn new_with_adversarial(
+        per_layer_scores: &[(&str, &str)],
+        latency_ms: Option<u64>,
+        adversarial_scores: Option<&str>,
+    ) -> Self {
         let guard = stub_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let mut env_keys = Vec::new();
         for (layer, scores) in per_layer_scores {
@@ -80,6 +88,12 @@ impl ParallelStubGuard {
         // per-layer scores can't accidentally pick up a leftover shared
         // list from some earlier run.
         std::env::remove_var("PICE_STUB_SCORES");
+        if let Some(scores) = adversarial_scores {
+            std::env::set_var("PICE_STUB_ADVERSARIAL_SCORES", scores);
+            env_keys.push("PICE_STUB_ADVERSARIAL_SCORES".to_string());
+        } else {
+            std::env::remove_var("PICE_STUB_ADVERSARIAL_SCORES");
+        }
         Self {
             _guard: guard,
             env_keys,
@@ -817,6 +831,83 @@ async fn global_provider_semaphore_bounds_parallel_layer_provider_sessions() {
         active_stub_session_count(&alive_path),
         0,
         "all provider sessions should be shut down after evaluation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_provider_semaphore_acquires_adts_provider_pair_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_two_layer_repo(dir.path());
+    let layers = two_layer_independent_config();
+    let mut pice_config = stub_pice_config();
+    pice_config.evaluation.adversarial.enabled = true;
+    pice_config.evaluation.adversarial.model = "stub-adversarial".to_string();
+    let mut wf = workflow(true, Some(4), 1);
+    wf.phases.evaluate.adaptive_algorithm = AdaptiveAlgo::Adts;
+    let seams = BTreeMap::new();
+    let provider_sem = Arc::new(Semaphore::new(2));
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: dir.path(),
+        primary_provider: "stub",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &wf,
+        merged_seams: &seams,
+        contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: Some(provider_sem),
+        prestarted_layer: None,
+        saver: &NULL_SAVER,
+    };
+
+    let alive_path = dir.path().join("stub-adts-provider-sessions.log");
+    std::fs::write(&alive_path, "").unwrap();
+    let _stub = ParallelStubGuard::new_with_adversarial(
+        &[("backend", "9.0,0.01"), ("frontend", "9.0,0.01")],
+        Some(250),
+        Some("3.0,0.01"),
+    );
+    let _alive = StubAliveFileGuard::new(&alive_path);
+
+    let run = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_stack_loops_with_cancel(
+            &cfg,
+            &NullSink,
+            true,
+            null_sink_arc(),
+            CancellationToken::new(),
+        ),
+    );
+    tokio::pin!(run);
+
+    let mut peak_active = 0;
+    let manifest = loop {
+        tokio::select! {
+            result = run.as_mut() => {
+                let manifest = result
+                    .expect("ADTS run must not deadlock while waiting for adversarial permits")
+                    .expect("stack loops should complete");
+                break manifest;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                peak_active = peak_active.max(active_stub_session_count(&alive_path));
+            }
+        }
+    };
+    peak_active = peak_active.max(active_stub_session_count(&alive_path));
+
+    assert_eq!(manifest.layers.len(), 2);
+    assert!(
+        peak_active <= 2,
+        "ADTS primary+adversarial provider sessions must respect the global cap; peak={peak_active}"
+    );
+    assert_eq!(
+        active_stub_session_count(&alive_path),
+        0,
+        "all ADTS provider sessions should be shut down after evaluation"
     );
 }
 

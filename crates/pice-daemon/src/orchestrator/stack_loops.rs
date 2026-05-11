@@ -915,21 +915,27 @@ enum LayerAdaptiveResult {
     RuntimeError(String),
 }
 
-async fn acquire_provider_session_permit(
+async fn acquire_provider_session_permits(
     semaphore: Option<&Arc<Semaphore>>,
     layer_name: &str,
-    role: &str,
+    session_count: u32,
 ) -> Result<Option<OwnedSemaphorePermit>, String> {
+    if session_count == 0 {
+        return Ok(None);
+    }
     let Some(semaphore) = semaphore else {
         return Ok(None);
     };
     semaphore
         .clone()
-        .acquire_owned()
+        .acquire_many_owned(session_count)
         .await
         .map(Some)
         .map_err(|e| {
-            format!("global provider semaphore closed before {role} provider for layer {layer_name}: {e}")
+            format!(
+                "global provider semaphore closed before acquiring {session_count} provider \
+                 session permit(s) for layer {layer_name}: {e}"
+            )
         })
 }
 
@@ -990,10 +996,35 @@ async fn try_run_layer_adaptive(
         return LayerAdaptiveResult::NotStarted;
     }
 
-    let _primary_provider_permit = match acquire_provider_session_permit(
+    let needs_adversarial = algo == pice_core::workflow::schema::AdaptiveAlgo::Adts
+        && cfg.pice_config.evaluation.adversarial.enabled;
+    if needs_adversarial
+        && pice_core::provider::registry::resolve(
+            &cfg.pice_config.evaluation.adversarial.provider,
+            cfg.pice_config,
+        )
+        .is_none()
+    {
+        warn!(
+            layer = %layer_name,
+            provider = %cfg.pice_config.evaluation.adversarial.provider,
+            "adversarial provider unresolvable, falling back to phase-1-pending",
+        );
+        // ADTS without adversarial is degenerate — fall back before starting
+        // the primary provider.
+        return LayerAdaptiveResult::NotStarted;
+    }
+
+    // Reserve every provider session this layer needs as one semaphore unit.
+    // ADTS starts both primary and adversarial providers; acquiring one permit
+    // at a time can deadlock when two layers each hold a primary permit and
+    // both wait for their adversarial permit. `acquire_many_owned(2)` queues
+    // the whole layer until the full pair is available.
+    let required_provider_sessions = if needs_adversarial { 2 } else { 1 };
+    let _provider_session_permits = match acquire_provider_session_permits(
         cfg.global_provider_semaphore.as_ref(),
         layer_name,
-        "primary",
+        required_provider_sessions,
     )
     .await
     {
@@ -1059,41 +1090,7 @@ async fn try_run_layer_adaptive(
     }
 
     // Start the adversarial provider only when ADTS is selected.
-    let mut _adversarial_provider_permit: Option<OwnedSemaphorePermit> = None;
-    let mut adversarial: Option<ProviderOrchestrator> = if algo
-        == pice_core::workflow::schema::AdaptiveAlgo::Adts
-        && cfg.pice_config.evaluation.adversarial.enabled
-    {
-        // Same resolve-then-start classification for the adversarial path.
-        if pice_core::provider::registry::resolve(
-            &cfg.pice_config.evaluation.adversarial.provider,
-            cfg.pice_config,
-        )
-        .is_none()
-        {
-            warn!(
-                layer = %layer_name,
-                provider = %cfg.pice_config.evaluation.adversarial.provider,
-                "adversarial provider unresolvable, falling back to phase-1-pending",
-            );
-            // ADTS without adversarial is degenerate — shut down primary and fall back.
-            let _ = primary.shutdown().await;
-            return LayerAdaptiveResult::NotStarted;
-        }
-        _adversarial_provider_permit = match acquire_provider_session_permit(
-            cfg.global_provider_semaphore.as_ref(),
-            layer_name,
-            "adversarial",
-        )
-        .await
-        {
-            Ok(permit) => permit,
-            Err(msg) => {
-                warn!(layer = %layer_name, "{msg}");
-                let _ = primary.shutdown().await;
-                return LayerAdaptiveResult::RuntimeError(msg);
-            }
-        };
+    let mut adversarial: Option<ProviderOrchestrator> = if needs_adversarial {
         match ProviderOrchestrator::start(
             &cfg.pice_config.evaluation.adversarial.provider,
             cfg.pice_config,

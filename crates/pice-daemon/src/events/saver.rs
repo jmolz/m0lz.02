@@ -112,12 +112,26 @@ pub trait ManifestSaver: Send + Sync {
 /// `DaemonContext`) and hand out `&dyn ManifestSaver` references.
 pub struct EventEmittingSaver<'a> {
     bus: &'a EventBus,
+    hooks: EventEmittingSaverHooks<'a>,
 }
 
 impl<'a> EventEmittingSaver<'a> {
     /// Wrap a bus reference in the saver.
     pub fn new(bus: &'a EventBus) -> Self {
-        Self { bus }
+        Self {
+            bus,
+            hooks: EventEmittingSaverHooks::default(),
+        }
+    }
+
+    /// Wrap a bus reference in the saver with test/diagnostic hooks.
+    ///
+    /// Production code uses [`Self::new`]. The hooks exist so integration
+    /// coverage can prove the event bus remains silent before the durable
+    /// manifest write completes, without replacing the production saver.
+    #[doc(hidden)]
+    pub fn new_with_hooks(bus: &'a EventBus, hooks: EventEmittingSaverHooks<'a>) -> Self {
+        Self { bus, hooks }
     }
 
     /// Build the event payload from the intent + manifest metadata
@@ -223,9 +237,36 @@ impl<'a> ManifestSaver for EventEmittingSaver<'a> {
         // Save first — a failed save must NOT emit an event. The
         // inverse ordering would leave subscribers chasing a state the
         // disk never reflected.
+        self.hooks.before_save();
         manifest.save(path)?;
+        self.hooks.after_save_before_emit();
         self.emit_for_intent(manifest, intent);
         Ok(())
+    }
+}
+
+/// Optional instrumentation callbacks for [`EventEmittingSaver`].
+///
+/// The callbacks are intentionally sync and borrow-only: they cannot mutate
+/// saver state or replace the production save/emit ordering. Integration tests
+/// use them to observe the exact point after persistence and before publish.
+#[derive(Clone, Copy, Default)]
+pub struct EventEmittingSaverHooks<'a> {
+    pub before_save: Option<&'a (dyn Fn() + Send + Sync)>,
+    pub after_save_before_emit: Option<&'a (dyn Fn() + Send + Sync)>,
+}
+
+impl EventEmittingSaverHooks<'_> {
+    fn before_save(&self) {
+        if let Some(hook) = self.before_save {
+            hook();
+        }
+    }
+
+    fn after_save_before_emit(&self) {
+        if let Some(hook) = self.after_save_before_emit {
+            hook();
+        }
     }
 }
 
