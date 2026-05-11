@@ -438,9 +438,9 @@ paths = ["src/**"]
     assert!(json["error"].is_string());
 }
 
-/// Phase 7 remediation: background evaluate is Stack-Loops-only. Without
-/// `.pice/layers.toml`, it must reject before dispatch and emit a typed
-/// structured status instead of writing a synthetic Passed manifest.
+/// Phase 7 remediation: binary integration tests run under inline mode, so
+/// `--background` must reject with the inline-mode typed status before lower
+/// level background preflights such as missing `.pice/layers.toml`.
 #[test]
 fn evaluate_background_json_missing_layers_toml_emits_exit_json_on_stdout() {
     let dir = tempfile::tempdir().unwrap();
@@ -462,10 +462,13 @@ fn evaluate_background_json_missing_layers_toml_emits_exit_json_on_stdout() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!("layers-toml-missing must emit JSON on stdout; parse error: {e}\n{stdout}")
+        panic!("inline background rejection must emit JSON on stdout; parse error: {e}\n{stdout}")
     });
-    assert_eq!(json["status"], ExitJsonStatus::LayersTomlMissing.as_str());
-    assert!(json["layers_path"].is_string());
+    assert_eq!(
+        json["status"],
+        ExitJsonStatus::InlineModeBackgroundUnsupported.as_str()
+    );
+    assert!(json["plan_path"].is_string());
 }
 
 /// Phase 3 round-4 adversarial fix: workflow.yaml validation failure under
