@@ -568,7 +568,7 @@ pub async fn run(
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: Some(ctx.jobs().provider_semaphore()),
-            prestarted_layer: None,
+            global_provider_capacity: Some(ctx.jobs().provider_capacity()),
             saver: &saver,
         };
 
@@ -1491,6 +1491,7 @@ async fn run_background(
     let events_for_spawn = ctx.events().clone();
     let logs_for_spawn = ctx.logs().clone();
     let provider_semaphore_for_spawn = ctx.jobs().provider_semaphore();
+    let provider_capacity_for_spawn = ctx.jobs().provider_capacity();
     let plan_path_owned = plan_path.to_path_buf();
     let json_mode = req.json;
 
@@ -1506,18 +1507,7 @@ async fn run_background(
             // manager's admission permit immediately so it cannot deadlock
             // with per-layer provider permits from the same semaphore.
             drop(permit);
-            // First-layer hint: peek at layers.toml to name the first
-            // cohort. The hint is best-effort — if layers.toml is
-            // missing we fall back to the feature_id so the
-            // `LayerStarted` event still carries identifying payload.
-            let layers_path = args.env.project_root.join(".pice/layers.toml");
-            let first_layer_hint = pice_core::layers::LayersConfig::load(&layers_path)
-                .ok()
-                .and_then(|cfg| cfg.layers.order.first().cloned())
-                .unwrap_or_else(|| args.feature_id.clone());
-
-            let mut manifest =
-                transition_queued_to_in_progress(&args, &events_for_spawn, &first_layer_hint)?;
+            let mut manifest = transition_queued_to_in_progress(&args)?;
 
             // Honor cancel fired between dispatch and the transition.
             if cancel.is_cancelled() {
@@ -1525,7 +1515,7 @@ async fn run_background(
                 manifest
                     .layers
                     .push(pice_core::layers::manifest::LayerResult {
-                        name: first_layer_hint.clone(),
+                        name: args.feature_id.clone(),
                         status: pice_core::layers::manifest::LayerStatus::Failed,
                         passes: Vec::new(),
                         seam_checks: Vec::new(),
@@ -1553,7 +1543,7 @@ async fn run_background(
                 &events_for_spawn,
                 &logs_for_spawn,
                 provider_semaphore_for_spawn.clone(),
-                &first_layer_hint,
+                provider_capacity_for_spawn,
                 json_mode,
                 &cancel,
             )
@@ -1572,7 +1562,7 @@ async fn run_background(
                     err_manifest
                         .layers
                         .push(pice_core::layers::manifest::LayerResult {
-                            name: first_layer_hint.clone(),
+                            name: args.feature_id.clone(),
                             status: pice_core::layers::manifest::LayerStatus::Failed,
                             passes: Vec::new(),
                             seam_checks: Vec::new(),
@@ -1623,7 +1613,7 @@ async fn run_evaluate_orchestrator(
     events: &crate::events::EventBus,
     logs: &crate::logs::LogStore,
     provider_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
-    prestarted_layer: &str,
+    provider_capacity: u32,
     _json_mode: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<pice_core::layers::manifest::VerificationManifest> {
@@ -1699,7 +1689,7 @@ async fn run_evaluate_orchestrator(
         contract_paths: Some(&args.env.contracts),
         manifest_path: Some(args.manifest_path.as_path()),
         global_provider_semaphore: Some(provider_semaphore),
-        prestarted_layer: Some(prestarted_layer),
+        global_provider_capacity: Some(provider_capacity),
         saver: &saver,
     };
 
@@ -1710,21 +1700,23 @@ async fn run_evaluate_orchestrator(
     // chunks still need to be captured for `pice logs`. Use the same
     // LogStore-backed sink as background execute and pass `json_mode=false`
     // so Stack Loops does not suppress chunk forwarding.
-    let sink: std::sync::Arc<dyn crate::orchestrator::StreamSink> =
-        std::sync::Arc::new(crate::logs::LogStoreSink::new(
-            logs.clone(),
-            args.feature_id.clone(),
-            args.run_id.clone(),
-            "evaluate",
-        ));
-    crate::orchestrator::stack_loops::run_stack_loops_with_cancel(
+    let log_sink = std::sync::Arc::new(crate::logs::LogStoreSink::new(
+        logs.clone(),
+        args.feature_id.clone(),
+        args.run_id.clone(),
+        "evaluate",
+    ));
+    let sink: std::sync::Arc<dyn crate::orchestrator::StreamSink> = log_sink.clone();
+    let manifest = crate::orchestrator::stack_loops::run_stack_loops_with_cancel(
         &cfg,
         sink.as_ref(),
         false,
         pass_sink,
         cancel.clone(),
     )
-    .await
+    .await;
+    log_sink.flush().await;
+    manifest
 }
 
 #[cfg(test)]

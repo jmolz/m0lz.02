@@ -41,6 +41,7 @@
 
 #![cfg(unix)]
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -168,6 +169,27 @@ always_run = true
     .unwrap();
 }
 
+fn write_layers_toml_with_inactive_first(root: &std::path::Path) {
+    let pice_dir = root.join(".pice");
+    std::fs::create_dir_all(&pice_dir).unwrap();
+    std::fs::write(
+        pice_dir.join("layers.toml"),
+        r#"
+[layers]
+order = ["inactive", "backend"]
+
+[layers.inactive]
+paths = ["docs/**"]
+always_run = false
+
+[layers.backend]
+paths = ["src/lib.rs"]
+always_run = false
+"#,
+    )
+    .unwrap();
+}
+
 fn write_stub_config(root: &std::path::Path) {
     let pice_dir = root.join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
@@ -217,6 +239,8 @@ defaults:
   model: stub-model
   budget_usd: 2.0
   cost_cap_behavior: halt
+  max_parallelism: 4
+  max_global_provider_concurrency: 2
 phases:
   evaluate:
     parallel: false
@@ -236,10 +260,19 @@ struct StubProviderEnv {
 
 impl StubProviderEnv {
     fn new(latency_ms: u64) -> Self {
+        Self::with_alive_file(latency_ms, None)
+    }
+
+    fn with_alive_file(latency_ms: u64, alive_file: Option<&std::path::Path>) -> Self {
         let guard = stub_env_lock().lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("PICE_STUB_SCORES", "9.5,0.001");
         std::env::set_var("PICE_STUB_LATENCY_MS", latency_ms.to_string());
         std::env::remove_var("PICE_STUB_ADVERSARIAL_SCORES");
+        if let Some(path) = alive_file {
+            std::env::set_var("PICE_STUB_ALIVE_FILE", path);
+        } else {
+            std::env::remove_var("PICE_STUB_ALIVE_FILE");
+        }
         Self { _guard: guard }
     }
 }
@@ -249,6 +282,81 @@ impl Drop for StubProviderEnv {
         std::env::remove_var("PICE_STUB_SCORES");
         std::env::remove_var("PICE_STUB_LATENCY_MS");
         std::env::remove_var("PICE_STUB_ADVERSARIAL_SCORES");
+        std::env::remove_var("PICE_STUB_ALIVE_FILE");
+    }
+}
+
+fn active_stub_session_count(path: &std::path::Path) -> usize {
+    let contents = std::fs::read_to_string(path).unwrap_or_default();
+    let mut started = HashSet::<i32>::new();
+    let mut finished = HashSet::<i32>::new();
+    for line in contents.lines() {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        if parts.len() != 2 {
+            continue;
+        }
+        let Ok(pid) = parts[1].parse::<i32>() else {
+            continue;
+        };
+        match parts[0] {
+            "alive" => {
+                started.insert(pid);
+            }
+            "done" => {
+                finished.insert(pid);
+            }
+            _ => {}
+        }
+    }
+    started.difference(&finished).count()
+}
+
+async fn dispatch_background_evaluate(
+    sock_path: &std::path::Path,
+    token: &str,
+    id: u64,
+    plan_path: std::path::PathBuf,
+) -> (String, String) {
+    let stream = UnixStream::connect(sock_path)
+        .await
+        .expect("connect dispatch");
+    let mut conn = UnixConnection::new(stream);
+    let req = CommandRequest::Evaluate(EvaluateRequest {
+        plan_path,
+        json: true,
+        background: true,
+        wait: false,
+        timeout_secs: None,
+    });
+    let daemon_req = DaemonRequest::new(
+        id,
+        methods::CLI_DISPATCH,
+        token,
+        serde_json::to_value(req).expect("serialize command request"),
+    );
+    conn.write_message(&daemon_req)
+        .await
+        .expect("write dispatch");
+    let resp: DaemonResponse = conn
+        .read_message()
+        .await
+        .expect("read dispatch")
+        .expect("not EOF");
+    assert!(resp.error.is_none(), "dispatch error: {:?}", resp.error);
+    let response: CommandResponse =
+        serde_json::from_value(resp.result.expect("dispatch result")).expect("command response");
+    match response {
+        CommandResponse::Json { value } => {
+            assert_eq!(
+                value["status"].as_str().unwrap(),
+                ExitJsonStatus::BackgroundDispatched.as_str()
+            );
+            (
+                value["feature_id"].as_str().unwrap().to_string(),
+                value["run_id"].as_str().unwrap().to_string(),
+            )
+        }
+        other => panic!("expected background-dispatched, got {other:?}"),
     }
 }
 
@@ -341,6 +449,23 @@ fn spawn_accept_loop(
         let _ = ctx.jobs().drain_on_shutdown(Duration::from_secs(10)).await;
         Ok::<(), anyhow::Error>(())
     })
+}
+
+async fn request_shutdown(sock_path: &std::path::Path, token: &str, id: u64) {
+    let stream = UnixStream::connect(sock_path)
+        .await
+        .expect("connect shutdown");
+    let mut conn = UnixConnection::new(stream);
+    let shutdown_req =
+        DaemonRequest::new(id, methods::DAEMON_SHUTDOWN, token, serde_json::json!({}));
+    conn.write_message(&shutdown_req)
+        .await
+        .expect("write shutdown");
+    let _: DaemonResponse = conn
+        .read_message()
+        .await
+        .expect("read shutdown")
+        .expect("not EOF");
 }
 
 // ─── Test ────────────────────────────────────────────────────────────────────
@@ -536,6 +661,184 @@ async fn originating_cli_dispatch_drop_does_not_cancel_background_evaluate() {
         .expect("read shutdown")
         .expect("not EOF");
     drop(conn_s);
+    let _ = tokio::time::timeout(Duration::from_secs(5), accept_handle).await;
+}
+
+/// Criterion 5 regression: background `Queued → InProgress` must not emit a
+/// synthetic `LayerStarted` for `layers.order[0]`. The real Stack Loops DAG
+/// activation is the only source of start events, so an inactive first
+/// configured layer never appears in the live stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn background_evaluate_emits_layer_started_only_after_active_dag_selection() {
+    let _stub_guard = StubProviderEnv::new(500);
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let sock_path = dir.path().join("daemon.sock");
+    let token_path = dir.path().join("daemon.token");
+
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let _state_guard = StateDirGuard::new(&state_dir);
+
+    let project = tempfile::tempdir().expect("project");
+    init_git_with_backend_change(project.path());
+    write_layers_toml_with_inactive_first(project.path());
+    write_stub_config(project.path());
+    write_fast_workflow(project.path());
+    let plan_path = write_plan_with_contract(project.path(), "inactive-first-evaluate");
+
+    let token = auth::generate_token().expect("generate token");
+    auth::write_token_file(&token_path, &token).expect("write token file");
+    let ctx = Arc::new(DaemonContext::new(
+        token.clone(),
+        project.path().to_path_buf(),
+    ));
+    let accept_handle = spawn_accept_loop(Arc::clone(&ctx), sock_path.clone());
+    wait_for_socket(&sock_path).await;
+
+    let stream_sub = UnixStream::connect(&sock_path)
+        .await
+        .expect("connect subscribe");
+    let mut conn_sub = UnixConnection::new(stream_sub);
+    let params = serde_json::to_value(pice_core::protocol::subscribe::SubscribeManifestRequest {
+        feature_id: Some("inactive-first-evaluate".to_string()),
+    })
+    .unwrap();
+    let subscribe = DaemonRequest::new(11, methods::MANIFEST_SUBSCRIBE, &token, params);
+    conn_sub
+        .write_message(&subscribe)
+        .await
+        .expect("write subscribe");
+    let snap: DaemonResponse = conn_sub
+        .read_message()
+        .await
+        .expect("read snapshot")
+        .expect("not EOF");
+    assert!(snap.error.is_none(), "subscribe error: {:?}", snap.error);
+
+    let (feature_id, _run_id) =
+        dispatch_background_evaluate(&sock_path, &token, 12, plan_path).await;
+    assert_eq!(feature_id, "inactive-first-evaluate");
+
+    let mut started_layers = Vec::new();
+    loop {
+        let payload = await_notification_event(
+            &mut conn_sub,
+            methods::MANIFEST_EVENT,
+            Duration::from_secs(10),
+        )
+        .await;
+        match payload.event {
+            ManifestEvent::LayerStarted => {
+                started_layers.push(payload.layer.unwrap_or_default());
+            }
+            ManifestEvent::FeatureComplete => break,
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        started_layers,
+        vec!["backend".to_string()],
+        "background evaluate must not pre-emit inactive layers"
+    );
+
+    request_shutdown(&sock_path, &token, 13).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), accept_handle).await;
+}
+
+/// Criterion 6 regression: exercise the production `cli/dispatch →
+/// Evaluate(background=true)` path with three concurrently live features and
+/// real stub-provider sessions. The global provider cap must bound provider
+/// processes across feature jobs, not just manager futures.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_background_evaluates_share_global_provider_session_cap() {
+    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let alive_path = dir.path().join("stub-provider-alive.log");
+    std::fs::write(&alive_path, "").unwrap();
+    let _stub_guard = StubProviderEnv::with_alive_file(900, Some(&alive_path));
+    let sock_path = dir.path().join("daemon.sock");
+    let token_path = dir.path().join("daemon.token");
+
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let _state_guard = StateDirGuard::new(&state_dir);
+
+    let project = tempfile::tempdir().expect("project");
+    init_git_with_backend_change(project.path());
+    write_layers_toml(project.path());
+    write_stub_config(project.path());
+    write_fast_workflow(project.path());
+    let plans = [
+        write_plan_with_contract(project.path(), "prod-cap-a"),
+        write_plan_with_contract(project.path(), "prod-cap-b"),
+        write_plan_with_contract(project.path(), "prod-cap-c"),
+    ];
+
+    let token = auth::generate_token().expect("generate token");
+    auth::write_token_file(&token_path, &token).expect("write token file");
+    let ctx = Arc::new(DaemonContext::new(
+        token.clone(),
+        project.path().to_path_buf(),
+    ));
+    assert_eq!(
+        ctx.jobs().provider_capacity(),
+        2,
+        "fixture workflow must configure max_global_provider_concurrency=2"
+    );
+    let accept_handle = spawn_accept_loop(Arc::clone(&ctx), sock_path.clone());
+    wait_for_socket(&sock_path).await;
+
+    for (idx, plan_path) in plans.into_iter().enumerate() {
+        let (feature_id, _run_id) =
+            dispatch_background_evaluate(&sock_path, &token, 20 + idx as u64, plan_path).await;
+        assert!(feature_id.starts_with("prod-cap-"));
+    }
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    let mut peak_active = 0;
+    let mut saw_cap_filled = false;
+    loop {
+        let active = active_stub_session_count(&alive_path);
+        peak_active = peak_active.max(active);
+        assert!(
+            active <= 2,
+            "global provider cap exceeded: active={active}, peak={peak_active}"
+        );
+        saw_cap_filled |= active == 2;
+        if ctx.jobs().active_count() == 0 && active == 0 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "background evaluates did not drain before timeout; active_jobs={}, active_providers={active}",
+            ctx.jobs().active_count()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    assert!(
+        saw_cap_filled,
+        "fixture should prove at least two provider sessions ran concurrently"
+    );
+    let contents = std::fs::read_to_string(&alive_path).unwrap();
+    assert!(
+        contents
+            .lines()
+            .filter(|line| line.starts_with("alive "))
+            .count()
+            >= 3,
+        "all three background features should have started provider sessions; log:\n{contents}"
+    );
+    assert!(
+        contents
+            .lines()
+            .filter(|line| line.starts_with("done "))
+            .count()
+            >= 3,
+        "all provider sessions should have exited cleanly; log:\n{contents}"
+    );
+
+    request_shutdown(&sock_path, &token, 99).await;
     let _ = tokio::time::timeout(Duration::from_secs(5), accept_handle).await;
 }
 

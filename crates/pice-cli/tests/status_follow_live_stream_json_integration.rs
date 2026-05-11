@@ -56,7 +56,7 @@ fn write_notification(stream: &mut UnixStream, payload: ManifestEventPayload) {
 
 #[test]
 fn status_follow_stream_json_drains_live_burst_and_terminal_status_alias() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -200,7 +200,7 @@ fn status_follow_stream_json_drains_live_burst_and_terminal_status_alias() {
 
 #[test]
 fn status_follow_stream_json_exits_five_on_disconnect_before_terminal() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -273,8 +273,76 @@ fn status_follow_stream_json_exits_five_on_disconnect_before_terminal() {
 }
 
 #[test]
+fn status_follow_stream_json_exits_feature_not_found_on_empty_scoped_snapshot() {
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let pice_dir = home.path().join(".pice");
+    std::fs::create_dir_all(&pice_dir).unwrap();
+    std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
+
+    let socket_path = home.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept client");
+
+        let health = read_request(&stream);
+        write_response(
+            &mut stream,
+            health.id,
+            serde_json::json!({
+                "status": "ok",
+                "version": "test",
+                "uptime_seconds": 0,
+            }),
+        );
+
+        let subscribe = read_request(&stream);
+        assert_eq!(subscribe.method, MANIFEST_SUBSCRIBE);
+        assert_eq!(subscribe.params["feature_id"], "missing-follow");
+        let response = SubscribeManifestResponse {
+            snapshots: vec![],
+            run_ids: BTreeMap::new(),
+        };
+        write_response(
+            &mut stream,
+            subscribe.id,
+            serde_json::to_value(response).expect("serialize empty snapshot"),
+        );
+    });
+
+    let output = Command::cargo_bin("pice")
+        .unwrap()
+        .env("HOME", home.path())
+        .env("PICE_DAEMON_SOCKET", &socket_path)
+        .env_remove("PICE_DAEMON_INLINE")
+        .args(["status", "--follow", "missing-follow", "--stream-json"])
+        .output()
+        .unwrap();
+
+    server.join().expect("fake daemon thread");
+    assert_eq!(
+        output.status.code(),
+        Some(ExitJsonStatus::FeatureNotFound.exit_code()),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2, "snapshot + feature-not-found terminal");
+    let terminal: StreamJsonFrame = serde_json::from_str(lines[1]).expect("terminal frame");
+    assert!(matches!(
+        terminal,
+        StreamJsonFrame::Terminal {
+            exit_code,
+            status: Some(ref status)
+        } if exit_code == ExitJsonStatus::FeatureNotFound.exit_code()
+            && status == ExitJsonStatus::FeatureNotFound.as_str()
+    ));
+}
+
+#[test]
 fn status_follow_stream_json_sigint_emits_terminal_130() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();

@@ -39,7 +39,7 @@ fn write_response(stream: &mut UnixStream, id: u64, result: serde_json::Value) {
 
 #[test]
 fn status_wait_json_exits_five_when_subscribe_connection_closes() {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -105,4 +105,68 @@ fn status_wait_json_exits_five_when_subscribe_connection_closes() {
         serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("parse stdout: {e}; {stdout}"));
     assert_eq!(json["status"], ExitJsonStatus::DaemonDisconnected.as_str());
     assert_eq!(json["feature_id"], "disconnect-feat");
+}
+
+#[test]
+fn status_wait_json_exits_feature_not_found_on_empty_snapshot() {
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let pice_dir = home.path().join(".pice");
+    std::fs::create_dir_all(&pice_dir).unwrap();
+    std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
+
+    let socket_path = home.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept client");
+
+        let health = read_request(&stream);
+        assert_eq!(health.auth, TOKEN);
+        assert_eq!(health.method, DAEMON_HEALTH);
+        write_response(
+            &mut stream,
+            health.id,
+            serde_json::json!({
+                "status": "ok",
+                "version": "test",
+                "uptime_seconds": 0,
+            }),
+        );
+
+        let subscribe = read_request(&stream);
+        assert_eq!(subscribe.auth, TOKEN);
+        assert_eq!(subscribe.method, MANIFEST_SUBSCRIBE);
+        assert_eq!(subscribe.params["feature_id"], "missing-wait");
+        let response = SubscribeManifestResponse {
+            snapshots: vec![],
+            run_ids: BTreeMap::new(),
+        };
+        write_response(
+            &mut stream,
+            subscribe.id,
+            serde_json::to_value(response).expect("serialize empty snapshot"),
+        );
+    });
+
+    let output = Command::cargo_bin("pice")
+        .unwrap()
+        .env("HOME", home.path())
+        .env("PICE_DAEMON_SOCKET", &socket_path)
+        .env_remove("PICE_DAEMON_INLINE")
+        .args(["status", "--wait", "missing-wait", "--json"])
+        .output()
+        .unwrap();
+
+    server.join().expect("fake daemon thread");
+    assert_eq!(
+        output.status.code(),
+        Some(ExitJsonStatus::FeatureNotFound.exit_code()),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("parse stdout: {e}; {stdout}"));
+    assert_eq!(json["status"], ExitJsonStatus::FeatureNotFound.as_str());
+    assert_eq!(json["feature_id"], "missing-wait");
 }

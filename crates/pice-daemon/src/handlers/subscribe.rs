@@ -281,12 +281,11 @@ pub async fn logs(
         Vec::new()
     };
 
-    // Task 7 wires `FeatureJobManager::run_id_for`. For now, derive run_id
-    // from the most recent history chunk if any; otherwise empty string.
-    let run_id = history
-        .iter()
-        .next_back()
-        .map(|c| c.run_id.clone())
+    let run_id = ctx
+        .jobs()
+        .run_id_for(&parsed.feature_id)
+        .map(|r| r.to_string())
+        .or_else(|| history.iter().next_back().map(|c| c.run_id.clone()))
         .unwrap_or_default();
 
     let response_body = LogsStreamResponse { history, run_id };

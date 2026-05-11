@@ -14,10 +14,10 @@
 //! 7. After admission succeeds, write `ManifestStatus::Queued` via
 //!    [`NullSaver`] and release the spawned future's start gate. Queued
 //!    is a pre-work state and MUST NOT emit a `LayerStarted` event
-//!    (that event is the Queued → InProgress transition inside the
-//!    spawned future).
+//!    (Stack Loops emits `LayerStarted` only after it computes the active
+//!    DAG for the spawned future).
 //! 8. The closure re-opens the manifest, transitions Queued → InProgress
-//!    via the `EventEmittingSaver`, invokes the caller-supplied
+//!    without emitting a layer event, invokes the caller-supplied
 //!    orchestrator, then persists any terminal manifest not already
 //!    persisted by that orchestrator.
 //! 9. Return `CommandResponse::Json { feature_id, run_id, status:
@@ -347,17 +347,12 @@ where
 /// Loads the just-written Queued manifest from disk, flips
 /// `overall_status` to `InProgress`, stamps `run_id`, and saves via an
 /// [`EventEmittingSaver`] so subscribers see the background task start
-/// after the durable transition lands on disk. Stack Loops receives the
-/// same `layer_hint` as `prestarted_layer` and suppresses that one
-/// duplicate `LayerStarted` event while continuing to emit every other
-/// DAG layer start in order.
-///
-/// `layer_hint` is retained only for the `SaveIntent` shape consumed by
-/// the saver trait; [`NullSaver`] ignores it.
+/// after the durable transition lands on disk. This transition deliberately
+/// does NOT emit a `LayerStarted` event: Stack Loops owns those events after
+/// it computes the active DAG, so subscribers never see a false start for an
+/// inactive first configured layer.
 pub fn transition_queued_to_in_progress(
     args: &OrchestratorSpawnArgs,
-    events: &crate::events::EventBus,
-    layer_hint: &str,
 ) -> Result<VerificationManifest> {
     let mut manifest = VerificationManifest::load(&args.manifest_path).with_context(|| {
         format!(
@@ -367,12 +362,11 @@ pub fn transition_queued_to_in_progress(
     })?;
     manifest.overall_status = ManifestStatus::InProgress;
     manifest.run_id = Some(args.run_id.clone());
-    let saver = crate::events::EventEmittingSaver::new(events);
-    saver.save_and_emit(
+    crate::events::NullSaver.save_and_emit(
         &manifest,
         &args.manifest_path,
         SaveIntent::LayerStarted {
-            layer: layer_hint.to_string(),
+            layer: args.feature_id.clone(),
         },
     )?;
     Ok(manifest)
@@ -505,7 +499,7 @@ paths = ["src/frontend/**"]
     }
 
     #[tokio::test]
-    async fn transition_queued_to_in_progress_writes_in_progress_after_event() {
+    async fn transition_queued_to_in_progress_writes_in_progress_without_start_event() {
         let state_tmp = tempfile::tempdir().unwrap();
         let _guard = StateDirGuard::new(state_tmp.path());
         let project_tmp = tempfile::tempdir().unwrap();
@@ -523,10 +517,6 @@ paths = ["src/frontend/**"]
         .unwrap();
 
         let events = EventBus::new();
-        // Subscribe BEFORE the transition. The transition helper emits
-        // the first LayerStarted event after the InProgress save lands;
-        // stack_loops suppresses that same layer as `prestarted_layer`
-        // so subscribers still see exactly one start per DAG layer.
         let mut rx = events.subscribe_feature("feat-transition");
 
         let args = OrchestratorSpawnArgs {
@@ -542,19 +532,16 @@ paths = ["src/frontend/**"]
                 pice_user_workflow_file: None,
             }),
         };
-        let manifest = transition_queued_to_in_progress(&args, &events, "backend").unwrap();
+        let manifest = transition_queued_to_in_progress(&args).unwrap();
         assert_eq!(manifest.overall_status, ManifestStatus::InProgress);
         assert_eq!(manifest.run_id.as_deref(), Some("r-xyz"));
 
         let loaded = VerificationManifest::load(&manifest_path).unwrap();
         assert_eq!(loaded.overall_status, ManifestStatus::InProgress);
 
-        let payload = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
-            .await
-            .expect("Queued→InProgress should emit after save")
-            .expect("event payload");
-        assert_eq!(payload.feature_id, "feat-transition");
-        assert_eq!(payload.run_id, "r-xyz");
-        assert_eq!(payload.layer.as_deref(), Some("backend"));
+        match rx.try_recv() {
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
+            other => panic!("Queued→InProgress must not emit LayerStarted, got {other:?}"),
+        }
     }
 }

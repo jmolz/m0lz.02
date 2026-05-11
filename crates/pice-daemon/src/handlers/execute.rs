@@ -121,8 +121,7 @@ async fn run_background(
             let _global_provider_permit = permit;
             // Step 1: Queued → InProgress. `execute` has no per-layer
             // cohorts, so this checkpoint is a no-event manifest save.
-            let mut manifest =
-                transition_queued_to_in_progress(&args, &events_for_spawn, &args.feature_id)?;
+            let mut manifest = transition_queued_to_in_progress(&args)?;
 
             // Step 2: run the provider session under a cancel token.
             // The plan parse / prompt build / provider start happen
@@ -214,13 +213,14 @@ async fn run_execute_session(
     // keyed on (feature_id, run_id, layer = "execute"). The shared
     // sink bridge is allocation-free on the hot path (a single
     // `Arc::clone` on each chunk).
-    let log_sink: Arc<dyn StreamSink> = Arc::new(crate::logs::LogStoreSink::new(
+    let log_sink = Arc::new(crate::logs::LogStoreSink::new(
         logs.clone(),
         feature_id,
         run_id,
         "execute",
     ));
-    orchestrator.on_notification(streaming_handler(log_sink));
+    let shared_sink: Arc<dyn StreamSink> = log_sink.clone();
+    orchestrator.on_notification(streaming_handler(shared_sink));
 
     // Race the session against cancellation.
     let result = tokio::select! {
@@ -228,5 +228,6 @@ async fn run_execute_session(
         _ = cancel.cancelled() => Err(anyhow::anyhow!("cancelled")),
     };
     orchestrator.shutdown().await.ok();
+    log_sink.flush().await;
     result
 }

@@ -8,6 +8,7 @@
 #![cfg(unix)]
 
 use assert_cmd::Command;
+use pice_core::cli::ExitJsonStatus;
 use pice_core::events::{LogChunk, StreamJsonFrame};
 use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
 use pice_core::protocol::methods::{DAEMON_HEALTH, LOGS_STREAM, MANIFEST_SUBSCRIBE};
@@ -40,7 +41,7 @@ fn write_response(stream: &mut UnixStream, id: u64, result: serde_json::Value) {
 }
 
 fn prepare_home_and_socket() -> (tempfile::TempDir, std::path::PathBuf, UnixListener) {
-    let home = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -148,6 +149,39 @@ fn serve_terminal_logs_stream(
     sent_terminal_history_at
         .send(Instant::now())
         .expect("send terminal history timestamp");
+}
+
+fn serve_empty_logs_stream(listener: UnixListener, feature_id: &'static str) {
+    let (mut stream, _) = listener.accept().expect("accept client");
+
+    let health = read_request(&stream);
+    assert_eq!(health.auth, TOKEN);
+    assert_eq!(health.method, DAEMON_HEALTH);
+    write_response(
+        &mut stream,
+        health.id,
+        serde_json::json!({
+            "status": "ok",
+            "version": "test",
+            "uptime_seconds": 0,
+        }),
+    );
+
+    let subscribe = read_request(&stream);
+    assert_eq!(subscribe.auth, TOKEN);
+    assert_eq!(subscribe.method, LOGS_STREAM);
+    assert_eq!(subscribe.params["feature_id"], feature_id);
+    assert_eq!(subscribe.params["follow"], true);
+
+    let response = LogsStreamResponse {
+        run_id: String::new(),
+        history: Vec::new(),
+    };
+    write_response(
+        &mut stream,
+        subscribe.id,
+        serde_json::to_value(response).expect("serialize empty logs snapshot"),
+    );
 }
 
 #[test]
@@ -281,5 +315,43 @@ fn logs_follow_stream_json_terminal_frame_carries_logs_stream_ended_status() {
             exit_code: 0,
             status: Some(ref status)
         } if status == "logs-stream-ended"
+    ));
+}
+
+#[test]
+fn logs_follow_stream_json_exits_feature_not_found_on_empty_snapshot() {
+    let (home, socket_path, listener) = prepare_home_and_socket();
+    let server = std::thread::spawn(move || {
+        serve_empty_logs_stream(listener, "missing-logs");
+    });
+
+    let output = Command::cargo_bin("pice")
+        .unwrap()
+        .env("HOME", home.path())
+        .env("PICE_DAEMON_SOCKET", &socket_path)
+        .env_remove("PICE_DAEMON_INLINE")
+        .args(["logs", "missing-logs", "--follow", "--stream-json"])
+        .output()
+        .unwrap();
+
+    server.join().expect("fake daemon thread");
+    assert_eq!(
+        output.status.code(),
+        Some(ExitJsonStatus::FeatureNotFound.exit_code()),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "feature-not-found terminal only");
+    let terminal: StreamJsonFrame = serde_json::from_str(lines[0]).unwrap();
+    assert!(matches!(
+        terminal,
+        StreamJsonFrame::Terminal {
+            exit_code,
+            status: Some(ref status)
+        } if exit_code == ExitJsonStatus::FeatureNotFound.exit_code()
+            && status == ExitJsonStatus::FeatureNotFound.as_str()
     ));
 }

@@ -92,6 +92,10 @@ pub struct FeatureJobManager {
     /// other manifest event comes from the orchestrator via
     /// `ManifestSaver::save_and_emit`.
     events: EventBus,
+    /// Clamped capacity of `global_sem`. Tokio exposes currently available
+    /// permits, not total capacity; Stack Loops needs the total to reject
+    /// impossible multi-permit ADTS acquisitions instead of waiting forever.
+    global_capacity: u32,
     /// Atomic tie-breaker for run-id generation. See
     /// [`Self::next_run_id`].
     run_id_counter: Arc<AtomicU64>,
@@ -118,6 +122,7 @@ impl FeatureJobManager {
             jobs: Arc::new(DashMap::new()),
             global_sem: Arc::new(Semaphore::new(clamped as usize)),
             events,
+            global_capacity: clamped,
             run_id_counter: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -358,6 +363,11 @@ impl FeatureJobManager {
     /// bounding feature futures.
     pub fn provider_semaphore(&self) -> Arc<Semaphore> {
         Arc::clone(&self.global_sem)
+    }
+
+    /// Clamped provider-session semaphore capacity.
+    pub fn provider_capacity(&self) -> u32 {
+        self.global_capacity
     }
 
     /// Fire cancellation on every live feature, then wait up to `timeout`

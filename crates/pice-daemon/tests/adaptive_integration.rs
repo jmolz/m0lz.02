@@ -385,7 +385,7 @@ fn make_cfg<'a>(
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
-        prestarted_layer: None,
+        global_provider_capacity: None,
         saver: &NULL_SAVER,
     }
 }
@@ -2295,7 +2295,7 @@ async fn unresolvable_provider_remains_phase1_pending_not_failed() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
-        prestarted_layer: None,
+        global_provider_capacity: None,
         saver: &NULL_SAVER,
     };
 

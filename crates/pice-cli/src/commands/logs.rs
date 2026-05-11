@@ -127,6 +127,12 @@ async fn run_follow(args: &LogsArgs) -> Result<()> {
         .await
         .context("failed to open logs/stream subscribe connection")?;
 
+    if stream.snapshot.history.is_empty() && stream.snapshot.run_id.is_empty() {
+        stream.close().await;
+        emit_logs_feature_not_found(&feature_id, stream_json)?;
+        std::process::exit(ExitJsonStatus::FeatureNotFound.exit_code());
+    }
+
     // Render buffered history.
     for chunk in &stream.snapshot.history {
         render_chunk(chunk, stream_json)?;
@@ -216,10 +222,27 @@ fn maybe_emit_logs_stream_ended(json: bool) -> Result<()> {
 
 fn emit_logs_stream_terminal(stream_json: bool, exit_code: i32) -> Result<()> {
     if stream_json {
-        let status = (exit_code == ExitJsonStatus::LogsStreamEnded.exit_code())
-            .then(|| ExitJsonStatus::LogsStreamEnded.as_str().to_string());
+        let status = terminal_status_for_exit_code(exit_code);
         let frame = StreamJsonFrame::Terminal { exit_code, status };
         println!("{}", serde_json::to_string(&frame)?);
+    }
+    Ok(())
+}
+
+fn terminal_status_for_exit_code(exit_code: i32) -> Option<String> {
+    (exit_code == ExitJsonStatus::LogsStreamEnded.exit_code())
+        .then(|| ExitJsonStatus::LogsStreamEnded.as_str().to_string())
+}
+
+fn emit_logs_feature_not_found(feature_id: &str, stream_json: bool) -> Result<()> {
+    if stream_json {
+        let frame = StreamJsonFrame::Terminal {
+            exit_code: ExitJsonStatus::FeatureNotFound.exit_code(),
+            status: Some(ExitJsonStatus::FeatureNotFound.as_str().to_string()),
+        };
+        println!("{}", serde_json::to_string(&frame)?);
+    } else {
+        eprintln!("feature {feature_id} not found");
     }
     Ok(())
 }

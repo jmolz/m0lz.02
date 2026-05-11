@@ -40,6 +40,7 @@ use dashmap::DashMap;
 use pice_core::events::LogChunk;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::{broadcast, Mutex};
 
 /// Broadcast channel capacity for each per-feature log channel. Sized
@@ -265,6 +266,7 @@ pub struct LogStoreSink {
     feature_id: String,
     run_id: String,
     layer: String,
+    pending: Arc<StdMutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl LogStoreSink {
@@ -279,6 +281,39 @@ impl LogStoreSink {
             feature_id: feature_id.into(),
             run_id: run_id.into(),
             layer: layer.into(),
+            pending: Arc::new(StdMutex::new(Vec::new())),
+        }
+    }
+
+    /// Wait for all spawned `append_chunk` tasks to land in the store.
+    ///
+    /// `send_chunk` is synchronous because it implements [`StreamSink`], but
+    /// `LogStore::append_chunk` is async. Background handlers call `flush`
+    /// after provider shutdown and before writing the terminal frame so the
+    /// terminal frame cannot overtake buffered provider output.
+    pub async fn flush(&self) {
+        loop {
+            let handles = match self.pending.lock() {
+                Ok(mut pending) => {
+                    if pending.is_empty() {
+                        break;
+                    }
+                    std::mem::take(&mut *pending)
+                }
+                Err(poisoned) => {
+                    let mut pending = poisoned.into_inner();
+                    if pending.is_empty() {
+                        break;
+                    }
+                    std::mem::take(&mut *pending)
+                }
+            };
+
+            for handle in handles {
+                if let Err(err) = handle.await {
+                    tracing::warn!(?err, "log-store sink append task failed");
+                }
+            }
         }
     }
 }
@@ -290,9 +325,17 @@ impl crate::orchestrator::StreamSink for LogStoreSink {
         let run = self.run_id.clone();
         let layer = self.layer.clone();
         let text_owned = text.to_string();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             store.append_chunk(&feature, &run, &layer, text_owned).await;
         });
+        match self.pending.lock() {
+            Ok(mut pending) => pending.push(handle),
+            Err(poisoned) => {
+                tracing::warn!("log-store sink pending-task mutex was poisoned");
+                let mut pending = poisoned.into_inner();
+                pending.push(handle);
+            }
+        }
     }
 }
 
@@ -487,18 +530,32 @@ mod tests {
         let sink = LogStoreSink::new(store.clone(), "feat-sink", "run-sink", "evaluate");
 
         crate::orchestrator::StreamSink::send_chunk(&sink, "provider output");
+        sink.flush().await;
 
-        for _ in 0..50 {
-            let snap = store.snapshot("feat-sink", None).await;
-            if let Some(chunk) = snap.first() {
-                assert_eq!(chunk.feature_id, "feat-sink");
-                assert_eq!(chunk.run_id, "run-sink");
-                assert_eq!(chunk.layer, "evaluate");
-                assert_eq!(chunk.text, "provider output");
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        panic!("LogStoreSink did not append provider chunk");
+        let snap = store.snapshot("feat-sink", None).await;
+        let chunk = snap.first().expect("provider chunk");
+        assert_eq!(chunk.feature_id, "feat-sink");
+        assert_eq!(chunk.run_id, "run-sink");
+        assert_eq!(chunk.layer, "evaluate");
+        assert_eq!(chunk.text, "provider output");
+    }
+
+    #[tokio::test]
+    async fn log_store_sink_flush_keeps_terminal_frame_after_provider_chunks() {
+        let store = LogStore::new();
+        let sink = LogStoreSink::new(store.clone(), "feat-order", "run-order", "evaluate");
+
+        crate::orchestrator::StreamSink::send_chunk(&sink, "first");
+        crate::orchestrator::StreamSink::send_chunk(&sink, "second");
+        sink.flush().await;
+        store
+            .append_terminal_frame("feat-order", "run-order", "passed")
+            .await;
+
+        let snap = store.snapshot("feat-order", None).await;
+        assert_eq!(snap.len(), 3);
+        assert_eq!(snap[0].text, "first");
+        assert_eq!(snap[1].text, "second");
+        assert!(snap[2].terminal, "terminal frame must be last: {snap:?}");
     }
 }

@@ -364,7 +364,7 @@ fn make_cfg<'a>(
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
-        prestarted_layer: None,
+        global_provider_capacity: None,
         saver: &NULL_SAVER,
     }
 }
@@ -795,7 +795,7 @@ async fn global_provider_semaphore_bounds_parallel_layer_provider_sessions() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: Some(provider_sem),
-        prestarted_layer: None,
+        global_provider_capacity: Some(1),
         saver: &NULL_SAVER,
     };
 
@@ -858,7 +858,7 @@ async fn global_provider_semaphore_acquires_adts_provider_pair_atomically() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: Some(provider_sem),
-        prestarted_layer: None,
+        global_provider_capacity: Some(2),
         saver: &NULL_SAVER,
     };
 
@@ -909,6 +909,71 @@ async fn global_provider_semaphore_acquires_adts_provider_pair_atomically() {
         0,
         "all ADTS provider sessions should be shut down after evaluation"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adts_global_provider_capacity_below_pair_requirement_fails_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_two_layer_repo(dir.path());
+    let layers = two_layer_independent_config();
+    let mut pice_config = stub_pice_config();
+    pice_config.evaluation.adversarial.enabled = true;
+    pice_config.evaluation.adversarial.model = "stub-adversarial".to_string();
+    let mut wf = workflow(true, Some(4), 1);
+    wf.phases.evaluate.adaptive_algorithm = AdaptiveAlgo::Adts;
+    let seams = BTreeMap::new();
+    let provider_sem = Arc::new(Semaphore::new(1));
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: dir.path(),
+        primary_provider: "stub",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &wf,
+        merged_seams: &seams,
+        contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: Some(provider_sem),
+        global_provider_capacity: Some(1),
+        saver: &NULL_SAVER,
+    };
+
+    let _stub = ParallelStubGuard::new_with_adversarial(
+        &[("backend", "9.0,0.01"), ("frontend", "9.0,0.01")],
+        Some(500),
+        Some("3.0,0.01"),
+    );
+
+    let started = Instant::now();
+    let manifest = tokio::time::timeout(
+        Duration::from_secs(1),
+        run_stack_loops_with_cancel(
+            &cfg,
+            &NullSink,
+            true,
+            null_sink_arc(),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("capacity mismatch must fail fast instead of deadlocking")
+    .expect("stack loops should return a failed manifest");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "capacity mismatch should fail before waiting on provider permits"
+    );
+    assert_eq!(manifest.layers.len(), 2);
+    for layer in &manifest.layers {
+        assert_eq!(layer.status, LayerStatus::Failed);
+        let halted = layer.halted_by.as_deref().unwrap_or_default();
+        assert!(
+            halted.contains("requires 2 concurrent provider-session permits"),
+            "layer {} should explain impossible ADTS provider cap, got {halted:?}",
+            layer.name
+        );
+    }
 }
 
 fn active_stub_session_count(path: &Path) -> usize {

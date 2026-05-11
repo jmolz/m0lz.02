@@ -126,7 +126,7 @@ async fn env_var_mismatch() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
-        prestarted_layer: None,
+        global_provider_capacity: None,
         saver: &NULL_SAVER,
     };
 
@@ -212,7 +212,7 @@ async fn orm_schema_drift() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
-        prestarted_layer: None,
+        global_provider_capacity: None,
         saver: &NULL_SAVER,
     };
 
@@ -296,7 +296,7 @@ async fn openapi_drift() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
-        prestarted_layer: None,
+        global_provider_capacity: None,
         saver: &NULL_SAVER,
     };
 
@@ -375,7 +375,7 @@ async fn clean_fixture_passes_all_checks() {
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore: None,
-        prestarted_layer: None,
+        global_provider_capacity: None,
         saver: &NULL_SAVER,
     };
 

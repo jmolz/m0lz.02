@@ -180,11 +180,30 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
         .await
         .context("failed to open manifest/subscribe stream for --follow")?;
 
+    let scoped_missing = feature_id_filter
+        .as_ref()
+        .is_some_and(|fid| !snapshot_contains_feature(&stream.snapshot, fid));
+
     // Snapshot render.
     if stream_json {
         emit_stream_snapshot(&stream.snapshot)?;
-    } else {
+    } else if !scoped_missing {
         render_follow_snapshot(&stream.snapshot, feature_id_filter.as_deref());
+    }
+
+    if let Some(ref fid) = feature_id_filter {
+        if scoped_missing {
+            stream.close().await;
+            if stream_json {
+                emit_stream_terminal_with_status(
+                    ExitJsonStatus::FeatureNotFound.exit_code(),
+                    Some(ExitJsonStatus::FeatureNotFound.as_str()),
+                )?;
+            } else {
+                eprintln!("feature {fid} not found");
+            }
+            std::process::exit(ExitJsonStatus::FeatureNotFound.exit_code());
+        }
     }
 
     // Short-circuit: the subscribed feature is already terminal at
@@ -336,6 +355,12 @@ async fn run_wait(req: StatusRequest) -> Result<()> {
         .await
         .context("failed to open manifest/subscribe stream for --wait")?;
 
+    if !snapshot_contains_feature(&stream.snapshot, &feature_id) {
+        stream.close().await;
+        emit_feature_not_found(&feature_id, json);
+        std::process::exit(ExitJsonStatus::FeatureNotFound.exit_code());
+    }
+
     // Short-circuit on already-terminal snapshot. Clone the status out of
     // the snapshot before closing the stream — the borrow must end before
     // `close` takes `self`.
@@ -463,9 +488,13 @@ fn emit_stream_event(payload: &ManifestEventPayload) -> Result<()> {
 }
 
 fn emit_stream_terminal(code: i32) -> Result<()> {
+    emit_stream_terminal_with_status(code, None)
+}
+
+fn emit_stream_terminal_with_status(code: i32, status: Option<&str>) -> Result<()> {
     let frame = StreamJsonFrame::Terminal {
         exit_code: code,
-        status: None,
+        status: status.map(str::to_string),
     };
     println!("{}", serde_json::to_string(&frame)?);
     Ok(())
@@ -508,6 +537,21 @@ fn emit_wait_timeout(feature_id: &str, timeout_secs: Option<u64>, json: bool) {
     }
 }
 
+fn emit_feature_not_found(feature_id: &str, json: bool) {
+    if json {
+        let value = json!({
+            "status": ExitJsonStatus::FeatureNotFound.as_str(),
+            "feature_id": feature_id,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+        );
+    } else {
+        eprintln!("feature {feature_id} not found");
+    }
+}
+
 fn emit_daemon_disconnected(feature_id: &str, json: bool) {
     if json {
         let value = json!({
@@ -539,6 +583,11 @@ fn terminal_exit_code(status: &ManifestStatus) -> Option<i32> {
         ManifestStatus::PendingReview => Some(ExitJsonStatus::ReviewGatePending.exit_code()),
         ManifestStatus::Pending | ManifestStatus::InProgress | ManifestStatus::Queued => None,
     }
+}
+
+fn snapshot_contains_feature(snap: &SubscribeManifestResponse, feature_id: &str) -> bool {
+    snap.snapshots.iter().any(|m| m.feature_id == feature_id)
+        || snap.run_ids.contains_key(feature_id)
 }
 
 /// Stable kebab-case mapping for [`ManifestStatus`] — mirrors the serde

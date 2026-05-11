@@ -89,11 +89,10 @@ pub struct StackLoopsConfig<'a> {
     /// This is separate from `defaults.max_parallelism`, which only limits
     /// the number of cohort tasks spawned inside one feature.
     pub global_provider_semaphore: Option<Arc<Semaphore>>,
-    /// Layer whose `LayerStarted` event was already emitted by the
-    /// background Queued→InProgress transition before entering Stack Loops.
-    /// Foreground runs leave this unset. The orchestrator still evaluates
-    /// the layer normally; it only suppresses the duplicate start event.
-    pub prestarted_layer: Option<&'a str>,
+    /// Total capacity of `global_provider_semaphore` after daemon-side
+    /// clamping. Required to reject impossible `acquire_many` requests (for
+    /// example ADTS needing primary+adversarial permits when the cap is 1).
+    pub global_provider_capacity: Option<u32>,
     /// Phase 7: manifest persistence + event-bus publication handle. Every
     /// manifest state transition in the orchestrator goes through this
     /// saver so the save + event emission are atomic. Inline mode and
@@ -353,27 +352,6 @@ pub async fn run_stack_loops_with_cancel(
     for (cohort_idx, cohort) in dag.cohorts.iter().enumerate() {
         debug!(cohort = cohort_idx, layers = ?cohort, "processing cohort");
 
-        // Phase 7: emit exactly one LayerStarted event per layer in DAG
-        // order as the cohort begins. This is the canonical start-event
-        // site; background dispatch's Queued→InProgress checkpoint is a
-        // no-event save specifically to avoid duplicating the first layer.
-        if let Some(ref path) = manifest_path {
-            for layer_name in cohort {
-                if cfg.prestarted_layer == Some(layer_name.as_str()) {
-                    continue;
-                }
-                if let Err(e) = cfg.saver.save_and_emit(
-                    &manifest,
-                    path,
-                    SaveIntent::LayerStarted {
-                        layer: layer_name.clone(),
-                    },
-                ) {
-                    warn!(layer = %layer_name, "failed to persist LayerStarted checkpoint: {e}");
-                }
-            }
-        }
-
         // Partition cohort into immediate results (skip / missing-def /
         // empty-diff) and "real work" that runs the adaptive pipeline.
         // The real-work subset is what gets parallelized; skip paths stay
@@ -381,6 +359,7 @@ pub async fn run_stack_loops_with_cancel(
         let mut immediate_results: HashMap<String, LayerResult> = HashMap::new();
         let mut immediate_chunks: HashMap<String, Vec<String>> = HashMap::new();
         let mut work_inputs: Vec<LayerInputs> = Vec::new();
+        let mut started_layers: Vec<String> = Vec::new();
 
         for layer_name in cohort {
             // Resume-preserve: if a prior run's manifest already carries a
@@ -441,6 +420,7 @@ pub async fn run_stack_loops_with_cancel(
 
             let Some(layer_def) = config.layers.defs.get(layer_name) else {
                 warn!(layer = %layer_name, "layer defined in order but missing definition");
+                started_layers.push(layer_name.clone());
                 immediate_results.insert(
                     layer_name.clone(),
                     LayerResult {
@@ -499,6 +479,9 @@ pub async fn run_stack_loops_with_cancel(
                     Some(failed_id) => (LayerStatus::Failed, format!("seam:{failed_id}")),
                     None => (status, reason),
                 };
+                if final_status != LayerStatus::Skipped {
+                    started_layers.push(layer_name.clone());
+                }
                 immediate_results.insert(
                     layer_name.clone(),
                     LayerResult {
@@ -528,6 +511,7 @@ pub async fn run_stack_loops_with_cancel(
                 &claude_md,
             );
 
+            started_layers.push(layer_name.clone());
             work_inputs.push(build_per_layer_inputs(
                 cfg,
                 layer_name,
@@ -539,6 +523,25 @@ pub async fn run_stack_loops_with_cancel(
                 &full_diff,
                 Arc::clone(&seam_registry_arc),
             ));
+        }
+
+        // Phase 7: emit exactly one LayerStarted event per layer that
+        // actually enters active work. The partition above filters out
+        // inactive / dependency-cascade Skipped layers first, so background
+        // subscribers never see false starts for configured-but-inactive
+        // layers.
+        if let Some(ref path) = manifest_path {
+            for layer_name in &started_layers {
+                if let Err(e) = cfg.saver.save_and_emit(
+                    &manifest,
+                    path,
+                    SaveIntent::LayerStarted {
+                        layer: layer_name.clone(),
+                    },
+                ) {
+                    warn!(layer = %layer_name, "failed to persist LayerStarted checkpoint: {e}");
+                }
+            }
         }
 
         // Dispatch the real-work subset: parallel when allowed, sequential
@@ -1021,6 +1024,18 @@ async fn try_run_layer_adaptive(
     // both wait for their adversarial permit. `acquire_many_owned(2)` queues
     // the whole layer until the full pair is available.
     let required_provider_sessions = if needs_adversarial { 2 } else { 1 };
+    if let Some(capacity) = cfg.global_provider_capacity {
+        if required_provider_sessions > capacity {
+            let msg = format!(
+                "ADTS adversarial evaluation for layer '{layer_name}' requires \
+                 {required_provider_sessions} concurrent provider-session permits, but \
+                 max_global_provider_concurrency is {capacity}. Raise the global cap to at \
+                 least {required_provider_sessions} or disable adversarial ADTS."
+            );
+            warn!(layer = %layer_name, "{msg}");
+            return LayerAdaptiveResult::RuntimeError(msg);
+        }
+    }
     let _provider_session_permits = match acquire_provider_session_permits(
         cfg.global_provider_semaphore.as_ref(),
         layer_name,
@@ -1496,6 +1511,7 @@ struct LayerInputs {
     full_diff: String,
     seam_registry: Arc<Registry>,
     global_provider_semaphore: Option<Arc<Semaphore>>,
+    global_provider_capacity: Option<u32>,
 }
 
 /// Outcome of one parallel cohort task. The outer `run_stack_loops_with_cancel`
@@ -1554,6 +1570,7 @@ fn build_per_layer_inputs(
         full_diff: full_diff.to_string(),
         seam_registry,
         global_provider_semaphore: cfg.global_provider_semaphore.clone(),
+        global_provider_capacity: cfg.global_provider_capacity,
     }
 }
 
@@ -1613,6 +1630,7 @@ async fn evaluate_one_layer(
         inputs.workflow.clone(),
         inputs.project_root.clone(),
         inputs.global_provider_semaphore.clone(),
+        inputs.global_provider_capacity,
         Arc::clone(&pass_sink),
     );
 
@@ -1707,6 +1725,7 @@ async fn try_run_layer_adaptive_owned(
     workflow: WorkflowConfig,
     project_root: PathBuf,
     global_provider_semaphore: Option<Arc<Semaphore>>,
+    global_provider_capacity: Option<u32>,
     pass_sink: Arc<dyn PassMetricsSink>,
 ) -> LayerAdaptiveResult {
     // Build a transient `StackLoopsConfig` and delegate to the shared
@@ -1751,7 +1770,7 @@ async fn try_run_layer_adaptive_owned(
         contract_paths: None,
         manifest_path: None,
         global_provider_semaphore,
-        prestarted_layer: None,
+        global_provider_capacity,
         saver: &saver,
     };
     try_run_layer_adaptive(
@@ -1925,7 +1944,7 @@ mod tests {
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
-            prestarted_layer: None,
+            global_provider_capacity: None,
             saver: &saver,
         };
 
@@ -2032,7 +2051,7 @@ mod tests {
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
-            prestarted_layer: None,
+            global_provider_capacity: None,
             saver: &saver,
         };
 
@@ -2204,7 +2223,7 @@ mod tests {
             contract_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
-            prestarted_layer: None,
+            global_provider_capacity: None,
             saver: &saver,
         };
 
