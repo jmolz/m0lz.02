@@ -533,29 +533,35 @@ async fn n_socket_subscriptions_across_varied_features_drop_receiver_counts_to_z
     let _guard = StateDirGuard::new(&state_dir);
 
     let project = tempfile::tempdir().expect("project");
-    let sock_path = dir.path().join("daemon.sock");
-    let token = auth::generate_token().expect("token");
     let ctx = Arc::new(DaemonContext::new(
-        token.clone(),
+        String::new(),
         project.path().to_path_buf(),
     ));
-    let handle = spawn_test_accept_loop(Arc::clone(&ctx), sock_path.clone());
-
-    wait_for_socket(&sock_path).await;
 
     let feature_ids = ["cleanup-a", "cleanup-b", "cleanup-c", "cleanup-d"];
     let mut conns = Vec::new();
+    let mut handlers = Vec::new();
     for (idx, feature_id) in feature_ids.iter().enumerate() {
-        let stream = UnixStream::connect(&sock_path)
-            .await
-            .unwrap_or_else(|e| panic!("connect {feature_id}: {e}"));
-        let mut conn = UnixConnection::new(stream);
+        let (client, server) = std::os::unix::net::UnixStream::pair()
+            .unwrap_or_else(|e| panic!("create unix stream pair for {feature_id}: {e}"));
+        client.set_nonblocking(true).unwrap();
+        server.set_nonblocking(true).unwrap();
+        let mut conn = UnixConnection::new(UnixStream::from_std(client).unwrap());
+        let mut server_conn = UnixConnection::new(UnixStream::from_std(server).unwrap());
         let params = serde_json::to_value(&SubscribeManifestRequest {
             feature_id: Some((*feature_id).to_string()),
         })
         .unwrap();
-        let req = DaemonRequest::new(idx as u64 + 1, methods::MANIFEST_SUBSCRIBE, &token, params);
-        conn.write_message(&req).await.expect("write subscribe");
+        let req = DaemonRequest::new(idx as u64 + 1, methods::MANIFEST_SUBSCRIBE, "", params);
+        let ctx_for_handler = Arc::clone(&ctx);
+        handlers.push(tokio::spawn(async move {
+            pice_daemon::handlers::subscribe::manifest(
+                ctx_for_handler.as_ref(),
+                &mut server_conn,
+                req,
+            )
+            .await
+        }));
         let resp: DaemonResponse = conn
             .read_message()
             .await
@@ -566,20 +572,27 @@ async fn n_socket_subscriptions_across_varied_features_drop_receiver_counts_to_z
         conns.push(conn);
     }
 
-    let stream = UnixStream::connect(&sock_path)
-        .await
-        .expect("connect wildcard");
-    let mut wildcard = UnixConnection::new(stream);
+    let (client, server) =
+        std::os::unix::net::UnixStream::pair().expect("create wildcard unix stream pair");
+    client.set_nonblocking(true).unwrap();
+    server.set_nonblocking(true).unwrap();
+    let mut wildcard = UnixConnection::new(UnixStream::from_std(client).unwrap());
+    let mut wildcard_server = UnixConnection::new(UnixStream::from_std(server).unwrap());
     let req = DaemonRequest::new(
         99,
         methods::MANIFEST_SUBSCRIBE,
-        &token,
+        "",
         serde_json::to_value(&SubscribeManifestRequest { feature_id: None }).unwrap(),
     );
-    wildcard
-        .write_message(&req)
+    let ctx_for_handler = Arc::clone(&ctx);
+    handlers.push(tokio::spawn(async move {
+        pice_daemon::handlers::subscribe::manifest(
+            ctx_for_handler.as_ref(),
+            &mut wildcard_server,
+            req,
+        )
         .await
-        .expect("write wildcard subscribe");
+    }));
     let resp: DaemonResponse = wildcard
         .read_message()
         .await
@@ -602,20 +615,25 @@ async fn n_socket_subscriptions_across_varied_features_drop_receiver_counts_to_z
         "one wildcard socket receiver should be registered"
     );
 
+    for conn in &mut conns {
+        conn.shutdown()
+            .await
+            .expect("explicitly close subscribe client writer");
+    }
     drop(conns);
-    tokio::time::timeout(Duration::from_millis(20), async {
-        while ctx.events().total_receiver_count() != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("socket-backed subscriptions should clean up within one scheduler turn");
+    tokio::time::sleep(Duration::ZERO).await;
 
     assert_eq!(
         ctx.events().total_receiver_count(),
         0,
         "all socket-backed manifest subscriptions should clean up within one scheduler tick"
     );
+    for handler in handlers {
+        handler
+            .await
+            .expect("handler join")
+            .expect("handler result");
+    }
     for feature_id in feature_ids {
         assert_eq!(
             ctx.events().feature_receiver_count(feature_id),
@@ -624,24 +642,6 @@ async fn n_socket_subscriptions_across_varied_features_drop_receiver_counts_to_z
         );
     }
     assert_eq!(ctx.events().wildcard_receiver_count(), 0);
-
-    let stream = UnixStream::connect(&sock_path)
-        .await
-        .expect("connect shutdown");
-    let mut shutdown_conn = UnixConnection::new(stream);
-    let shutdown_req =
-        DaemonRequest::new(100, methods::DAEMON_SHUTDOWN, &token, serde_json::json!({}));
-    shutdown_conn
-        .write_message(&shutdown_req)
-        .await
-        .expect("write shutdown");
-    let _: DaemonResponse = shutdown_conn
-        .read_message()
-        .await
-        .expect("read shutdown")
-        .expect("not EOF");
-    drop(shutdown_conn);
-    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }
 
 #[test]

@@ -405,7 +405,9 @@ async fn run_id_preserved_when_reconciler_rewrites_in_progress_to_failed() {
 
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let feature_id = "run-id-reconcile-feat";
-    let expected_run_id = "r-preserved-across-restart";
+    let run_id_manager =
+        pice_daemon::jobs::FeatureJobManager::new(pice_daemon::events::EventBus::new(), 1);
+    let expected_run_id = run_id_manager.next_run_id();
 
     // Seed an InProgress manifest with a known run_id.
     let manifest_path =
@@ -415,7 +417,7 @@ async fn run_id_preserved_when_reconciler_rewrites_in_progress_to_failed() {
     }
     let mut m = VerificationManifest::new(feature_id, &project_root);
     m.overall_status = ManifestStatus::InProgress;
-    m.run_id = Some(expected_run_id.to_string());
+    m.run_id = Some(expected_run_id.clone());
     m.save(&manifest_path).expect("save");
 
     // Boot daemon — reconciliation runs during startup.
@@ -440,9 +442,32 @@ async fn run_id_preserved_when_reconciler_rewrites_in_progress_to_failed() {
     // The run_id must be UNCHANGED — reconciliation preserves it.
     assert_eq!(
         reconciled.run_id.as_deref(),
-        Some(expected_run_id),
+        Some(expected_run_id.as_str()),
         "reconciler must preserve run_id when rewriting InProgress → Failed"
     );
+
+    let text_status_resp = wire_dispatch(
+        &sock_path,
+        &token,
+        2,
+        CommandRequest::Status(StatusRequest {
+            json: false,
+            mode: StatusMode::Detail,
+            feature_id: Some(feature_id.to_string()),
+            stream_json: false,
+            timeout_secs: None,
+        }),
+    )
+    .await;
+    match text_status_resp {
+        CommandResponse::Text { content } => {
+            assert!(
+                content.contains(&format!("Run ID: {expected_run_id}")),
+                "public text pice status detail must surface reconciled run_id: {content}"
+            );
+        }
+        other => panic!("expected text status detail, got {other:?}"),
+    }
 
     // Cleanup.
     let stream = UnixStream::connect(&sock_path).await.expect("connect");

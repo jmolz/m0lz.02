@@ -634,12 +634,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    #[allow(clippy::await_holding_lock)]
     async fn panicked_task_emits_cancelled_and_removes_handle() {
         let tmp = tempfile::tempdir().expect("state tempdir");
         let project = tmp.path().join("project");
         std::fs::create_dir_all(&project).expect("project dir");
         let state_dir = tmp.path().join("state");
         std::fs::create_dir_all(&state_dir).expect("state dir");
+        let _state_guard = crate::test_support::StateDirGuard::new(&state_dir);
 
         let events = EventBus::new();
         let manager = FeatureJobManager::new(events.clone(), 4);
@@ -713,9 +716,25 @@ mod tests {
         }
         assert_eq!(manager.active_count(), 0, "panicked task should clean up");
 
-        let report = crate::jobs::recovery::reconcile_on_startup(&state_dir)
-            .expect("startup reconciliation after panic");
-        assert_eq!(report.reconciled_interrupted, vec!["feat-panic"]);
+        let socket_path = tmp.path().join("panic-restart.sock");
+        let token_path = tmp.path().join("panic-restart.token");
+        let handle = tokio::spawn(crate::lifecycle::run_with_paths(
+            pice_core::transport::SocketPath::Unix(socket_path.clone()),
+            token_path.clone(),
+        ));
+        let mut socket_ready = false;
+        for _ in 0..200 {
+            if socket_path.exists() && tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+                socket_ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            socket_ready,
+            "next daemon startup should bind its socket after panic"
+        );
+
         let reconciled =
             VerificationManifest::load(&manifest_path).expect("reconciled panic manifest");
         assert_eq!(
@@ -731,6 +750,25 @@ mod tests {
             reconciled.layers[0].halted_by.as_deref(),
             Some(pice_core::cli::ExitJsonStatus::FAILED_INTERRUPTED_HALT)
         );
+
+        let token = crate::server::auth::read_token_file(&token_path).expect("restart token");
+        let stream = tokio::net::UnixStream::connect(&socket_path)
+            .await
+            .expect("connect restart daemon");
+        let mut conn = crate::server::unix::UnixConnection::new(stream);
+        let shutdown = pice_core::protocol::DaemonRequest::new(
+            1,
+            pice_core::protocol::methods::DAEMON_SHUTDOWN,
+            &token,
+            serde_json::json!({}),
+        );
+        conn.write_message(&shutdown).await.expect("write shutdown");
+        let _: pice_core::protocol::DaemonResponse = conn
+            .read_message()
+            .await
+            .expect("read shutdown")
+            .expect("not EOF");
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
     }
 
     #[tokio::test]

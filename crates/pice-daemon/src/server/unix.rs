@@ -177,6 +177,11 @@ impl UnixConnection {
     pub async fn write_message<T: Serialize>(&mut self, msg: &T) -> Result<()> {
         self.framed.write_message(msg).await
     }
+
+    /// Flush and close the writer half of the socket.
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.framed.shutdown().await
+    }
 }
 
 #[cfg(test)]
