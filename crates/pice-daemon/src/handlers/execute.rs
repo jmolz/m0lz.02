@@ -18,6 +18,86 @@ use crate::orchestrator::{ProviderOrchestrator, StreamSink};
 use crate::prompt::builders;
 use crate::server::router::DaemonContext;
 
+fn workflow_resolve_failed_response(error: &anyhow::Error, json_mode: bool) -> CommandResponse {
+    let message = format!("{error:#}");
+    if json_mode {
+        return CommandResponse::ExitJson {
+            code: ExitJsonStatus::WorkflowValidationFailed.exit_code(),
+            value: json!({
+                "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
+                "errors": [{
+                    "field": "workflow.yaml",
+                    "message": message,
+                }],
+                "hint": "Run `pice validate` for full details.",
+            }),
+        };
+    }
+    CommandResponse::Exit {
+        code: ExitJsonStatus::WorkflowValidationFailed.exit_code(),
+        message: format!(
+            "failed to resolve workflow.yaml:\n  - workflow.yaml: {message}\n\nRun `pice validate` for full details.\n"
+        ),
+    }
+}
+
+fn workflow_validation_failed_response(
+    errors: &[pice_core::workflow::validate::ValidationError],
+    json_mode: bool,
+) -> CommandResponse {
+    if json_mode {
+        let errors: Vec<serde_json::Value> = errors
+            .iter()
+            .map(|e| {
+                json!({
+                    "field": e.field,
+                    "message": e.message,
+                })
+            })
+            .collect();
+        return CommandResponse::ExitJson {
+            code: ExitJsonStatus::WorkflowValidationFailed.exit_code(),
+            value: json!({
+                "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
+                "errors": errors,
+                "hint": "Run `pice validate` for full details.",
+            }),
+        };
+    }
+    let mut message = String::from("workflow.yaml has validation errors:\n");
+    for e in errors {
+        message.push_str(&format!("  - {}: {}\n", e.field, e.message));
+    }
+    message.push_str("\nRun `pice validate` for full details.\n");
+    CommandResponse::Exit {
+        code: ExitJsonStatus::WorkflowValidationFailed.exit_code(),
+        message,
+    }
+}
+
+fn resolve_background_workflow_snapshot(
+    project_root: &std::path::Path,
+    json_mode: bool,
+) -> Result<std::result::Result<pice_core::workflow::WorkflowConfig, CommandResponse>> {
+    let workflow = match pice_core::workflow::loader::resolve(project_root) {
+        Ok(workflow) => workflow,
+        Err(e) => return Ok(Err(workflow_resolve_failed_response(&e, json_mode))),
+    };
+    let report = pice_core::workflow::validate::validate_all(
+        &workflow,
+        None,
+        None,
+        Some(&pice_core::seam::default_registry()),
+    );
+    if !report.is_ok() {
+        return Ok(Err(workflow_validation_failed_response(
+            &report.errors,
+            json_mode,
+        )));
+    }
+    Ok(Ok(workflow))
+}
+
 pub async fn run(
     req: ExecuteRequest,
     ctx: &DaemonContext,
@@ -97,11 +177,14 @@ async fn run_background(
 
     // Resolve the workflow snapshot for the JobEnv. `execute` does not
     // consult workflow directly, but the snapshot is part of the
-    // JobEnv contract (Criterion #16). Falling back to embedded
-    // defaults when `workflow.yaml` is missing keeps `pice execute
-    // --background` working in uninitialized projects.
-    let workflow_snapshot = pice_core::workflow::loader::resolve(ctx.project_root())
-        .unwrap_or_else(|_| pice_core::workflow::loader::embedded_defaults());
+    // JobEnv contract (Criterion #16). Missing project/user workflow files
+    // already resolve to embedded defaults; malformed or invalid files must
+    // fail closed instead of silently dispatching against framework defaults.
+    let workflow_snapshot =
+        match resolve_background_workflow_snapshot(ctx.project_root(), req.json)? {
+            Ok(workflow) => workflow,
+            Err(resp) => return Ok(resp),
+        };
 
     // Capture the bits the spawned future needs. `ctx` cannot cross
     // the `'static` spawn boundary; the fields we consume are either

@@ -1773,6 +1773,8 @@ async fn run_evaluate_orchestrator(
                 total_cost_usd: None,
                 escalation_events: None,
             });
+        finalize_terminal_manifest(&manifest, &args.manifest_path, events)
+            .context("persisting delayed seam-floor violation terminal manifest")?;
         return Ok(manifest);
     }
     let merged_seams: std::collections::BTreeMap<String, Vec<String>> =
@@ -1828,9 +1830,40 @@ async fn run_evaluate_orchestrator(
 mod tests {
     use super::*;
     use crate::server::router::DaemonContext;
+    use pice_core::events::ManifestEvent;
+    use pice_core::jobs::JobEnv;
     use pice_core::layers::manifest::{
         GateEntry, GateStatus, LayerResult, LayerStatus, VerificationManifest, SCHEMA_VERSION,
     };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn write_test_plan(root: &std::path::Path, stem: &str) -> std::path::PathBuf {
+        let plans_dir = root.join(".claude/plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        let plan_path = plans_dir.join(format!("{stem}.md"));
+        std::fs::write(
+            &plan_path,
+            r#"# Plan
+
+## Contract
+
+```json
+{
+  "feature": "test",
+  "tier": 1,
+  "pass_threshold": 8,
+  "criteria": [
+    {"name": "works", "threshold": 8, "validation": "manual"}
+  ]
+}
+```
+"#,
+        )
+        .unwrap();
+        plan_path
+    }
+
     /// Contract criterion #2: "Evaluate releases per-manifest locks between
     /// cohort boundaries so decide RPCs never self-deadlock." Implemented
     /// in Phase 6 via early-return on gate fire (handler return drops the
@@ -1935,5 +1968,93 @@ mod tests {
             CommandResponse::ExitJson { code, .. } => assert_eq!(code, 3),
             other => panic!("expected exit 3 ReviewGatePending, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn delayed_seam_floor_violation_persists_and_emits_terminal_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let plan_path = write_test_plan(&project_root, "delayed-seam-feature");
+        let pice_dir = project_root.join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["backend", "infrastructure"]
+
+[layers.backend]
+paths = ["src/**"]
+
+[layers.infrastructure]
+paths = ["Dockerfile"]
+
+[seams]
+"backend↔infrastructure" = ["version_skew"]
+"#,
+        )
+        .unwrap();
+
+        let feature_id = "delayed-seam-feature";
+        let run_id = "run-delayed-seam";
+        let manifest_path = tmp.path().join("delayed-seam-feature.manifest.json");
+        let mut queued = VerificationManifest::new(feature_id, &project_root);
+        queued.run_id = Some(run_id.to_string());
+        queued.save(&manifest_path).unwrap();
+
+        let mut workflow_snapshot = pice_core::workflow::loader::embedded_defaults();
+        workflow_snapshot.seams = Some(BTreeMap::from([(
+            "backend↔infrastructure".to_string(),
+            Vec::new(),
+        )]));
+
+        let events = crate::events::EventBus::new();
+        let mut rx = events.subscribe_feature(feature_id);
+        let logs = crate::logs::LogStore::new();
+        let args = super::super::background::OrchestratorSpawnArgs {
+            feature_id: feature_id.to_string(),
+            run_id: run_id.to_string(),
+            manifest_path: manifest_path.clone(),
+            env: Arc::new(JobEnv {
+                state_dir: tmp.path().to_path_buf(),
+                project_root: project_root.clone(),
+                workflow_snapshot: workflow_snapshot.clone(),
+                contracts: BTreeMap::new(),
+                pice_state_dir_override: None,
+                pice_user_workflow_file: None,
+            }),
+        };
+
+        let manifest = run_evaluate_orchestrator(
+            &args,
+            &plan_path,
+            &pice_core::config::PiceConfig::default(),
+            &workflow_snapshot,
+            &events,
+            &logs,
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            1,
+            true,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("delayed seam violation should return a terminal manifest");
+
+        assert_eq!(manifest.overall_status, ManifestStatus::Failed);
+        let persisted = VerificationManifest::load(&manifest_path).unwrap();
+        assert_eq!(persisted.overall_status, ManifestStatus::Failed);
+        assert_eq!(
+            persisted.layers[0].halted_by.as_deref(),
+            Some("seam_floor_violation:1 item(s)")
+        );
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("FeatureComplete event should be emitted")
+            .expect("event channel should remain open");
+        assert_eq!(event.event, ManifestEvent::FeatureComplete);
+        assert_eq!(event.feature_id, feature_id);
+        assert_eq!(event.run_id, run_id);
+        assert_eq!(event.data["status"].as_str(), Some("failed"));
     }
 }

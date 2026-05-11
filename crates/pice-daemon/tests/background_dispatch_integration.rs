@@ -18,7 +18,9 @@
 
 use std::time::{Duration, Instant};
 
-use pice_core::cli::{CommandRequest, CommandResponse, EvaluateRequest, ExitJsonStatus};
+use pice_core::cli::{
+    CommandRequest, CommandResponse, EvaluateRequest, ExecuteRequest, ExitJsonStatus,
+};
 use pice_core::layers::manifest::VerificationManifest;
 use pice_daemon::handlers::dispatch;
 use pice_daemon::orchestrator::NullSink;
@@ -401,6 +403,60 @@ async fn background_evaluate_malformed_workflow_rejects_before_dispatch() {
     assert!(
         !manifest_path.exists(),
         "malformed workflow must not write a Queued manifest"
+    );
+}
+
+/// `pice execute --background` also captures a JobEnv workflow snapshot, so it
+/// must not silently fall back to embedded defaults when workflow resolution
+/// fails. Missing project workflow files still resolve through framework
+/// defaults; malformed workflow files reject before dispatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_execute_malformed_workflow_rejects_before_dispatch() {
+    let state_tmp = tempfile::tempdir().unwrap();
+    let _guard = StateDirGuard::new(state_tmp.path());
+
+    let project = tempfile::tempdir().unwrap();
+    init_git(project.path());
+    std::fs::create_dir_all(project.path().join(".pice")).unwrap();
+    std::fs::write(
+        project.path().join(".pice/workflow.yaml"),
+        "schema_version: \"0.2\"\ndefaults: [not a map",
+    )
+    .unwrap();
+    let plan_path = write_plan_with_contract(project.path(), "malformed-execute-feature");
+
+    let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
+    let req = CommandRequest::Execute(ExecuteRequest {
+        plan_path,
+        json: true,
+        background: true,
+        wait: false,
+        timeout_secs: None,
+    });
+    let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
+
+    match resp {
+        CommandResponse::ExitJson { code, value } => {
+            assert_eq!(code, ExitJsonStatus::WorkflowValidationFailed.exit_code());
+            assert_eq!(
+                value["status"].as_str().unwrap(),
+                ExitJsonStatus::WorkflowValidationFailed.as_str()
+            );
+            assert_eq!(
+                ctx.jobs().active_count(),
+                0,
+                "malformed execute workflow must reject before spawning a background job"
+            );
+        }
+        other => panic!("expected WorkflowValidationFailed ExitJson, got {other:?}"),
+    }
+
+    let manifest_path =
+        VerificationManifest::manifest_path_for("malformed-execute-feature", project.path())
+            .unwrap();
+    assert!(
+        !manifest_path.exists(),
+        "malformed execute workflow must not write a Queued manifest"
     );
 }
 

@@ -795,25 +795,23 @@ pub async fn run_stack_loops_with_cancel(
             // event stream carries per-gate context.
             if let Some(ref path) = manifest_path {
                 for (gate_id, layer, trigger_expression) in appended_gates {
-                    if let Err(e) = cfg.saver.save_and_emit(
-                        &manifest,
-                        path,
-                        SaveIntent::GateAppended {
-                            gate_id,
-                            layer,
-                            trigger_expression,
-                        },
-                    ) {
-                        warn!("failed to persist pending-review manifest: {e}");
-                        break;
-                    }
-                }
-                if let Err(e) =
+                    let context =
+                        format!("persisting pending-review gate {gate_id} for layer {layer}");
                     cfg.saver
-                        .save_and_emit(&manifest, path, SaveIntent::FeatureCompleted)
-                {
-                    warn!("failed to emit pending-review terminal event: {e}");
+                        .save_and_emit(
+                            &manifest,
+                            path,
+                            SaveIntent::GateAppended {
+                                gate_id,
+                                layer,
+                                trigger_expression,
+                            },
+                        )
+                        .with_context(|| context)?;
                 }
+                cfg.saver
+                    .save_and_emit(&manifest, path, SaveIntent::FeatureCompleted)
+                    .context("persisting pending-review terminal manifest")?;
             }
             info!(
                 cohort_index = cohort_idx,
@@ -875,12 +873,9 @@ pub async fn run_stack_loops_with_cancel(
     // `LogChunk { terminal: true }` is emitted by the dispatch wrapper
     // (Task 10) — the orchestrator itself does not own the LogStore.
     if let Some(ref path) = manifest_path {
-        if let Err(e) = cfg
-            .saver
+        cfg.saver
             .save_and_emit(&manifest, path, SaveIntent::FeatureCompleted)
-        {
-            warn!("failed to persist final manifest: {e}");
-        }
+            .context("persisting final terminal manifest")?;
     }
 
     info!(
@@ -1873,6 +1868,22 @@ mod tests {
         }
     }
 
+    struct FailFeatureCompleteSaver;
+
+    impl crate::events::ManifestSaver for FailFeatureCompleteSaver {
+        fn save_and_emit(
+            &self,
+            _manifest: &VerificationManifest,
+            _path: &std::path::Path,
+            intent: SaveIntent,
+        ) -> anyhow::Result<()> {
+            if matches!(intent, SaveIntent::FeatureCompleted) {
+                anyhow::bail!("terminal save refused");
+            }
+            Ok(())
+        }
+    }
+
     #[test]
     fn extract_changed_files_basic() {
         let diff = [
@@ -2010,6 +2021,69 @@ mod tests {
 
         // Overall status should be InProgress (backend is Pending)
         assert_eq!(manifest.overall_status, ManifestStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn final_feature_complete_save_failure_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("src/server")).unwrap();
+        std::fs::write(dir.path().join("src/server/main.rs"), "fn main() {}").unwrap();
+
+        let layers_config = test_layers_config();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let saver = FailFeatureCompleteSaver;
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test-provider",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_paths: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+        let err = run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .expect_err("terminal save failure must propagate");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("persisting final terminal manifest")
+                && rendered.contains("terminal save refused"),
+            "unexpected error: {rendered}"
+        );
     }
 
     #[tokio::test]
