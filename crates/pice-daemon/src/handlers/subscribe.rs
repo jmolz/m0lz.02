@@ -495,6 +495,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manifest_subscribe_drop_releases_receiver_within_one_yield() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, ctx) = test_ctx_with_state(dir.path());
+        let ctx = std::sync::Arc::new(ctx);
+        let (mut conn, in_tx, mut out_rx) = MemoryConnection::new();
+
+        let handler_ctx = std::sync::Arc::clone(&ctx);
+        let handler = tokio::spawn(async move {
+            let req = subscribe_manifest_request(11, Some("drop-one-tick"));
+            super::manifest(handler_ctx.as_ref(), &mut conn, req).await
+        });
+
+        let first = out_rx.recv().await.expect("response frame");
+        assert!(matches!(first, WireFrame::Response(_)));
+        assert_eq!(
+            ctx.events().feature_receiver_count("drop-one-tick"),
+            1,
+            "snapshot response should leave one active receiver while the connection is open"
+        );
+
+        drop(in_tx);
+        tokio::task::yield_now().await;
+
+        assert!(
+            handler.is_finished(),
+            "in-memory connection close should let subscribe handler finish within one scheduler yield"
+        );
+        handler.await.unwrap().unwrap();
+        assert_eq!(
+            ctx.events().feature_receiver_count("drop-one-tick"),
+            0,
+            "receiver count should be zero immediately after one-yield handler cleanup"
+        );
+    }
+
+    #[tokio::test]
     async fn manifest_subscribe_snapshot_returns_matching_manifest() {
         let dir = tempfile::tempdir().unwrap();
         let (_guard, ctx) = test_ctx_with_state(dir.path());

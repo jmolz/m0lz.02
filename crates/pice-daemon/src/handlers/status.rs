@@ -97,6 +97,9 @@ fn render_manifest_detail(m: &VerificationManifest) -> String {
     use pice_core::layers::manifest::GateStatus;
     let mut out = String::new();
     out.push_str(&format!("Feature: {}\n", m.feature_id));
+    if let Some(run_id) = &m.run_id {
+        out.push_str(&format!("Run ID: {run_id}\n"));
+    }
     let overall = serde_json::to_value(&m.overall_status)
         .ok()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -792,6 +795,21 @@ mod tests {
         .unwrap();
         let snapshot2 = load_manifest_snapshot(&plan_path, project_root).expect("reload");
         assert!(snapshot2.gates.is_empty());
+    }
+
+    #[test]
+    fn render_manifest_detail_surfaces_run_id_in_text_mode() {
+        let mut manifest =
+            VerificationManifest::new("feature-with-run-id", std::path::Path::new("/tmp/project"));
+        manifest.run_id = Some("r-public-status".to_string());
+
+        let rendered = render_manifest_detail(&manifest);
+
+        assert!(rendered.contains("Feature: feature-with-run-id"));
+        assert!(
+            rendered.contains("Run ID: r-public-status"),
+            "text-mode pice status detail must surface run_id: {rendered}"
+        );
     }
 
     #[test]

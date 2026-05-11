@@ -356,6 +356,29 @@ async fn run_id_persists_through_dispatch_and_restart() {
         other => panic!("expected Json status detail, got {other:?}"),
     }
 
+    let text_status_resp = wire_dispatch(
+        &sock_path2,
+        &token2,
+        3,
+        CommandRequest::Status(StatusRequest {
+            json: false,
+            mode: StatusMode::Detail,
+            feature_id: Some("run-id-persist-feat".to_string()),
+            stream_json: false,
+            timeout_secs: None,
+        }),
+    )
+    .await;
+    match text_status_resp {
+        CommandResponse::Text { content } => {
+            assert!(
+                content.contains(&format!("Run ID: {disk_run_id}")),
+                "public text pice status detail must surface the persisted run_id: {content}"
+            );
+        }
+        other => panic!("expected text status detail, got {other:?}"),
+    }
+
     // Cleanup.
     shutdown_daemon(&sock_path2, &token2, handle2).await;
     let _ = std::fs::remove_file(&manifest_path);

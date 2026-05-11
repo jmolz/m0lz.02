@@ -603,18 +603,18 @@ async fn n_socket_subscriptions_across_varied_features_drop_receiver_counts_to_z
     );
 
     drop(conns);
-
-    for _ in 0..50 {
-        if ctx.events().total_receiver_count() == 0 {
-            break;
+    tokio::time::timeout(Duration::from_millis(20), async {
+        while ctx.events().total_receiver_count() != 0 {
+            tokio::task::yield_now().await;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    })
+    .await
+    .expect("socket-backed subscriptions should clean up within one scheduler turn");
 
     assert_eq!(
         ctx.events().total_receiver_count(),
         0,
-        "all socket-backed manifest subscriptions should clean up on close"
+        "all socket-backed manifest subscriptions should clean up within one scheduler tick"
     );
     for feature_id in feature_ids {
         assert_eq!(

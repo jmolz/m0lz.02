@@ -635,17 +635,49 @@ mod tests {
 
     #[tokio::test]
     async fn panicked_task_emits_cancelled_and_removes_handle() {
+        let tmp = tempfile::tempdir().expect("state tempdir");
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).expect("project dir");
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+
         let events = EventBus::new();
         let manager = FeatureJobManager::new(events.clone(), 4);
-        let env = stub_env();
+        let mut env_value = (*stub_env()).clone();
+        env_value.state_dir = state_dir.clone();
+        env_value.project_root = project.clone();
+        let env = Arc::new(env_value);
 
         // Subscribe BEFORE spawning so we see the emit.
         let mut rx = events.subscribe_feature("feat-panic");
+        let run_id_hint = manager.next_run_id();
+
+        let manifest_path =
+            VerificationManifest::manifest_path_in_state_dir("feat-panic", &project, &state_dir);
+        if let Some(parent) = manifest_path.parent() {
+            std::fs::create_dir_all(parent).expect("manifest parent");
+        }
+        let mut manifest = VerificationManifest::new("feat-panic", &project);
+        manifest.run_id = Some(run_id_hint.clone());
+        manifest.overall_status = pice_core::layers::manifest::ManifestStatus::InProgress;
+        manifest
+            .layers
+            .push(pice_core::layers::manifest::LayerResult {
+                name: "backend".to_string(),
+                status: pice_core::layers::manifest::LayerStatus::InProgress,
+                passes: Vec::new(),
+                seam_checks: Vec::new(),
+                halted_by: None,
+                final_confidence: None,
+                total_cost_usd: None,
+                escalation_events: None,
+            });
+        manifest.save(&manifest_path).expect("seed manifest");
 
         let run_id = manager
             .spawn(
                 "feat-panic",
-                manager.next_run_id(),
+                run_id_hint,
                 env,
                 move |_env, _permit, _cancel| async move {
                     panic!("intentional panic for supervisor test");
@@ -680,6 +712,25 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert_eq!(manager.active_count(), 0, "panicked task should clean up");
+
+        let report = crate::jobs::recovery::reconcile_on_startup(&state_dir)
+            .expect("startup reconciliation after panic");
+        assert_eq!(report.reconciled_interrupted, vec!["feat-panic"]);
+        let reconciled =
+            VerificationManifest::load(&manifest_path).expect("reconciled panic manifest");
+        assert_eq!(
+            reconciled.run_id.as_deref(),
+            Some(run_id.as_str()),
+            "panic reconciliation must preserve run_id"
+        );
+        assert_eq!(
+            reconciled.overall_status,
+            pice_core::layers::manifest::ManifestStatus::Failed
+        );
+        assert_eq!(
+            reconciled.layers[0].halted_by.as_deref(),
+            Some(pice_core::cli::ExitJsonStatus::FAILED_INTERRUPTED_HALT)
+        );
     }
 
     #[tokio::test]

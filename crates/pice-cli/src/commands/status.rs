@@ -550,7 +550,7 @@ fn manifest_status_wire(status: &ManifestStatus) -> String {
         ManifestStatus::InProgress => "in-progress",
         ManifestStatus::Passed => "passed",
         ManifestStatus::Failed => "failed",
-        ManifestStatus::FailedInterrupted => "failed-interrupted",
+        ManifestStatus::FailedInterrupted => ExitJsonStatus::FailedInterrupted.as_str(),
         ManifestStatus::PendingReview => "pending-review",
         ManifestStatus::Queued => "queued",
     }
@@ -946,7 +946,10 @@ mod tests {
             (ManifestStatus::InProgress, "in-progress"),
             (ManifestStatus::Passed, "passed"),
             (ManifestStatus::Failed, "failed"),
-            (ManifestStatus::FailedInterrupted, "failed-interrupted"),
+            (
+                ManifestStatus::FailedInterrupted,
+                ExitJsonStatus::FailedInterrupted.as_str(),
+            ),
             (ManifestStatus::PendingReview, "pending-review"),
             (ManifestStatus::Queued, "queued"),
         ] {
