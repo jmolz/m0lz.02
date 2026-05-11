@@ -87,6 +87,30 @@ paths = ["src/**"]
     .unwrap();
 }
 
+fn write_layers_toml_with_seam(root: &std::path::Path, check_id: &str) {
+    let pice_dir = root.join(".pice");
+    std::fs::create_dir_all(&pice_dir).unwrap();
+    std::fs::write(
+        pice_dir.join("layers.toml"),
+        format!(
+            r#"
+[layers]
+order = ["backend", "infrastructure"]
+
+[layers.backend]
+paths = ["src/**"]
+
+[layers.infrastructure]
+paths = ["Dockerfile"]
+
+[seams]
+"backend↔infrastructure" = ["{check_id}"]
+"#
+        ),
+    )
+    .unwrap();
+}
+
 /// Dispatch returns within the p95 <500ms SLO and produces the
 /// expected `background-dispatched` JSON response shape.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -447,6 +471,127 @@ layer_overrides:
     assert!(
         !manifest_path.exists(),
         "invalid workflow must not write a Queued manifest"
+    );
+}
+
+/// Background evaluate must run the seam floor merge before enqueueing. A
+/// workflow overlay that empty-lists a project-required seam boundary must fail
+/// closed with no background job and no Queued manifest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_evaluate_seam_floor_violation_rejects_before_dispatch() {
+    let state_tmp = tempfile::tempdir().unwrap();
+    let _guard = StateDirGuard::new(state_tmp.path());
+
+    let project = tempfile::tempdir().unwrap();
+    init_git(project.path());
+    write_layers_toml_with_seam(project.path(), "config_mismatch");
+    std::fs::write(
+        project.path().join(".pice/workflow.yaml"),
+        r#"schema_version: "0.2"
+defaults:
+  tier: 2
+  min_confidence: 0.90
+  max_passes: 5
+  model: sonnet
+  budget_usd: 2.0
+  cost_cap_behavior: halt
+seams:
+  "backend↔infrastructure": []
+"#,
+    )
+    .unwrap();
+    let plan_path = write_plan_with_contract(project.path(), "seam-floor-feature");
+
+    let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
+    let req = CommandRequest::Evaluate(EvaluateRequest {
+        plan_path,
+        json: true,
+        background: true,
+        wait: false,
+        timeout_secs: None,
+    });
+    let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
+
+    match resp {
+        CommandResponse::ExitJson { code, value } => {
+            assert_eq!(code, ExitJsonStatus::SeamFloorViolation.exit_code());
+            assert_eq!(
+                value["status"].as_str().unwrap(),
+                ExitJsonStatus::SeamFloorViolation.as_str()
+            );
+            assert!(
+                value["violations"]
+                    .as_array()
+                    .is_some_and(|violations| !violations.is_empty()),
+                "seam floor response must include violations: {value}"
+            );
+            assert_eq!(
+                ctx.jobs().active_count(),
+                0,
+                "seam floor violations must reject before spawning a background job"
+            );
+        }
+        other => panic!("expected SeamFloorViolation ExitJson, got {other:?}"),
+    }
+
+    let manifest_path =
+        VerificationManifest::manifest_path_for("seam-floor-feature", project.path()).unwrap();
+    assert!(
+        !manifest_path.exists(),
+        "seam floor violations must not write a Queued manifest"
+    );
+}
+
+/// Background evaluate must also re-validate the merged seam map before
+/// enqueueing. An unknown project-declared seam check must fail closed with the
+/// same structured status as foreground evaluate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_evaluate_merged_seam_validation_rejects_before_dispatch() {
+    let state_tmp = tempfile::tempdir().unwrap();
+    let _guard = StateDirGuard::new(state_tmp.path());
+
+    let project = tempfile::tempdir().unwrap();
+    init_git(project.path());
+    write_layers_toml_with_seam(project.path(), "this_check_id_does_not_exist");
+    let plan_path = write_plan_with_contract(project.path(), "merged-seam-feature");
+
+    let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
+    let req = CommandRequest::Evaluate(EvaluateRequest {
+        plan_path,
+        json: true,
+        background: true,
+        wait: false,
+        timeout_secs: None,
+    });
+    let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
+
+    match resp {
+        CommandResponse::ExitJson { code, value } => {
+            assert_eq!(code, ExitJsonStatus::MergedSeamValidationFailed.exit_code());
+            assert_eq!(
+                value["status"].as_str().unwrap(),
+                ExitJsonStatus::MergedSeamValidationFailed.as_str()
+            );
+            assert!(
+                value["errors"]
+                    .as_array()
+                    .is_some_and(|errors| !errors.is_empty()),
+                "merged seam response must include errors: {value}"
+            );
+            assert_eq!(
+                ctx.jobs().active_count(),
+                0,
+                "merged seam validation must reject before spawning a background job"
+            );
+        }
+        other => panic!("expected MergedSeamValidationFailed ExitJson, got {other:?}"),
+    }
+
+    let manifest_path =
+        VerificationManifest::manifest_path_for("merged-seam-feature", project.path()).unwrap();
+    assert!(
+        !manifest_path.exists(),
+        "merged seam validation failures must not write a Queued manifest"
     );
 }
 
