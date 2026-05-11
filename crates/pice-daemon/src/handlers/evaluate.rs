@@ -104,6 +104,181 @@ fn layers_toml_missing_response(
     }
 }
 
+fn workflow_validation_failed_response(
+    errors: &[pice_core::workflow::validate::ValidationError],
+    json_mode: bool,
+) -> CommandResponse {
+    if json_mode {
+        let errors: Vec<serde_json::Value> = errors
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "field": e.field,
+                    "message": e.message,
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
+            "errors": errors,
+            "hint": "Run `pice validate` for full details.",
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    let mut message = String::from("workflow.yaml has validation errors:\n");
+    for e in errors {
+        message.push_str(&format!("  - {}: {}\n", e.field, e.message));
+    }
+    message.push_str("\nRun `pice validate` for full details.\n");
+    CommandResponse::Exit { code: 1, message }
+}
+
+fn workflow_resolve_failed_response(error: &anyhow::Error, json_mode: bool) -> CommandResponse {
+    let message = format!("{error:#}");
+    if json_mode {
+        let value = serde_json::json!({
+            "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
+            "errors": [{
+                "field": "workflow.yaml",
+                "message": message,
+            }],
+            "hint": "Run `pice validate` for full details.",
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    CommandResponse::Exit {
+        code: 1,
+        message: format!(
+            "failed to resolve workflow.yaml:\n  - workflow.yaml: {message}\n\nRun `pice validate` for full details.\n"
+        ),
+    }
+}
+
+fn seam_floor_violation_response(
+    violations: &[pice_core::workflow::merge::FloorViolation],
+    json_mode: bool,
+) -> CommandResponse {
+    if json_mode {
+        let violations: Vec<serde_json::Value> = violations
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "field": v.field,
+                    "reason": v.reason,
+                    "project": v.project,
+                    "user": v.user,
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "status": ExitJsonStatus::SeamFloorViolation.as_str(),
+            "violations": violations,
+            "hint": "workflow.yaml [seams] may REPLACE a layers.toml boundary's \
+                    check list but cannot empty-list it. Omit the key to inherit \
+                    the project list.",
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    let mut message = String::from("seam configuration floor violations:\n");
+    for v in violations {
+        message.push_str(&format!(
+            "  - {}: {} (project: {}, user: {})\n",
+            v.field, v.reason, v.project, v.user
+        ));
+    }
+    message.push_str(
+        "\nworkflow.yaml [seams] may REPLACE a layers.toml boundary's check list \
+         but cannot empty-list it. Omit the key to inherit the project list.\n",
+    );
+    CommandResponse::Exit { code: 1, message }
+}
+
+fn merged_seam_validation_failed_response(
+    errors: &[pice_core::workflow::validate::ValidationError],
+    json_mode: bool,
+) -> CommandResponse {
+    if json_mode {
+        let errors: Vec<serde_json::Value> = errors
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "field": e.field,
+                    "message": e.message,
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "status": ExitJsonStatus::MergedSeamValidationFailed.as_str(),
+            "errors": errors,
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    let mut message =
+        String::from("merged seam map has validation errors (layers.toml + workflow.yaml):\n");
+    for e in errors {
+        message.push_str(&format!("  - {}: {}\n", e.field, e.message));
+    }
+    CommandResponse::Exit { code: 1, message }
+}
+
+fn preflight_stack_loops_workflow(
+    project_root: &std::path::Path,
+    json_mode: bool,
+) -> Result<std::result::Result<pice_core::workflow::WorkflowConfig, CommandResponse>> {
+    let layers_path = project_root.join(".pice/layers.toml");
+    let layers_config = pice_core::layers::LayersConfig::load(&layers_path)
+        .context("failed to load layers config in background preflight")?;
+
+    let workflow = match pice_core::workflow::loader::resolve(project_root) {
+        Ok(workflow) => workflow,
+        Err(e) => return Ok(Err(workflow_resolve_failed_response(&e, json_mode))),
+    };
+
+    let seam_registry = pice_core::seam::default_registry();
+    let report = pice_core::workflow::validate::validate_all(
+        &workflow,
+        Some(&layers_config),
+        None,
+        Some(&seam_registry),
+    );
+    if !report.is_ok() {
+        return Ok(Err(workflow_validation_failed_response(
+            &report.errors,
+            json_mode,
+        )));
+    }
+
+    let mut merged_seams_opt = layers_config.seams.clone();
+    let mut seam_violations: Vec<pice_core::workflow::merge::FloorViolation> = Vec::new();
+    pice_core::workflow::merge::merge_seams(
+        &mut merged_seams_opt,
+        workflow.seams.as_ref(),
+        &mut seam_violations,
+    );
+    if !seam_violations.is_empty() {
+        return Ok(Err(seam_floor_violation_response(
+            &seam_violations,
+            json_mode,
+        )));
+    }
+
+    let mut merged_workflow = workflow.clone();
+    merged_workflow.seams = Some(merged_seams_opt.unwrap_or_default());
+    let merged_report = pice_core::workflow::validate::validate_seams(
+        &merged_workflow,
+        &layers_config,
+        &seam_registry,
+    );
+    if !merged_report.is_ok() {
+        return Ok(Err(merged_seam_validation_failed_response(
+            &merged_report.errors,
+            json_mode,
+        )));
+    }
+
+    Ok(Ok(workflow))
+}
+
 /// Reconcile expired review gates against the current clock. For each
 /// Pending gate whose `timeout_at` has passed, apply the pinned
 /// `on_timeout_action`: mutate the gate status, update the owning
@@ -429,30 +604,10 @@ pub async fn run(
             Some(&seam_registry),
         );
         if !report.is_ok() {
-            if req.json {
-                let errors: Vec<serde_json::Value> = report
-                    .errors
-                    .iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "field": e.field,
-                            "message": e.message,
-                        })
-                    })
-                    .collect();
-                let value = serde_json::json!({
-                    "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
-                    "errors": errors,
-                    "hint": "Run `pice validate` for full details.",
-                });
-                return Ok(CommandResponse::ExitJson { code: 1, value });
-            }
-            let mut message = String::from("workflow.yaml has validation errors:\n");
-            for e in &report.errors {
-                message.push_str(&format!("  - {}: {}\n", e.field, e.message));
-            }
-            message.push_str("\nRun `pice validate` for full details.\n");
-            return Ok(CommandResponse::Exit { code: 1, message });
+            return Ok(workflow_validation_failed_response(
+                &report.errors,
+                req.json,
+            ));
         }
 
         // Merge `layers.toml [seams]` with `workflow.yaml.seams` under the
@@ -468,39 +623,7 @@ pub async fn run(
             &mut seam_violations,
         );
         if !seam_violations.is_empty() {
-            if req.json {
-                let violations: Vec<serde_json::Value> = seam_violations
-                    .iter()
-                    .map(|v| {
-                        serde_json::json!({
-                            "field": v.field,
-                            "reason": v.reason,
-                            "project": v.project,
-                            "user": v.user,
-                        })
-                    })
-                    .collect();
-                let value = serde_json::json!({
-                    "status": ExitJsonStatus::SeamFloorViolation.as_str(),
-                    "violations": violations,
-                    "hint": "workflow.yaml [seams] may REPLACE a layers.toml boundary's \
-                            check list but cannot empty-list it. Omit the key to inherit \
-                            the project list.",
-                });
-                return Ok(CommandResponse::ExitJson { code: 1, value });
-            }
-            let mut message = String::from("seam configuration floor violations:\n");
-            for v in &seam_violations {
-                message.push_str(&format!(
-                    "  - {}: {} (project: {}, user: {})\n",
-                    v.field, v.reason, v.project, v.user
-                ));
-            }
-            message.push_str(
-                "\nworkflow.yaml [seams] may REPLACE a layers.toml boundary's check list \
-                 but cannot empty-list it. Omit the key to inherit the project list.\n",
-            );
-            return Ok(CommandResponse::Exit { code: 1, message });
+            return Ok(seam_floor_violation_response(&seam_violations, req.json));
         }
         let merged_seams: std::collections::BTreeMap<String, Vec<String>> =
             merged_seams_opt.unwrap_or_default();
@@ -519,30 +642,10 @@ pub async fn run(
             &seam_registry,
         );
         if !merged_report.is_ok() {
-            if req.json {
-                let errors: Vec<serde_json::Value> = merged_report
-                    .errors
-                    .iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "field": e.field,
-                            "message": e.message,
-                        })
-                    })
-                    .collect();
-                let value = serde_json::json!({
-                    "status": ExitJsonStatus::MergedSeamValidationFailed.as_str(),
-                    "errors": errors,
-                });
-                return Ok(CommandResponse::ExitJson { code: 1, value });
-            }
-            let mut message = String::from(
-                "merged seam map has validation errors (layers.toml + workflow.yaml):\n",
-            );
-            for e in &merged_report.errors {
-                message.push_str(&format!("  - {}: {}\n", e.field, e.message));
-            }
-            return Ok(CommandResponse::Exit { code: 1, message });
+            return Ok(merged_seam_validation_failed_response(
+                &merged_report.errors,
+                req.json,
+            ));
         }
 
         // Phase 7: construct an `EventEmittingSaver` borrowed from the
@@ -1483,8 +1586,10 @@ async fn run_background(
         ));
     }
 
-    let workflow_snapshot = pice_core::workflow::loader::resolve(ctx.project_root())
-        .unwrap_or_else(|_| pice_core::workflow::loader::embedded_defaults());
+    let workflow_snapshot = match preflight_stack_loops_workflow(ctx.project_root(), req.json)? {
+        Ok(workflow) => workflow,
+        Err(resp) => return Ok(resp),
+    };
 
     // Capture owned clones of every ctx field the spawn future needs.
     let config_owned = ctx.config().clone();

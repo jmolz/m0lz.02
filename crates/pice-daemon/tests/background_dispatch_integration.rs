@@ -327,6 +327,129 @@ async fn background_evaluate_without_layers_toml_rejects_dispatch() {
     );
 }
 
+/// Background evaluate must use the same fail-closed workflow resolution path
+/// as foreground evaluate. A malformed workflow.yaml must not fall back to
+/// embedded defaults and enqueue a Queued manifest.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_evaluate_malformed_workflow_rejects_before_dispatch() {
+    let state_tmp = tempfile::tempdir().unwrap();
+    let _guard = StateDirGuard::new(state_tmp.path());
+
+    let project = tempfile::tempdir().unwrap();
+    init_git(project.path());
+    write_layers_toml(project.path());
+    std::fs::write(
+        project.path().join(".pice/workflow.yaml"),
+        "schema_version: \"0.2\"\ndefaults: [not a map",
+    )
+    .unwrap();
+    let plan_path = write_plan_with_contract(project.path(), "malformed-workflow-feature");
+
+    let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
+    let req = CommandRequest::Evaluate(EvaluateRequest {
+        plan_path,
+        json: true,
+        background: true,
+        wait: false,
+        timeout_secs: None,
+    });
+    let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
+
+    match resp {
+        CommandResponse::ExitJson { code, value } => {
+            assert_eq!(code, ExitJsonStatus::WorkflowValidationFailed.exit_code());
+            assert_eq!(
+                value["status"].as_str().unwrap(),
+                ExitJsonStatus::WorkflowValidationFailed.as_str()
+            );
+            assert_eq!(
+                ctx.jobs().active_count(),
+                0,
+                "malformed workflow must reject before spawning a background job"
+            );
+        }
+        other => panic!("expected WorkflowValidationFailed ExitJson, got {other:?}"),
+    }
+
+    let manifest_path =
+        VerificationManifest::manifest_path_for("malformed-workflow-feature", project.path())
+            .unwrap();
+    assert!(
+        !manifest_path.exists(),
+        "malformed workflow must not write a Queued manifest"
+    );
+}
+
+/// Background evaluate must also run semantic workflow validation before
+/// enqueueing. Unknown layer overrides are rejected by validate_all, matching
+/// foreground evaluate and `pice validate`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_evaluate_workflow_validation_rejects_before_dispatch() {
+    let state_tmp = tempfile::tempdir().unwrap();
+    let _guard = StateDirGuard::new(state_tmp.path());
+
+    let project = tempfile::tempdir().unwrap();
+    init_git(project.path());
+    write_layers_toml(project.path());
+    std::fs::write(
+        project.path().join(".pice/workflow.yaml"),
+        r#"schema_version: "0.2"
+defaults:
+  tier: 2
+  min_confidence: 0.90
+  max_passes: 5
+  model: sonnet
+  budget_usd: 2.0
+  cost_cap_behavior: halt
+layer_overrides:
+  unknown_layer:
+    tier: 3
+"#,
+    )
+    .unwrap();
+    let plan_path = write_plan_with_contract(project.path(), "invalid-workflow-feature");
+
+    let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
+    let req = CommandRequest::Evaluate(EvaluateRequest {
+        plan_path,
+        json: true,
+        background: true,
+        wait: false,
+        timeout_secs: None,
+    });
+    let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
+
+    match resp {
+        CommandResponse::ExitJson { code, value } => {
+            assert_eq!(code, ExitJsonStatus::WorkflowValidationFailed.exit_code());
+            assert_eq!(
+                value["status"].as_str().unwrap(),
+                ExitJsonStatus::WorkflowValidationFailed.as_str()
+            );
+            assert!(
+                value["errors"]
+                    .as_array()
+                    .is_some_and(|errors| !errors.is_empty()),
+                "workflow validation response must include errors: {value}"
+            );
+            assert_eq!(
+                ctx.jobs().active_count(),
+                0,
+                "invalid workflow must reject before spawning a background job"
+            );
+        }
+        other => panic!("expected WorkflowValidationFailed ExitJson, got {other:?}"),
+    }
+
+    let manifest_path =
+        VerificationManifest::manifest_path_for("invalid-workflow-feature", project.path())
+            .unwrap();
+    assert!(
+        !manifest_path.exists(),
+        "invalid workflow must not write a Queued manifest"
+    );
+}
+
 /// 50 back-to-back dispatches across 50 distinct feature ids all
 /// return under 500ms at p95. Exercises the dispatch handshake cost.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
