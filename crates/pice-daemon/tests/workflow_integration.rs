@@ -128,6 +128,8 @@ layer_overrides:
         workflow: &workflow,
         merged_seams: &empty_seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 
@@ -225,6 +227,8 @@ paths = ["src/server/**"]
         workflow: &workflow,
         merged_seams: &empty_seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 

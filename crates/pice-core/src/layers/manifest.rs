@@ -445,12 +445,30 @@ impl VerificationManifest {
     /// plan name (e.g. `plan.md`) don't collide on disk.
     pub fn manifest_path_for(feature_id: &str, project_root: &Path) -> Result<PathBuf> {
         let dir = Self::state_dir()?;
+        Ok(Self::manifest_path_in_state_dir(
+            feature_id,
+            project_root,
+            &dir,
+        ))
+    }
+
+    /// Returns `{state_dir}/{project_hash}/{feature_id}.manifest.json`.
+    ///
+    /// This is the dispatch-time snapshot variant of [`Self::manifest_path_for`].
+    /// Background jobs use it with `JobEnv.state_dir` so a later
+    /// `PICE_STATE_DIR` mutation cannot move an already-admitted job's
+    /// intermediate manifest writes.
+    pub fn manifest_path_in_state_dir(
+        feature_id: &str,
+        project_root: &Path,
+        state_dir: &Path,
+    ) -> PathBuf {
         let hash = hash_project_root(project_root);
         // Use first 12 hex chars for a readable-but-unique subdirectory
         let namespace = &hash[..12.min(hash.len())];
-        Ok(dir
+        state_dir
             .join(namespace)
-            .join(format!("{feature_id}.manifest.json")))
+            .join(format!("{feature_id}.manifest.json"))
     }
 
     /// Returns `~/.pice/state/{feature_id}.manifest.json` (legacy, no project namespace).

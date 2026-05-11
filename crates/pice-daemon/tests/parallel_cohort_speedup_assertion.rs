@@ -215,6 +215,8 @@ async fn time_one_run(parallel: bool) -> Duration {
         workflow: &wf,
         merged_seams: &seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 

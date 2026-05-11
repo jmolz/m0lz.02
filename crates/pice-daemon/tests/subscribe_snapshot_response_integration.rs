@@ -5,17 +5,8 @@
 //! and asserts:
 //!
 //! 1. The response carries the initial snapshot body.
-//! 2. Subsequent `manifest/event` notifications (produced by emitting on
-//!    `ctx.events()` through a direct call — not available over the wire
-//!    in this test; integration uses the public EventBus handle via a
-//!    side-channel via the lifecycle helpers).
-//!
-//! Since the daemon owns its own `DaemonContext` internally (built inside
-//! `lifecycle::run_with_paths`), this test cannot hook into the bus on the
-//! wire. We validate the snapshot-response path by pre-seeding a manifest
-//! on disk (honoring `PICE_STATE_DIR`) and asserting the subscribe response
-//! loads it. The live-event path is covered by the in-memory unit tests
-//! in `crates/pice-daemon/src/handlers/subscribe.rs::tests`.
+//! 2. Subsequent `manifest/event` notifications arrive on the same
+//!    connection as id-less JSON-RPC notifications.
 //!
 //! This is a Unix-only test because the daemon binding uses a Unix domain
 //! socket. The Windows named-pipe path is exercised by the lifecycle suite
@@ -33,9 +24,11 @@ use pice_core::transport::SocketPath;
 use pice_daemon::events::EventBus;
 use pice_daemon::lifecycle;
 use pice_daemon::server::auth;
-use pice_daemon::server::unix::UnixConnection;
+use pice_daemon::server::router::DaemonContext;
+use pice_daemon::server::unix::{UnixConnection, UnixSocketListener};
 use pice_daemon::test_support::StateDirGuard;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
 
@@ -50,6 +43,51 @@ async fn wait_for_socket(path: &std::path::Path) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("socket did not appear at {}", path.display());
+}
+
+fn spawn_test_accept_loop(
+    ctx: Arc<DaemonContext>,
+    sock_path: std::path::PathBuf,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        let listener = UnixSocketListener::bind(&sock_path).await?;
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let mut conn = accepted?;
+                    let ctx = Arc::clone(&ctx);
+                    tokio::spawn(async move {
+                        loop {
+                            let req: DaemonRequest = match conn.read_message().await {
+                                Ok(Some(req)) => req,
+                                Ok(None) => break,
+                                Err(_) => break,
+                            };
+                            if pice_daemon::handlers::subscribe::is_subscribe_method(&req.method) {
+                                if let Err(auth_err) = ctx.validate_auth(&req) {
+                                    let _ = conn.write_message(&auth_err).await;
+                                    break;
+                                }
+                                let _ = pice_daemon::handlers::subscribe::dispatch(&ctx, &mut conn, req).await;
+                                break;
+                            }
+                            let resp = pice_daemon::server::router::route(req, &ctx).await;
+                            if conn.write_message(&resp).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                    if ctx.is_shutdown_requested() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = ctx.jobs().drain_on_shutdown(Duration::from_secs(10)).await;
+        Ok(())
+    })
 }
 
 #[tokio::test]
@@ -140,6 +178,83 @@ async fn subscribe_snapshot_response_carries_persisted_manifest() {
     // state_dir across tests (even though the guard removes the env
     // override, the files would persist).
     let _ = std::fs::remove_file(&manifest_path);
+}
+
+#[tokio::test]
+async fn subscribe_notifications_follow_snapshot_on_same_connection_without_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let _guard = StateDirGuard::new(&state_dir);
+
+    let project = tempfile::tempdir().expect("project");
+    let sock_path = dir.path().join("daemon.sock");
+    let token = auth::generate_token().expect("token");
+    let ctx = Arc::new(DaemonContext::new(
+        token.clone(),
+        project.path().to_path_buf(),
+    ));
+    let handle = spawn_test_accept_loop(Arc::clone(&ctx), sock_path.clone());
+
+    wait_for_socket(&sock_path).await;
+
+    let stream = UnixStream::connect(&sock_path).await.expect("connect");
+    let mut conn = UnixConnection::new(stream);
+    let params = serde_json::to_value(&SubscribeManifestRequest {
+        feature_id: Some("wire-feat".to_string()),
+    })
+    .unwrap();
+    let req = DaemonRequest::new(1, methods::MANIFEST_SUBSCRIBE, &token, params);
+    conn.write_message(&req).await.expect("write subscribe");
+
+    let resp: serde_json::Value = conn
+        .read_message()
+        .await
+        .expect("read response")
+        .expect("not EOF");
+    assert_eq!(resp["id"], 1);
+    assert!(resp.get("result").is_some(), "snapshot response: {resp}");
+
+    ctx.events().emit_feature_complete(
+        "wire-feat",
+        "run-wire",
+        serde_json::json!({"overall_status": "passed", "status": "passed"}),
+    );
+
+    let notif: serde_json::Value = conn
+        .read_message()
+        .await
+        .expect("read notification")
+        .expect("not EOF");
+    assert_eq!(notif["jsonrpc"], "2.0");
+    assert_eq!(notif["method"], methods::MANIFEST_EVENT);
+    assert!(
+        notif.get("id").is_none(),
+        "JSON-RPC notification frames must not carry id: {notif}"
+    );
+    assert_eq!(notif["params"]["feature_id"], "wire-feat");
+    assert_eq!(notif["params"]["run_id"], "run-wire");
+    assert_eq!(notif["params"]["event"]["event_type"], "feature_complete");
+
+    drop(conn);
+
+    let stream = UnixStream::connect(&sock_path)
+        .await
+        .expect("connect shutdown");
+    let mut shutdown_conn = UnixConnection::new(stream);
+    let shutdown_req =
+        DaemonRequest::new(2, methods::DAEMON_SHUTDOWN, &token, serde_json::json!({}));
+    shutdown_conn
+        .write_message(&shutdown_req)
+        .await
+        .expect("write shutdown");
+    let _: DaemonResponse = shutdown_conn
+        .read_message()
+        .await
+        .expect("read shutdown")
+        .expect("not EOF");
+    drop(shutdown_conn);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
 }
 
 #[tokio::test]

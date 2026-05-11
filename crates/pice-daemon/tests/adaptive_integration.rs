@@ -383,6 +383,8 @@ fn make_cfg<'a>(
         workflow,
         merged_seams: seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     }
 }
@@ -2290,6 +2292,8 @@ async fn unresolvable_provider_remains_phase1_pending_not_failed() {
         workflow: &workflow,
         merged_seams: &seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 

@@ -124,6 +124,8 @@ async fn env_var_mismatch() {
         workflow: &workflow,
         merged_seams: &seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 
@@ -207,6 +209,8 @@ async fn orm_schema_drift() {
         workflow: &workflow,
         merged_seams: &seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 
@@ -288,6 +292,8 @@ async fn openapi_drift() {
         workflow: &workflow,
         merged_seams: &seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 
@@ -364,6 +370,8 @@ async fn clean_fixture_passes_all_checks() {
         workflow: &workflow,
         merged_seams: &seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 

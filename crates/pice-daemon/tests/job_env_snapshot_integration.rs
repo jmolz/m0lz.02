@@ -20,15 +20,21 @@
 //! This is a process-global env mutation so the test serializes on
 //! `pice_daemon::test_support::state_dir_lock`.
 
+use pice_core::config::PiceConfig;
 use pice_core::jobs::JobEnv;
+use pice_core::layers::manifest::VerificationManifest;
+use pice_core::layers::{LayerDef, LayersConfig, LayersTable};
 use pice_core::workflow::schema::{CostCapBehavior, Defaults, Phases, WorkflowConfig};
 use pice_daemon::events::EventBus;
 use pice_daemon::jobs::FeatureJobManager;
+use pice_daemon::orchestrator::stack_loops::{run_stack_loops_with_cancel, StackLoopsConfig};
+use pice_daemon::orchestrator::{NullPassSink, NullSink};
 use pice_daemon::test_support::StateDirGuard;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 fn stub_workflow() -> WorkflowConfig {
     WorkflowConfig {
@@ -47,6 +53,52 @@ fn stub_workflow() -> WorkflowConfig {
         layer_overrides: BTreeMap::new(),
         review: None,
         seams: None,
+    }
+}
+
+fn git_init(dir: &Path) {
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir)
+        .output()
+        .expect("git init");
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
+        .current_dir(dir)
+        .output()
+        .expect("git commit");
+}
+
+fn one_layer_config() -> LayersConfig {
+    let mut defs = BTreeMap::new();
+    defs.insert(
+        "backend".to_string(),
+        LayerDef {
+            paths: vec!["src/**".to_string()],
+            always_run: false,
+            contract: None,
+            depends_on: Vec::new(),
+            layer_type: None,
+            environment_variants: None,
+        },
+    );
+    LayersConfig {
+        layers: LayersTable {
+            order: vec!["backend".to_string()],
+            defs,
+        },
+        seams: None,
+        external_contracts: None,
+        stacks: None,
     }
 }
 
@@ -129,4 +181,74 @@ async fn snapshot_survives_process_env_mutation_mid_flight() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stack_loops_uses_dispatch_manifest_path_after_env_mutation() {
+    let project = tempfile::tempdir().expect("project");
+    let state_a = tempfile::tempdir().expect("state a");
+    let state_b = tempfile::tempdir().expect("state b");
+
+    let _guard = StateDirGuard::new(state_a.path());
+    git_init(project.path());
+    let src = project.path().join("src/lib.rs");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(&src, "pub fn changed() {}\n").unwrap();
+    let plan_path = project.path().join("plan.md");
+    std::fs::write(&plan_path, "# Plan\n").unwrap();
+
+    let feature_id = "plan";
+    let dispatch_path = VerificationManifest::manifest_path_in_state_dir(
+        feature_id,
+        project.path(),
+        state_a.path(),
+    );
+
+    // Simulate a daemon env mutation after dispatch. A production
+    // background job must continue using the dispatch-time manifest path,
+    // not `manifest_path_for()`'s live env lookup.
+    std::env::set_var("PICE_STATE_DIR", state_b.path());
+    let live_env_path =
+        VerificationManifest::manifest_path_for(feature_id, project.path()).expect("live env path");
+    assert_ne!(dispatch_path, live_env_path);
+
+    let layers = one_layer_config();
+    let mut workflow = stub_workflow();
+    workflow.defaults.budget_usd = 0.0;
+    workflow.defaults.max_passes = 1;
+    let pice_config = PiceConfig::default();
+    let seams = BTreeMap::new();
+    let saver = pice_daemon::events::NullSaver;
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: project.path(),
+        primary_provider: "not-a-real-provider-kjsdfhgsd",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &workflow,
+        merged_seams: &seams,
+        contract_paths: None,
+        manifest_path: Some(dispatch_path.as_path()),
+        global_provider_semaphore: None,
+        saver: &saver,
+    };
+    let pass_sink: Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = Arc::new(NullPassSink);
+
+    let _manifest =
+        run_stack_loops_with_cancel(&cfg, &NullSink, true, pass_sink, CancellationToken::new())
+            .await
+            .expect("stack loops");
+
+    assert!(
+        dispatch_path.exists(),
+        "stack loops must save to the dispatch-time manifest path"
+    );
+    assert!(
+        !live_env_path.exists(),
+        "stack loops must not recompute manifest path from mutated PICE_STATE_DIR"
+    );
+
+    // Keep the guard's restoration path coherent.
+    std::env::set_var("PICE_STATE_DIR", state_a.path());
 }

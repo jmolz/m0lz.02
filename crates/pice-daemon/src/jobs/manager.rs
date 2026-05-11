@@ -350,6 +350,16 @@ impl FeatureJobManager {
         self.jobs.len()
     }
 
+    /// Clone the global provider-session semaphore.
+    ///
+    /// Stack Loops uses this inside each per-layer provider startup, so
+    /// `max_global_provider_concurrency` bounds real provider sessions
+    /// across foreground and background evaluations instead of merely
+    /// bounding feature futures.
+    pub fn provider_semaphore(&self) -> Arc<Semaphore> {
+        Arc::clone(&self.global_sem)
+    }
+
     /// Fire cancellation on every live feature, then wait up to `timeout`
     /// for all supervised tasks to exit. Returns the count of features
     /// that were STILL running when the timeout elapsed.
@@ -372,6 +382,13 @@ impl FeatureJobManager {
                 return 0;
             }
             if tokio::time::Instant::now() >= deadline {
+                for entry in self.jobs.iter() {
+                    entry.join_handle.abort();
+                }
+                let abort_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+                while !self.jobs.is_empty() && tokio::time::Instant::now() < abort_deadline {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
                 return remaining;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -753,6 +770,17 @@ mod tests {
 
         let remaining = manager.drain_on_shutdown(Duration::from_millis(300)).await;
         assert_eq!(remaining, 1, "stuck feature should still be counted");
+        for _ in 0..50 {
+            if manager.active_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            manager.active_count(),
+            0,
+            "timeout path should abort stuck jobs before returning control to shutdown"
+        );
     }
 
     #[tokio::test]

@@ -219,16 +219,15 @@ pub fn write_queued_manifest(
     feature_id: &str,
     run_id: &str,
     project_root: &Path,
+    manifest_path: &Path,
 ) -> Result<PathBuf> {
-    let manifest_path = VerificationManifest::manifest_path_for(feature_id, project_root)
-        .context("deriving manifest path for Queued checkpoint")?;
     let mut manifest = VerificationManifest::new(feature_id, project_root);
     manifest.overall_status = ManifestStatus::Queued;
     manifest.run_id = Some(run_id.to_string());
     NullSaver
-        .save_and_emit(&manifest, &manifest_path, SaveIntent::FeatureCompleted)
+        .save_and_emit(&manifest, manifest_path, SaveIntent::FeatureCompleted)
         .context("persisting Queued manifest at dispatch time")?;
-    Ok(manifest_path)
+    Ok(manifest_path.to_path_buf())
 }
 
 /// Arguments passed into the spawned orchestrator closure. Owned so the
@@ -295,15 +294,18 @@ where
 
     // Step 6: derive the manifest path. The actual Queued write happens
     // only after `spawn` admits this feature as the single live run.
-    let manifest_path = VerificationManifest::manifest_path_for(&feature_id, ctx.project_root())
-        .context("deriving manifest path for Queued checkpoint")?;
+    let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+        &feature_id,
+        ctx.project_root(),
+        &env.state_dir,
+    );
     let (start_tx, start_rx) = oneshot::channel::<()>();
 
     // Step 7: hand the owned builder to the job manager.
     let spawn_args = OrchestratorSpawnArgs {
         feature_id: feature_id.clone(),
         run_id: run_id.clone(),
-        manifest_path,
+        manifest_path: manifest_path.clone(),
         env: Arc::clone(&env),
     };
     let spawn_result = ctx.jobs().spawn_after_signal(
@@ -315,7 +317,9 @@ where
     );
     match spawn_result {
         Ok(_actual_run_id) => {
-            if let Err(e) = write_queued_manifest(&feature_id, &run_id, ctx.project_root()) {
+            if let Err(e) =
+                write_queued_manifest(&feature_id, &run_id, ctx.project_root(), &manifest_path)
+            {
                 ctx.jobs().cancel(&feature_id);
                 drop(start_tx);
                 return Err(e);
@@ -489,7 +493,12 @@ paths = ["src/frontend/**"]
         let state_tmp = tempfile::tempdir().unwrap();
         let _guard = StateDirGuard::new(state_tmp.path());
         let project_tmp = tempfile::tempdir().unwrap();
-        let path = write_queued_manifest("feat-queued", "r-1", project_tmp.path()).unwrap();
+        let path = VerificationManifest::manifest_path_in_state_dir(
+            "feat-queued",
+            project_tmp.path(),
+            state_tmp.path(),
+        );
+        let path = write_queued_manifest("feat-queued", "r-1", project_tmp.path(), &path).unwrap();
         let loaded = VerificationManifest::load(&path).unwrap();
         assert_eq!(loaded.overall_status, ManifestStatus::Queued);
         assert_eq!(loaded.run_id.as_deref(), Some("r-1"));
@@ -500,8 +509,18 @@ paths = ["src/frontend/**"]
         let state_tmp = tempfile::tempdir().unwrap();
         let _guard = StateDirGuard::new(state_tmp.path());
         let project_tmp = tempfile::tempdir().unwrap();
-        let manifest_path =
-            write_queued_manifest("feat-transition", "r-xyz", project_tmp.path()).unwrap();
+        let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+            "feat-transition",
+            project_tmp.path(),
+            state_tmp.path(),
+        );
+        let manifest_path = write_queued_manifest(
+            "feat-transition",
+            "r-xyz",
+            project_tmp.path(),
+            &manifest_path,
+        )
+        .unwrap();
 
         let events = EventBus::new();
         // Subscribe BEFORE the transition. The transition helper itself

@@ -170,6 +170,8 @@ async fn run_once(parallel: bool, latency_ms: u64) {
         workflow: &wf,
         merged_seams: &seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     };
 

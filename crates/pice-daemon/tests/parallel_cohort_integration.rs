@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::layer::SubscriberExt;
@@ -347,6 +348,8 @@ fn make_cfg<'a>(
         workflow: wf,
         merged_seams: seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &NULL_SAVER,
     }
 }
@@ -754,6 +757,117 @@ async fn cancellation_aborts_in_flight_cohort() {
             .map(|l| (&l.name, &l.status, &l.halted_by))
             .collect::<Vec<_>>(),
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_provider_semaphore_bounds_parallel_layer_provider_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_two_layer_repo(dir.path());
+    let layers = two_layer_independent_config();
+    let pice_config = stub_pice_config();
+    let wf = workflow(true, Some(4), 1);
+    let seams = BTreeMap::new();
+    let provider_sem = Arc::new(Semaphore::new(1));
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: dir.path(),
+        primary_provider: "stub",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &wf,
+        merged_seams: &seams,
+        contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: Some(provider_sem),
+        saver: &NULL_SAVER,
+    };
+
+    let alive_path = dir.path().join("stub-provider-sessions.log");
+    std::fs::write(&alive_path, "").unwrap();
+    let _stub = ParallelStubGuard::new(
+        &[("backend", "9.0,0.01"), ("frontend", "8.0,0.01")],
+        Some(500),
+    );
+    let _alive = StubAliveFileGuard::new(&alive_path);
+
+    let run = run_stack_loops_with_cancel(
+        &cfg,
+        &NullSink,
+        true,
+        null_sink_arc(),
+        CancellationToken::new(),
+    );
+    tokio::pin!(run);
+
+    wait_for_alive_count_at_least(&alive_path, 1, &mut run).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        active_stub_session_count(&alive_path),
+        1,
+        "global provider-session semaphore must bound real provider processes, \
+         not just feature futures or cohort tasks"
+    );
+
+    let manifest = run.await.expect("stack loops");
+    assert_eq!(manifest.layers.len(), 2);
+    assert_eq!(
+        active_stub_session_count(&alive_path),
+        0,
+        "all provider sessions should be shut down after evaluation"
+    );
+}
+
+fn active_stub_session_count(path: &Path) -> usize {
+    let contents = std::fs::read_to_string(path).unwrap_or_default();
+    let mut started: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut finished: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    for line in contents.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let Ok(pid) = parts[1].parse::<i32>() else {
+            continue;
+        };
+        match parts[0] {
+            "alive" => {
+                started.insert(pid);
+            }
+            "done" => {
+                finished.insert(pid);
+            }
+            _ => {}
+        }
+    }
+    started.difference(&finished).count()
+}
+
+async fn wait_for_alive_count_at_least<F>(
+    path: &Path,
+    expected: usize,
+    run: &mut std::pin::Pin<&mut F>,
+) where
+    F: std::future::Future<
+        Output = anyhow::Result<pice_core::layers::manifest::VerificationManifest>,
+    >,
+{
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if active_stub_session_count(path) >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} active stub provider session(s)"
+        );
+        tokio::select! {
+            result = run.as_mut() => {
+                panic!("stack loops finished before {expected} active provider session(s): {result:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
 }
 
 /// Parse the stub alive-file and return PIDs with "alive" but no

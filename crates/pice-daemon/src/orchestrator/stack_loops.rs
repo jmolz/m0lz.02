@@ -24,7 +24,7 @@ use pice_core::workflow::WorkflowConfig;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -80,6 +80,15 @@ pub struct StackLoopsConfig<'a> {
     /// jobs pass this from `JobEnv` so contract path discovery cannot drift
     /// after the job has been admitted but before provider work starts.
     pub contract_paths: Option<&'a BTreeMap<String, PathBuf>>,
+    /// Optional dispatch-time manifest path. Background jobs pass the path
+    /// derived from `JobEnv.state_dir`; foreground calls leave this unset and
+    /// compute from the live environment.
+    pub manifest_path: Option<&'a Path>,
+    /// Optional global provider-session semaphore. When present, every
+    /// provider process started by a layer holds one permit until shutdown.
+    /// This is separate from `defaults.max_parallelism`, which only limits
+    /// the number of cohort tasks spawned inside one feature.
+    pub global_provider_semaphore: Option<Arc<Semaphore>>,
     /// Phase 7: manifest persistence + event-bus publication handle. Every
     /// manifest state transition in the orchestrator goes through this
     /// saver so the save + event emission are atomic. Inline mode and
@@ -234,19 +243,29 @@ pub async fn run_stack_loops_with_cancel(
     let dag = config.build_dag().context("failed to build layer DAG")?;
 
     // Compute manifest path up front so we can attempt to resume from disk.
-    let manifest_path = match VerificationManifest::manifest_path_for(&feature_id, project_root) {
-        Ok(path) => {
+    let manifest_path = match cfg.manifest_path {
+        Some(path) => {
             if let Some(parent) = path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     warn!("failed to create manifest state dir: {e}");
                 }
             }
-            Some(path)
+            Some(path.to_path_buf())
         }
-        Err(e) => {
-            warn!("failed to compute manifest path: {e}");
-            None
-        }
+        None => match VerificationManifest::manifest_path_for(&feature_id, project_root) {
+            Ok(path) => {
+                if let Some(parent) = path.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        warn!("failed to create manifest state dir: {e}");
+                    }
+                }
+                Some(path)
+            }
+            Err(e) => {
+                warn!("failed to compute manifest path: {e}");
+                None
+            }
+        },
     };
 
     // Resume-from-disk (Phase 6): if a manifest already exists on disk for
@@ -888,6 +907,24 @@ enum LayerAdaptiveResult {
     RuntimeError(String),
 }
 
+async fn acquire_provider_session_permit(
+    semaphore: Option<&Arc<Semaphore>>,
+    layer_name: &str,
+    role: &str,
+) -> Result<Option<OwnedSemaphorePermit>, String> {
+    let Some(semaphore) = semaphore else {
+        return Ok(None);
+    };
+    semaphore
+        .clone()
+        .acquire_owned()
+        .await
+        .map(Some)
+        .map_err(|e| {
+            format!("global provider semaphore closed before {role} provider for layer {layer_name}: {e}")
+        })
+}
+
 /// Attempt to run the per-layer adaptive pass loop.
 ///
 /// Starts primary (and adversarial when ADTS is active) providers, invokes
@@ -945,6 +982,20 @@ async fn try_run_layer_adaptive(
         return LayerAdaptiveResult::NotStarted;
     }
 
+    let _primary_provider_permit = match acquire_provider_session_permit(
+        cfg.global_provider_semaphore.as_ref(),
+        layer_name,
+        "primary",
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(msg) => {
+            warn!(layer = %layer_name, "{msg}");
+            return LayerAdaptiveResult::RuntimeError(msg);
+        }
+    };
+
     let mut primary = match ProviderOrchestrator::start(cfg.primary_provider, cfg.pice_config).await
     {
         Ok(p) => p,
@@ -1000,6 +1051,7 @@ async fn try_run_layer_adaptive(
     }
 
     // Start the adversarial provider only when ADTS is selected.
+    let mut _adversarial_provider_permit: Option<OwnedSemaphorePermit> = None;
     let mut adversarial: Option<ProviderOrchestrator> = if algo
         == pice_core::workflow::schema::AdaptiveAlgo::Adts
         && cfg.pice_config.evaluation.adversarial.enabled
@@ -1020,6 +1072,20 @@ async fn try_run_layer_adaptive(
             let _ = primary.shutdown().await;
             return LayerAdaptiveResult::NotStarted;
         }
+        _adversarial_provider_permit = match acquire_provider_session_permit(
+            cfg.global_provider_semaphore.as_ref(),
+            layer_name,
+            "adversarial",
+        )
+        .await
+        {
+            Ok(permit) => permit,
+            Err(msg) => {
+                warn!(layer = %layer_name, "{msg}");
+                let _ = primary.shutdown().await;
+                return LayerAdaptiveResult::RuntimeError(msg);
+            }
+        };
         match ProviderOrchestrator::start(
             &cfg.pice_config.evaluation.adversarial.provider,
             cfg.pice_config,
@@ -1424,6 +1490,7 @@ struct LayerInputs {
     project_root: PathBuf,
     full_diff: String,
     seam_registry: Arc<Registry>,
+    global_provider_semaphore: Option<Arc<Semaphore>>,
 }
 
 /// Outcome of one parallel cohort task. The outer `run_stack_loops_with_cancel`
@@ -1481,6 +1548,7 @@ fn build_per_layer_inputs(
         project_root: cfg.project_root.to_path_buf(),
         full_diff: full_diff.to_string(),
         seam_registry,
+        global_provider_semaphore: cfg.global_provider_semaphore.clone(),
     }
 }
 
@@ -1539,6 +1607,7 @@ async fn evaluate_one_layer(
         inputs.pice_config.clone(),
         inputs.workflow.clone(),
         inputs.project_root.clone(),
+        inputs.global_provider_semaphore.clone(),
         Arc::clone(&pass_sink),
     );
 
@@ -1632,6 +1701,7 @@ async fn try_run_layer_adaptive_owned(
     pice_config: PiceConfig,
     workflow: WorkflowConfig,
     project_root: PathBuf,
+    global_provider_semaphore: Option<Arc<Semaphore>>,
     pass_sink: Arc<dyn PassMetricsSink>,
 ) -> LayerAdaptiveResult {
     // Build a transient `StackLoopsConfig` and delegate to the shared
@@ -1674,6 +1744,8 @@ async fn try_run_layer_adaptive_owned(
         workflow: &workflow,
         merged_seams: &dummy_seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore,
         saver: &saver,
     };
     try_run_layer_adaptive(
@@ -1845,6 +1917,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_paths: None,
+            manifest_path: None,
+            global_provider_semaphore: None,
             saver: &saver,
         };
 
@@ -1949,6 +2023,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_paths: None,
+            manifest_path: None,
+            global_provider_semaphore: None,
             saver: &saver,
         };
 
@@ -2118,6 +2194,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &seams,
             contract_paths: None,
+            manifest_path: None,
+            global_provider_semaphore: None,
             saver: &saver,
         };
 

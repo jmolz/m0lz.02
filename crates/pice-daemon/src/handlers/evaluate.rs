@@ -566,6 +566,8 @@ pub async fn run(
             workflow: &workflow,
             merged_seams: &merged_seams,
             contract_paths: None,
+            manifest_path: None,
+            global_provider_semaphore: Some(ctx.jobs().provider_semaphore()),
             saver: &saver,
         };
 
@@ -1487,6 +1489,7 @@ async fn run_background(
     let config_owned = ctx.config().clone();
     let events_for_spawn = ctx.events().clone();
     let logs_for_spawn = ctx.logs().clone();
+    let provider_semaphore_for_spawn = ctx.jobs().provider_semaphore();
     let plan_path_owned = plan_path.to_path_buf();
     let json_mode = req.json;
 
@@ -1497,7 +1500,11 @@ async fn run_background(
         ctx,
         workflow_snapshot.clone(),
         move |args, permit, cancel| async move {
-            let _global_provider_permit = permit;
+            // Background evaluate now enforces global concurrency at the
+            // provider-session boundary inside Stack Loops. Release the
+            // manager's admission permit immediately so it cannot deadlock
+            // with per-layer provider permits from the same semaphore.
+            drop(permit);
             // First-layer hint: peek at layers.toml to name the first
             // cohort. The hint is best-effort — if layers.toml is
             // missing we fall back to the feature_id so the
@@ -1544,6 +1551,7 @@ async fn run_background(
                 &workflow_snapshot,
                 &events_for_spawn,
                 &logs_for_spawn,
+                provider_semaphore_for_spawn.clone(),
                 json_mode,
                 &cancel,
             )
@@ -1606,6 +1614,7 @@ async fn run_evaluate_orchestrator(
     workflow_snapshot: &pice_core::workflow::WorkflowConfig,
     events: &crate::events::EventBus,
     logs: &crate::logs::LogStore,
+    provider_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
     _json_mode: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<pice_core::layers::manifest::VerificationManifest> {
@@ -1679,6 +1688,8 @@ async fn run_evaluate_orchestrator(
         workflow: workflow_snapshot,
         merged_seams: &merged_seams,
         contract_paths: Some(&args.env.contracts),
+        manifest_path: Some(args.manifest_path.as_path()),
+        global_provider_semaphore: Some(provider_semaphore),
         saver: &saver,
     };
 

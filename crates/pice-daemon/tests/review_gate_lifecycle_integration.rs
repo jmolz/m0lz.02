@@ -546,6 +546,8 @@ async fn scenario_8_cancellation_during_pending_review() {
         workflow: &workflow,
         merged_seams: &merged_seams,
         contract_paths: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
         saver: &null_saver,
     };
 
