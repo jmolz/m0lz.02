@@ -14,6 +14,7 @@
 
 #![cfg(unix)]
 
+use pice_core::jobs::JobEnv;
 use pice_core::layers::manifest::VerificationManifest;
 use pice_core::protocol::{
     methods,
@@ -21,16 +22,19 @@ use pice_core::protocol::{
     DaemonRequest, DaemonResponse,
 };
 use pice_core::transport::SocketPath;
+use pice_core::workflow::schema::{CostCapBehavior, Defaults, Phases, WorkflowConfig};
 use pice_daemon::events::EventBus;
 use pice_daemon::lifecycle;
 use pice_daemon::server::auth;
 use pice_daemon::server::router::DaemonContext;
 use pice_daemon::server::unix::{UnixConnection, UnixSocketListener};
 use pice_daemon::test_support::StateDirGuard;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
+use tokio::sync::oneshot;
 
 async fn wait_for_socket(path: &std::path::Path) {
     for _ in 0..200 {
@@ -87,6 +91,33 @@ fn spawn_test_accept_loop(
         }
         let _ = ctx.jobs().drain_on_shutdown(Duration::from_secs(10)).await;
         Ok(())
+    })
+}
+
+fn stub_job_env(state_dir: &std::path::Path, project_root: &std::path::Path) -> Arc<JobEnv> {
+    Arc::new(JobEnv {
+        state_dir: state_dir.to_path_buf(),
+        project_root: project_root.to_path_buf(),
+        workflow_snapshot: WorkflowConfig {
+            schema_version: "0.2".to_string(),
+            defaults: Defaults {
+                tier: 2,
+                min_confidence: 0.90,
+                max_passes: 5,
+                model: "sonnet".to_string(),
+                budget_usd: 2.0,
+                cost_cap_behavior: CostCapBehavior::Halt,
+                max_parallelism: None,
+                max_global_provider_concurrency: None,
+            },
+            phases: Phases::default(),
+            layer_overrides: BTreeMap::new(),
+            review: None,
+            seams: None,
+        },
+        contracts: BTreeMap::new(),
+        pice_state_dir_override: None,
+        pice_user_workflow_file: None,
     })
 }
 
@@ -237,6 +268,107 @@ async fn subscribe_notifications_follow_snapshot_on_same_connection_without_id()
     assert_eq!(notif["params"]["event"]["event_type"], "feature_complete");
 
     drop(conn);
+
+    let stream = UnixStream::connect(&sock_path)
+        .await
+        .expect("connect shutdown");
+    let mut shutdown_conn = UnixConnection::new(stream);
+    let shutdown_req =
+        DaemonRequest::new(2, methods::DAEMON_SHUTDOWN, &token, serde_json::json!({}));
+    shutdown_conn
+        .write_message(&shutdown_req)
+        .await
+        .expect("write shutdown");
+    let _: DaemonResponse = shutdown_conn
+        .read_message()
+        .await
+        .expect("read shutdown")
+        .expect("not EOF");
+    drop(shutdown_conn);
+    let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+}
+
+#[tokio::test]
+async fn scoped_manifest_subscribe_filters_live_run_ids() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let _guard = StateDirGuard::new(&state_dir);
+
+    let project = tempfile::tempdir().expect("project");
+    let sock_path = dir.path().join("daemon.sock");
+    let token = auth::generate_token().expect("token");
+    let ctx = Arc::new(DaemonContext::new(
+        token.clone(),
+        project.path().to_path_buf(),
+    ));
+
+    let env = stub_job_env(&state_dir, project.path());
+    let (tx_a, rx_a) = oneshot::channel();
+    let (tx_b, rx_b) = oneshot::channel();
+    ctx.jobs()
+        .spawn_after_signal(
+            "live-a",
+            "run-a".to_string(),
+            Arc::clone(&env),
+            rx_a,
+            |_env, _permit, _cancel| async {
+                Ok(VerificationManifest::new(
+                    "live-a",
+                    std::path::Path::new("/tmp/pice-test"),
+                ))
+            },
+        )
+        .expect("spawn live-a");
+    ctx.jobs()
+        .spawn_after_signal(
+            "live-b",
+            "run-b".to_string(),
+            env,
+            rx_b,
+            |_env, _permit, _cancel| async {
+                Ok(VerificationManifest::new(
+                    "live-b",
+                    std::path::Path::new("/tmp/pice-test"),
+                ))
+            },
+        )
+        .expect("spawn live-b");
+
+    let handle = spawn_test_accept_loop(Arc::clone(&ctx), sock_path.clone());
+    wait_for_socket(&sock_path).await;
+
+    let stream = UnixStream::connect(&sock_path).await.expect("connect");
+    let mut conn = UnixConnection::new(stream);
+    let params = serde_json::to_value(&SubscribeManifestRequest {
+        feature_id: Some("live-a".to_string()),
+    })
+    .unwrap();
+    let req = DaemonRequest::new(1, methods::MANIFEST_SUBSCRIBE, &token, params);
+    conn.write_message(&req).await.expect("write subscribe");
+
+    let resp: DaemonResponse = conn
+        .read_message()
+        .await
+        .expect("read response")
+        .expect("not EOF");
+    let body: SubscribeManifestResponse =
+        serde_json::from_value(resp.result.expect("result")).expect("parse snapshot body");
+    assert_eq!(
+        body.run_ids,
+        BTreeMap::from([("live-a".to_string(), "run-a".to_string())]),
+        "feature-scoped subscribe must not leak unrelated live run ids"
+    );
+
+    drop(conn);
+    drop(tx_a);
+    drop(tx_b);
+    for _ in 0..50 {
+        if ctx.jobs().active_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     let stream = UnixStream::connect(&sock_path)
         .await

@@ -808,6 +808,12 @@ pub async fn run_stack_loops_with_cancel(
                         break;
                     }
                 }
+                if let Err(e) =
+                    cfg.saver
+                        .save_and_emit(&manifest, path, SaveIntent::FeatureCompleted)
+                {
+                    warn!("failed to emit pending-review terminal event: {e}");
+                }
             }
             info!(
                 cohort_index = cohort_idx,

@@ -108,7 +108,14 @@ pub async fn manifest(
         }
     };
 
-    let run_ids: BTreeMap<String, String> = ctx.jobs().live_runs();
+    let run_ids: BTreeMap<String, String> = match parsed.feature_id.as_deref() {
+        Some(feature_id) => ctx
+            .jobs()
+            .run_id_for(feature_id)
+            .map(|run_id| BTreeMap::from([(feature_id.to_string(), run_id)]))
+            .unwrap_or_default(),
+        None => ctx.jobs().live_runs(),
+    };
 
     let response_body = SubscribeManifestResponse { snapshots, run_ids };
     let value = serde_json::to_value(&response_body)?;
