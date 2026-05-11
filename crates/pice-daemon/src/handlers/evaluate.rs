@@ -1621,7 +1621,6 @@ async fn run_evaluate_orchestrator(
 
     let layers_path = args.env.project_root.join(".pice/layers.toml");
     if !layers_path.exists() {
-        let _ = logs;
         return Err(anyhow::anyhow!(
             "background evaluation requires .pice/layers.toml; missing {}",
             layers_path.display()
@@ -1686,16 +1685,21 @@ async fn run_evaluate_orchestrator(
     let pass_sink: std::sync::Arc<dyn crate::orchestrator::PassMetricsSink> =
         std::sync::Arc::new(crate::orchestrator::NullPassSink);
 
-    // Use a NullSink for the in-session chunk stream; background mode
-    // fans chunks into LogStore via a separate sink (Task 13 logs
-    // streaming). Background evaluate does not support the
-    // foreground's inline streaming to a CLI connection because the
-    // connection already closed after dispatch.
-    let sink = crate::orchestrator::NullSink;
+    // Background evaluate has no live CLI stream to write to, but provider
+    // chunks still need to be captured for `pice logs`. Use the same
+    // LogStore-backed sink as background execute and pass `json_mode=false`
+    // so Stack Loops does not suppress chunk forwarding.
+    let sink: std::sync::Arc<dyn crate::orchestrator::StreamSink> =
+        std::sync::Arc::new(crate::logs::LogStoreSink::new(
+            logs.clone(),
+            args.feature_id.clone(),
+            args.run_id.clone(),
+            "evaluate",
+        ));
     crate::orchestrator::stack_loops::run_stack_loops_with_cancel(
         &cfg,
-        &sink,
-        true,
+        sink.as_ref(),
+        false,
         pass_sink,
         cancel.clone(),
     )

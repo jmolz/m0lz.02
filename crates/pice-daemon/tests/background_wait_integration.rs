@@ -11,13 +11,11 @@
 //!   C7-2  exit 2  (Failed)         — snapshot already-terminal short-circuit
 //!   C7-3  exit 3  (PendingReview)  — snapshot already-terminal short-circuit
 //!   C7-4  exit 4  (WaitTimeout)    — live feature never completes, 100ms timeout
+//!   C7-5  exit 5  (DaemonDisconnected) — subscribe channel closes
 //!
-//! SKIPPED:
-//!   C7-5  exit 5  (DaemonDisconnected) — requires daemon-restart + reconciliation
-//!   choreography (boot daemon, kill mid-subscribe, restart, observe
-//!   Failed-interrupted rewrite).  This is covered conceptually by
-//!   `interrupted_recovery_integration.rs`; the full daemon-restart path
-//!   with a concurrent subscriber is deferred to a Phase 7.1 hardening pass.
+//! Binary-level coverage for the real CLI socket path lives in
+//! `crates/pice-cli/tests/evaluate_background_wait_live_integration.rs` and
+//! `crates/pice-cli/tests/status_wait_daemon_disconnect_integration.rs`.
 
 #![cfg(unix)]
 
@@ -67,6 +65,7 @@ mod wait_logic {
                 let status_wire = payload
                     .data
                     .get("overall_status")
+                    .or_else(|| payload.data.get("status"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("failed")
                     .to_string();

@@ -617,6 +617,7 @@ fn maybe_notify_for_event(
             payload
                 .data
                 .get("overall_status")
+                .or_else(|| payload.data.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("failed")
                 .to_string(),
@@ -642,6 +643,7 @@ fn terminal_from_event(payload: &ManifestEventPayload) -> Option<(String, i32)> 
             let status_wire = payload
                 .data
                 .get("overall_status")
+                .or_else(|| payload.data.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("failed")
                 .to_string();

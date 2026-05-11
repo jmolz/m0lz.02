@@ -214,12 +214,12 @@ async fn run_execute_session(
     // keyed on (feature_id, run_id, layer = "execute"). The shared
     // sink bridge is allocation-free on the hot path (a single
     // `Arc::clone` on each chunk).
-    let log_sink: Arc<dyn StreamSink> = Arc::new(LogStoreSink {
-        store: logs.clone(),
-        feature_id: feature_id.to_string(),
-        run_id: run_id.to_string(),
-        layer: "execute".to_string(),
-    });
+    let log_sink: Arc<dyn StreamSink> = Arc::new(crate::logs::LogStoreSink::new(
+        logs.clone(),
+        feature_id,
+        run_id,
+        "execute",
+    ));
     orchestrator.on_notification(streaming_handler(log_sink));
 
     // Race the session against cancellation.
@@ -229,33 +229,4 @@ async fn run_execute_session(
     };
     orchestrator.shutdown().await.ok();
     result
-}
-
-/// Minimal `StreamSink` impl that forwards every chunk into the
-/// daemon's [`LogStore`].
-///
-/// `send_chunk` is sync but `LogStore::append_chunk` is async; we
-/// bridge via `tokio::spawn` so the sink never blocks the provider's
-/// notification dispatch path. The store's per-feature mutex
-/// serializes appends, so fire-and-forget is safe — order is preserved
-/// by the mutex, not by the task scheduler. `send_event` is a no-op
-/// (execute does not emit structured events).
-struct LogStoreSink {
-    store: crate::logs::LogStore,
-    feature_id: String,
-    run_id: String,
-    layer: String,
-}
-
-impl StreamSink for LogStoreSink {
-    fn send_chunk(&self, text: &str) {
-        let store = self.store.clone();
-        let feature = self.feature_id.clone();
-        let run = self.run_id.clone();
-        let layer = self.layer.clone();
-        let text_owned = text.to_string();
-        tokio::spawn(async move {
-            store.append_chunk(&feature, &run, &layer, text_owned).await;
-        });
-    }
 }

@@ -295,10 +295,13 @@ fn parse_terminal_notification(notif: &DaemonNotification) -> Option<(String, i3
     match payload.event {
         ManifestEvent::FeatureComplete => {
             // `data.overall_status` is the kebab-cased ManifestStatus
-            // wire string. If missing / unrecognized, treat as Failed.
+            // wire string. Accept the legacy `status` alias so an updated
+            // CLI can wait against an older daemon during rolling upgrades.
+            // If missing / unrecognized, treat as Failed.
             let status_wire = payload
                 .data
                 .get("overall_status")
+                .or_else(|| payload.data.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("failed")
                 .to_string();

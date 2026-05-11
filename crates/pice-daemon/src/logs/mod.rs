@@ -13,4 +13,4 @@
 
 pub mod store;
 
-pub use store::{LogStore, BUFFER_BYTES_CAP, CHANNEL_CAPACITY};
+pub use store::{LogStore, LogStoreSink, BUFFER_BYTES_CAP, CHANNEL_CAPACITY};

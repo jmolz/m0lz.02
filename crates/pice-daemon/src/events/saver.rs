@@ -79,7 +79,8 @@ pub enum SaveIntent {
     },
 
     /// The manifest reached a terminal `overall_status`. Emits
-    /// `ManifestEvent::FeatureComplete` with `{status}`.
+    /// `ManifestEvent::FeatureComplete` with `{overall_status}` plus the
+    /// legacy `{status}` alias for older subscribers.
     FeatureCompleted,
 
     /// The feature was cancelled (SIGINT / daemon drain / panicked
@@ -197,7 +198,12 @@ impl<'a> EventEmittingSaver<'a> {
                 self.bus.emit_seam_finding(feature_id, run_id, &layer, data);
             }
             SaveIntent::FeatureCompleted => {
-                let data = serde_json::json!({ "status": manifest.overall_status });
+                let status = serde_json::to_value(&manifest.overall_status)
+                    .unwrap_or_else(|_| serde_json::Value::String("failed".to_string()));
+                let data = serde_json::json!({
+                    "overall_status": status,
+                    "status": status,
+                });
                 self.bus.emit_feature_complete(feature_id, run_id, data);
             }
             SaveIntent::Cancelled { reason } => {
@@ -401,6 +407,97 @@ mod tests {
                 evt.event, expected_kind,
                 "intent at index {i} produced wrong event kind"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn feature_complete_payload_carries_overall_status() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe_feature("feat-terminal");
+        let saver = EventEmittingSaver::new(&bus);
+
+        let dir = tempdir().unwrap();
+        let mut manifest = sample_manifest("feat-terminal", Some("run-terminal"));
+        manifest.overall_status = ManifestStatus::Passed;
+
+        saver
+            .save_and_emit(
+                &manifest,
+                &dir.path().join("manifest-terminal.json"),
+                SaveIntent::FeatureCompleted,
+            )
+            .expect("save_and_emit should succeed");
+
+        let evt = rx.recv().await.unwrap();
+        assert_eq!(evt.event, ManifestEvent::FeatureComplete);
+        assert_eq!(evt.data["overall_status"], "passed");
+        assert_eq!(
+            evt.data["status"], "passed",
+            "legacy status alias should stay in sync with overall_status"
+        );
+    }
+
+    #[tokio::test]
+    async fn hundred_rapid_saves_emit_post_persist_ordered_events() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe_feature("feat-rapid");
+        let saver = EventEmittingSaver::new(&bus);
+
+        let dir = tempdir().unwrap();
+        let mut manifest = sample_manifest("feat-rapid", Some("run-rapid"));
+        manifest.overall_status = ManifestStatus::InProgress;
+
+        for i in 0..100 {
+            manifest.layers.clear();
+            manifest
+                .layers
+                .push(pice_core::layers::manifest::LayerResult {
+                    name: format!("layer-{i:03}"),
+                    status: pice_core::layers::manifest::LayerStatus::InProgress,
+                    passes: Vec::new(),
+                    seam_checks: Vec::new(),
+                    halted_by: Some(format!("persisted-{i:03}")),
+                    final_confidence: None,
+                    total_cost_usd: None,
+                    escalation_events: None,
+                });
+            let path = dir.path().join(format!("manifest-{i:03}.json"));
+            saver
+                .save_and_emit(
+                    &manifest,
+                    &path,
+                    SaveIntent::LayerCompleted {
+                        layer: format!("layer-{i:03}"),
+                    },
+                )
+                .expect("rapid save_and_emit should succeed");
+        }
+
+        let mut previous_ts = None;
+        for i in 0..100 {
+            let evt = rx.recv().await.unwrap();
+            assert_eq!(evt.event, ManifestEvent::LayerComplete);
+            assert_eq!(evt.layer.as_deref(), Some(format!("layer-{i:03}").as_str()));
+            assert_eq!(
+                evt.data["halted_by"],
+                format!("persisted-{i:03}"),
+                "event payload should reflect the already-persisted manifest state"
+            );
+
+            let path = dir.path().join(format!("manifest-{i:03}.json"));
+            let persisted = VerificationManifest::load(&path).expect("manifest persisted");
+            assert_eq!(
+                persisted.layers[0].halted_by.as_deref(),
+                Some(format!("persisted-{i:03}").as_str()),
+                "event {i} must not arrive before its manifest write"
+            );
+
+            let ts = chrono::DateTime::parse_from_rfc3339(&evt.timestamp)
+                .expect("event timestamp rfc3339");
+            if let Some(prev) = previous_ts {
+                assert!(ts >= prev, "event timestamps should be monotonic");
+            }
+            previous_ts = Some(ts);
         }
     }
 }

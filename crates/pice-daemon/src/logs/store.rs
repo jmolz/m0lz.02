@@ -253,6 +253,49 @@ impl LogStore {
     }
 }
 
+/// [`crate::orchestrator::StreamSink`] implementation that forwards
+/// provider response chunks into a feature's captured log stream.
+///
+/// The sink is intentionally small and clone-free for callers: construct one
+/// per background run and wrap it in `Arc<dyn StreamSink>`. `send_chunk` is
+/// synchronous while `LogStore::append_chunk` is async, so writes are bridged
+/// through `tokio::spawn` and serialized by the store's per-feature mutex.
+pub struct LogStoreSink {
+    store: LogStore,
+    feature_id: String,
+    run_id: String,
+    layer: String,
+}
+
+impl LogStoreSink {
+    pub fn new(
+        store: LogStore,
+        feature_id: impl Into<String>,
+        run_id: impl Into<String>,
+        layer: impl Into<String>,
+    ) -> Self {
+        Self {
+            store,
+            feature_id: feature_id.into(),
+            run_id: run_id.into(),
+            layer: layer.into(),
+        }
+    }
+}
+
+impl crate::orchestrator::StreamSink for LogStoreSink {
+    fn send_chunk(&self, text: &str) {
+        let store = self.store.clone();
+        let feature = self.feature_id.clone();
+        let run = self.run_id.clone();
+        let layer = self.layer.clone();
+        let text_owned = text.to_string();
+        tokio::spawn(async move {
+            store.append_chunk(&feature, &run, &layer, text_owned).await;
+        });
+    }
+}
+
 fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -436,5 +479,26 @@ mod tests {
             Err(broadcast::error::TryRecvError::Empty) => {}
             other => panic!("expected Empty, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn log_store_sink_appends_provider_chunks() {
+        let store = LogStore::new();
+        let sink = LogStoreSink::new(store.clone(), "feat-sink", "run-sink", "evaluate");
+
+        crate::orchestrator::StreamSink::send_chunk(&sink, "provider output");
+
+        for _ in 0..50 {
+            let snap = store.snapshot("feat-sink", None).await;
+            if let Some(chunk) = snap.first() {
+                assert_eq!(chunk.feature_id, "feat-sink");
+                assert_eq!(chunk.run_id, "run-sink");
+                assert_eq!(chunk.layer, "evaluate");
+                assert_eq!(chunk.text, "provider output");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("LogStoreSink did not append provider chunk");
     }
 }
