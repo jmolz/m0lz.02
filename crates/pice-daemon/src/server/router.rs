@@ -25,13 +25,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pice_core::cli::CommandRequest;
 use pice_core::config::PiceConfig;
 use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
 use serde_json::json;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use super::auth;
 use crate::events::EventBus;
@@ -94,6 +94,13 @@ pub struct DaemonContext {
     /// event loop polls it periodically), not a synchronization fence.
     shutdown_requested: AtomicBool,
 
+    /// Set by the connection task after it attempts to write the
+    /// `daemon/shutdown` response. The lifecycle accept loop observes
+    /// [`shutdown_requested`] before that write can happen, so it must wait on
+    /// this signal before returning from `lifecycle::run`.
+    shutdown_response_observed: AtomicBool,
+    shutdown_response_notify: Notify,
+
     /// The project root directory. Handlers use this to find `.claude/plans/`,
     /// `.pice/config.toml`, the metrics DB, and other project-relative paths.
     project_root: PathBuf,
@@ -150,6 +157,8 @@ impl DaemonContext {
             version: env!("CARGO_PKG_VERSION"),
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_response_observed: AtomicBool::new(false),
+            shutdown_response_notify: Notify::new(),
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -178,6 +187,8 @@ impl DaemonContext {
             version: env!("CARGO_PKG_VERSION"),
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_response_observed: AtomicBool::new(false),
+            shutdown_response_notify: Notify::new(),
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -203,6 +214,33 @@ impl DaemonContext {
     /// graceful shutdown sequence.
     pub fn is_shutdown_requested(&self) -> bool {
         self.shutdown_requested.load(Ordering::Relaxed)
+    }
+
+    /// Request daemon shutdown. The accept loop will stop accepting new
+    /// connections, but must not let `lifecycle::run` return until the
+    /// connection task has attempted to write the shutdown RPC response.
+    pub fn request_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::Relaxed);
+    }
+
+    /// Mark the shutdown RPC response as written or attempted.
+    pub fn mark_shutdown_response_observed(&self) {
+        if !self
+            .shutdown_response_observed
+            .swap(true, Ordering::Relaxed)
+        {
+            self.shutdown_response_notify.notify_waiters();
+        }
+    }
+
+    /// Wait until the shutdown connection task has attempted its response.
+    pub async fn wait_for_shutdown_response_observed(&self, timeout: Duration) -> bool {
+        let notified = self.shutdown_response_notify.notified();
+        if self.shutdown_response_observed.load(Ordering::Relaxed) {
+            return true;
+        }
+        tokio::time::timeout(timeout, notified).await.is_ok()
+            || self.shutdown_response_observed.load(Ordering::Relaxed)
     }
 
     /// Phase 7: the process-wide manifest-event pub/sub bus.
@@ -259,6 +297,8 @@ impl DaemonContext {
             version: "0.1.0-test",
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_response_observed: AtomicBool::new(false),
+            shutdown_response_notify: Notify::new(),
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config: PiceConfig::default(),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -282,6 +322,8 @@ impl DaemonContext {
             version: "0.1.0-test",
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_response_observed: AtomicBool::new(false),
+            shutdown_response_notify: Notify::new(),
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -413,7 +455,7 @@ fn handle_health(id: u64, ctx: &DaemonContext) -> DaemonResponse {
 /// SIGTERM path (no caller waiting there), keeping the two entry
 /// points symmetric.
 async fn handle_shutdown(id: u64, ctx: &DaemonContext) -> DaemonResponse {
-    ctx.shutdown_requested.store(true, Ordering::Relaxed);
+    ctx.request_shutdown();
     let remaining = ctx
         .jobs()
         .drain_on_shutdown(crate::lifecycle::SHUTDOWN_TIMEOUT)

@@ -144,6 +144,16 @@ async fn run_unix(path: &std::path::Path, ctx: Arc<DaemonContext>) -> Result<()>
         }
     }
 
+    if ctx.is_shutdown_requested()
+        && !ctx
+            .wait_for_shutdown_response_observed(SHUTDOWN_TIMEOUT)
+            .await
+    {
+        tracing::warn!(
+            "daemon shutdown: timed out waiting for shutdown RPC response write before lifecycle exit"
+        );
+    }
+
     // Phase 7 Criterion 17: drain background jobs BEFORE closing the
     // socket. `daemon/shutdown` already drained for its caller, but
     // SIGTERM / SIGINT never ran a handler, so this call is the ONLY
@@ -168,7 +178,7 @@ async fn handle_connection_unix(
     mut conn: crate::server::unix::UnixConnection,
     ctx: Arc<DaemonContext>,
 ) {
-    use pice_core::protocol::DaemonRequest;
+    use pice_core::protocol::{methods, DaemonRequest};
 
     loop {
         let req: DaemonRequest = match conn.read_message().await {
@@ -196,9 +206,17 @@ async fn handle_connection_unix(
             break;
         }
 
+        let is_shutdown = req.method == methods::DAEMON_SHUTDOWN;
         let resp = crate::server::router::route(req, &ctx).await;
-        if let Err(e) = conn.write_message(&resp).await {
+        let write_result = conn.write_message(&resp).await;
+        if is_shutdown && ctx.is_shutdown_requested() {
+            ctx.mark_shutdown_response_observed();
+        }
+        if let Err(e) = write_result {
             tracing::debug!("write error: {e}");
+            break;
+        }
+        if is_shutdown && ctx.is_shutdown_requested() {
             break;
         }
     }
@@ -243,6 +261,16 @@ async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
         }
     }
 
+    if ctx.is_shutdown_requested()
+        && !ctx
+            .wait_for_shutdown_response_observed(SHUTDOWN_TIMEOUT)
+            .await
+    {
+        tracing::warn!(
+            "daemon shutdown: timed out waiting for shutdown RPC response write before lifecycle exit"
+        );
+    }
+
     // Phase 7 Criterion 17: drain background jobs BEFORE exit. See
     // the Unix branch above for rationale — Windows pipe path needs
     // the same symmetric drain.
@@ -262,7 +290,7 @@ async fn handle_connection_windows(
     mut conn: crate::server::windows::WindowsPipeConnection,
     ctx: Arc<DaemonContext>,
 ) {
-    use pice_core::protocol::DaemonRequest;
+    use pice_core::protocol::{methods, DaemonRequest};
 
     loop {
         let req: DaemonRequest = match conn.read_message().await {
@@ -285,9 +313,17 @@ async fn handle_connection_windows(
             break;
         }
 
+        let is_shutdown = req.method == methods::DAEMON_SHUTDOWN;
         let resp = crate::server::router::route(req, &ctx).await;
-        if let Err(e) = conn.write_message(&resp).await {
+        let write_result = conn.write_message(&resp).await;
+        if is_shutdown && ctx.is_shutdown_requested() {
+            ctx.mark_shutdown_response_observed();
+        }
+        if let Err(e) = write_result {
             tracing::debug!("write error: {e}");
+            break;
+        }
+        if is_shutdown && ctx.is_shutdown_requested() {
             break;
         }
     }
@@ -414,6 +450,128 @@ mod tests {
             .expect("daemon should exit within 5s")
             .expect("join handle");
         daemon_result.expect("daemon should exit cleanly");
+    }
+
+    #[cfg(unix)]
+    fn stub_job_env(
+        state_dir: &std::path::Path,
+        project_root: &std::path::Path,
+    ) -> Arc<pice_core::jobs::JobEnv> {
+        use pice_core::workflow::schema::{CostCapBehavior, Defaults, Phases, WorkflowConfig};
+
+        Arc::new(pice_core::jobs::JobEnv {
+            state_dir: state_dir.to_path_buf(),
+            project_root: project_root.to_path_buf(),
+            workflow_snapshot: WorkflowConfig {
+                schema_version: "0.2".to_string(),
+                defaults: Defaults {
+                    tier: 2,
+                    min_confidence: 0.90,
+                    max_passes: 5,
+                    model: "sonnet".to_string(),
+                    budget_usd: 2.0,
+                    cost_cap_behavior: CostCapBehavior::Halt,
+                    max_parallelism: None,
+                    max_global_provider_concurrency: None,
+                },
+                phases: Phases::default(),
+                layer_overrides: Default::default(),
+                review: None,
+                seams: None,
+            },
+            contracts: Default::default(),
+            pice_state_dir_override: None,
+            pice_user_workflow_file: None,
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_rpc_response_is_written_before_lifecycle_returns() {
+        use pice_core::layers::manifest::VerificationManifest;
+        use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
+        use tokio::net::UnixStream;
+
+        let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+        let sock_path = dir.path().join("daemon.sock");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let flushed_marker = dir.path().join("shutdown-flushed");
+
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let project_root = dir.path().to_path_buf();
+        let ctx = Arc::new(DaemonContext::new_for_test_with_root(
+            token,
+            project_root.clone(),
+        ));
+
+        let flushed_marker_for_job = flushed_marker.clone();
+        let project_root_for_job = project_root.clone();
+        ctx.jobs()
+            .spawn(
+                "shutdown-race",
+                ctx.jobs().next_run_id(),
+                stub_job_env(&state_dir, &project_root),
+                move |_env, permit, cancel| async move {
+                    let _hold = permit;
+                    cancel.cancelled().await;
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    std::fs::write(&flushed_marker_for_job, b"flushed")
+                        .expect("write flushed marker");
+                    Ok(VerificationManifest::new(
+                        "shutdown-race",
+                        &project_root_for_job,
+                    ))
+                },
+            )
+            .expect("spawn background job");
+
+        let ctx_for_daemon = Arc::clone(&ctx);
+        let sock_path_for_daemon = sock_path.clone();
+        let daemon =
+            tokio::spawn(async move { run_unix(&sock_path_for_daemon, ctx_for_daemon).await });
+
+        for _ in 0..200 {
+            if sock_path.exists() && UnixStream::connect(&sock_path).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(sock_path.exists(), "socket should exist after startup");
+
+        let stream = UnixStream::connect(&sock_path).await.expect("connect");
+        let mut conn = crate::server::unix::UnixConnection::new(stream);
+        let shutdown_req =
+            DaemonRequest::new(1, methods::DAEMON_SHUTDOWN, token, serde_json::json!({}));
+        conn.write_message(&shutdown_req)
+            .await
+            .expect("write shutdown");
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(2),
+            conn.read_message::<DaemonResponse>(),
+        )
+        .await
+        .expect("shutdown response should be readable")
+        .expect("read response")
+        .expect("not EOF");
+
+        assert!(response.error.is_none(), "shutdown response should succeed");
+        assert_eq!(
+            response.result.as_ref().unwrap()["drained_remaining"],
+            serde_json::json!(0)
+        );
+        assert!(
+            flushed_marker.exists(),
+            "shutdown response must be written only after background job flush"
+        );
+
+        drop(conn);
+        tokio::time::timeout(Duration::from_secs(5), daemon)
+            .await
+            .expect("daemon should exit after response")
+            .expect("join handle")
+            .expect("daemon should exit cleanly");
     }
 
     #[cfg(unix)]

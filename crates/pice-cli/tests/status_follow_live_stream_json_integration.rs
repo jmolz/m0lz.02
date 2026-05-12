@@ -341,6 +341,127 @@ fn status_follow_stream_json_exits_feature_not_found_on_empty_scoped_snapshot() 
 }
 
 #[test]
+fn wildcard_status_follow_stream_json_keeps_tailing_after_feature_terminal() {
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let pice_dir = home.path().join(".pice");
+    std::fs::create_dir_all(&pice_dir).unwrap();
+    std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
+
+    let socket_path = home.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept client");
+
+        let health = read_request(&stream);
+        write_response(
+            &mut stream,
+            health.id,
+            serde_json::json!({
+                "status": "ok",
+                "version": "test",
+                "uptime_seconds": 0,
+            }),
+        );
+
+        let subscribe = read_request(&stream);
+        assert_eq!(subscribe.auth, TOKEN);
+        assert_eq!(subscribe.method, MANIFEST_SUBSCRIBE);
+        assert!(
+            subscribe.params.get("feature_id").is_none()
+                || subscribe.params["feature_id"].is_null(),
+            "wildcard follow must subscribe without a feature_id filter"
+        );
+
+        let mut feature_a =
+            VerificationManifest::new("feature-a", std::path::Path::new("/tmp/pice-test"));
+        feature_a.overall_status = ManifestStatus::InProgress;
+        feature_a.run_id = Some("r-a".to_string());
+        let mut feature_b =
+            VerificationManifest::new("feature-b", std::path::Path::new("/tmp/pice-test"));
+        feature_b.overall_status = ManifestStatus::InProgress;
+        feature_b.run_id = Some("r-b".to_string());
+        let response = SubscribeManifestResponse {
+            snapshots: vec![feature_a, feature_b],
+            run_ids: BTreeMap::from([
+                ("feature-a".to_string(), "r-a".to_string()),
+                ("feature-b".to_string(), "r-b".to_string()),
+            ]),
+        };
+        write_response(
+            &mut stream,
+            subscribe.id,
+            serde_json::to_value(response).expect("serialize snapshot"),
+        );
+
+        write_notification(
+            &mut stream,
+            ManifestEventPayload {
+                feature_id: "feature-a".to_string(),
+                run_id: "r-a".to_string(),
+                event: ManifestEvent::FeatureComplete,
+                layer: None,
+                data: serde_json::json!({"overall_status": "passed"}),
+                timestamp: "2026-05-11T12:00:01.000Z".to_string(),
+            },
+        );
+        write_notification(
+            &mut stream,
+            ManifestEventPayload {
+                feature_id: "feature-b".to_string(),
+                run_id: "r-b".to_string(),
+                event: ManifestEvent::LayerStarted,
+                layer: Some("backend".to_string()),
+                data: serde_json::Value::Null,
+                timestamp: "2026-05-11T12:00:02.000Z".to_string(),
+            },
+        );
+    });
+
+    let output = Command::cargo_bin("pice")
+        .unwrap()
+        .env("HOME", home.path())
+        .env("PICE_DAEMON_SOCKET", &socket_path)
+        .env_remove("PICE_DAEMON_INLINE")
+        .args(["status", "--follow", "--stream-json"])
+        .output()
+        .unwrap();
+
+    server.join().expect("fake daemon thread");
+    assert_eq!(
+        output.status.code(),
+        Some(ExitJsonStatus::DaemonDisconnected.exit_code()),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let frames = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<StreamJsonFrame>(line).expect("parse frame"))
+        .collect::<Vec<_>>();
+    assert_eq!(frames.len(), 4, "snapshot + two events + terminal");
+    assert!(matches!(frames[0], StreamJsonFrame::Snapshot { .. }));
+    assert!(matches!(
+        &frames[1],
+        StreamJsonFrame::Event { event }
+            if event.feature_id == "feature-a" && event.event == ManifestEvent::FeatureComplete
+    ));
+    assert!(matches!(
+        &frames[2],
+        StreamJsonFrame::Event { event }
+            if event.feature_id == "feature-b" && event.event == ManifestEvent::LayerStarted
+    ));
+    assert!(matches!(
+        frames[3],
+        StreamJsonFrame::Terminal {
+            exit_code,
+            ..
+        } if exit_code == ExitJsonStatus::DaemonDisconnected.exit_code()
+    ));
+}
+
+#[test]
 fn status_follow_stream_json_sigint_emits_terminal_130() {
     let home = tempfile::tempdir_in("/private/tmp").unwrap();
     let pice_dir = home.path().join(".pice");
