@@ -553,15 +553,17 @@ pub async fn run_stack_loops_with_cancel(
             for layer_name in &started_layers {
                 replace_or_add_layer_result(&mut manifest, in_progress_layer_result(layer_name));
                 manifest.compute_overall_status();
-                if let Err(e) = cfg.saver.save_and_emit(
-                    &manifest,
-                    path,
-                    SaveIntent::LayerStarted {
-                        layer: layer_name.clone(),
-                    },
-                ) {
-                    warn!(layer = %layer_name, "failed to persist LayerStarted checkpoint: {e}");
-                }
+                cfg.saver
+                    .save_and_emit(
+                        &manifest,
+                        path,
+                        SaveIntent::LayerStarted {
+                            layer: layer_name.clone(),
+                        },
+                    )
+                    .with_context(|| {
+                        format!("persisting LayerStarted checkpoint for layer {layer_name}")
+                    })?;
             }
         }
 
@@ -744,15 +746,19 @@ pub async fn run_stack_loops_with_cancel(
             replace_or_add_layer_result(&mut manifest, layer_result);
 
             if let Some(ref path) = manifest_path {
-                if let Err(e) = cfg.saver.save_and_emit(
-                    &manifest,
-                    path,
-                    SaveIntent::LayerCompleted {
-                        layer: completed_layer_name,
-                    },
-                ) {
-                    warn!("failed to checkpoint manifest: {e}");
-                }
+                cfg.saver
+                    .save_and_emit(
+                        &manifest,
+                        path,
+                        SaveIntent::LayerCompleted {
+                            layer: completed_layer_name.clone(),
+                        },
+                    )
+                    .with_context(|| {
+                        format!(
+                            "persisting LayerCompleted checkpoint for layer {completed_layer_name}"
+                        )
+                    })?;
             }
         }
 
@@ -1971,6 +1977,22 @@ mod tests {
         }
     }
 
+    struct FailLayerStartedSaver;
+
+    impl crate::events::ManifestSaver for FailLayerStartedSaver {
+        fn save_and_emit(
+            &self,
+            _manifest: &VerificationManifest,
+            _path: &std::path::Path,
+            intent: SaveIntent,
+        ) -> anyhow::Result<()> {
+            if matches!(intent, SaveIntent::LayerStarted { .. }) {
+                anyhow::bail!("layer-start save refused");
+            }
+            Ok(())
+        }
+    }
+
     #[test]
     fn extract_changed_files_basic() {
         let diff = [
@@ -2167,6 +2189,70 @@ mod tests {
                 .iter()
                 .any(|(name, status)| name == "backend" && *status == LayerStatus::InProgress)),
             "LayerStarted save should persist backend as InProgress first, got {snapshots:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_started_checkpoint_failure_fails_closed_before_provider_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec!["backend".to_string()],
+                defs: BTreeMap::from([(
+                    "backend".to_string(),
+                    LayerDef {
+                        paths: vec!["src/backend/**".to_string()],
+                        always_run: false,
+                        contract: None,
+                        depends_on: Vec::new(),
+                        layer_type: None,
+                        environment_variants: None,
+                    },
+                )]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let diff = "diff --git a/src/backend/app.rs b/src/backend/app.rs\n+++ b/src/backend/app.rs\n+fn changed() {}\n";
+        let saver = FailLayerStartedSaver;
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "provider-must-not-start",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(diff),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        let err = run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .expect_err("LayerStarted save failure must fail closed");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("persisting LayerStarted checkpoint for layer backend")
+                && rendered.contains("layer-start save refused"),
+            "unexpected error: {rendered}"
         );
     }
 

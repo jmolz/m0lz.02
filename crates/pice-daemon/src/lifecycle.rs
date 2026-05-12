@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use pice_core::transport::SocketPath;
+use tokio::task::JoinSet;
 use tracing::{error, info};
 
 use crate::server::auth;
@@ -103,6 +104,35 @@ fn ensure_parent_dir(socket_path: &SocketPath) -> Result<()> {
     Ok(())
 }
 
+async fn drain_connection_tasks(tasks: &mut JoinSet<()>, timeout: Duration) -> usize {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tasks.is_empty() {
+            return 0;
+        }
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_default();
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, tasks.join_next()).await {
+            Ok(Some(Ok(()))) => {}
+            Ok(Some(Err(e))) => {
+                tracing::warn!("connection task exited with join error: {e}");
+            }
+            Ok(None) => return 0,
+            Err(_) => break,
+        }
+    }
+
+    let remaining = tasks.len();
+    if remaining > 0 {
+        tasks.abort_all();
+    }
+    remaining
+}
+
 // ─── Unix accept loop ──────────────────────────────────────────────────────
 
 #[cfg(unix)]
@@ -111,20 +141,30 @@ async fn run_unix(path: &std::path::Path, ctx: Arc<DaemonContext>) -> Result<()>
 
     let listener = UnixSocketListener::bind(path).await?;
     info!(path = %path.display(), "daemon listening");
+    let mut connection_tasks = JoinSet::new();
 
     loop {
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok(conn) => {
+                        if ctx.is_shutdown_requested() {
+                            break;
+                        }
                         let ctx = Arc::clone(&ctx);
-                        tokio::spawn(async move {
+                        connection_tasks.spawn(async move {
                             handle_connection_unix(conn, ctx).await;
                         });
                     }
                     Err(e) => {
                         error!("accept error: {e}");
                     }
+                }
+            }
+
+            joined = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                if let Some(Err(e)) = joined {
+                    tracing::warn!("connection task exited with join error: {e}");
                 }
             }
 
@@ -142,6 +182,15 @@ async fn run_unix(path: &std::path::Path, ctx: Arc<DaemonContext>) -> Result<()>
                 }
             }
         }
+    }
+
+    let remaining_connections =
+        drain_connection_tasks(&mut connection_tasks, SHUTDOWN_TIMEOUT).await;
+    if remaining_connections > 0 {
+        tracing::warn!(
+            remaining_connections,
+            "daemon shutdown: {remaining_connections} RPC connection tasks did not finish within the {SHUTDOWN_TIMEOUT:?} drain budget"
+        );
     }
 
     if ctx.is_shutdown_requested()
@@ -190,6 +239,16 @@ async fn handle_connection_unix(
             }
         };
 
+        if ctx.is_shutdown_requested() && req.method != methods::DAEMON_SHUTDOWN {
+            let resp = pice_core::protocol::DaemonResponse::error(
+                req.id,
+                -32004,
+                "daemon is shutting down",
+            );
+            let _ = conn.write_message(&resp).await;
+            break;
+        }
+
         // Phase 7 Task 6: subscribe methods take over the connection.
         // After the handler returns, the subscription is over — we MUST
         // NOT read more frames on this connection (the handler's
@@ -231,20 +290,30 @@ async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
 
     let listener = WindowsPipeListener::bind(name).await?;
     info!(pipe = %name, "daemon listening");
+    let mut connection_tasks = JoinSet::new();
 
     loop {
         tokio::select! {
             result = listener.accept() => {
                 match result {
                     Ok(conn) => {
+                        if ctx.is_shutdown_requested() {
+                            break;
+                        }
                         let ctx = Arc::clone(&ctx);
-                        tokio::spawn(async move {
+                        connection_tasks.spawn(async move {
                             handle_connection_windows(conn, ctx).await;
                         });
                     }
                     Err(e) => {
                         error!("accept error: {e}");
                     }
+                }
+            }
+
+            joined = connection_tasks.join_next(), if !connection_tasks.is_empty() => {
+                if let Some(Err(e)) = joined {
+                    tracing::warn!("connection task exited with join error: {e}");
                 }
             }
 
@@ -260,6 +329,15 @@ async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
                 }
             }
         }
+    }
+
+    let remaining_connections =
+        drain_connection_tasks(&mut connection_tasks, SHUTDOWN_TIMEOUT).await;
+    if remaining_connections > 0 {
+        tracing::warn!(
+            remaining_connections,
+            "daemon shutdown: {remaining_connections} RPC connection tasks did not finish within the {SHUTDOWN_TIMEOUT:?} drain budget"
+        );
     }
 
     if ctx.is_shutdown_requested()
@@ -302,6 +380,16 @@ async fn handle_connection_windows(
                 break;
             }
         };
+
+        if ctx.is_shutdown_requested() && req.method != methods::DAEMON_SHUTDOWN {
+            let resp = pice_core::protocol::DaemonResponse::error(
+                req.id,
+                -32004,
+                "daemon is shutting down",
+            );
+            let _ = conn.write_message(&resp).await;
+            break;
+        }
 
         if crate::handlers::subscribe::is_subscribe_method(&req.method) {
             if let Err(auth_err) = ctx.validate_auth(&req) {
@@ -572,6 +660,89 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), daemon)
             .await
             .expect("daemon should exit after response")
+            .expect("join handle")
+            .expect("daemon should exit cleanly");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_waits_for_in_flight_subscribe_connection_before_exit() {
+        use pice_core::protocol::subscribe::{SubscribeManifestRequest, SubscribeManifestResponse};
+        use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
+        use tokio::net::UnixStream;
+
+        let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+        let sock_path = dir.path().join("daemon.sock");
+        let token_path = dir.path().join("daemon.token");
+        let socket_path = SocketPath::Unix(sock_path.clone());
+
+        let tp = token_path.clone();
+        let daemon = tokio::spawn(run_with_paths(socket_path, tp));
+
+        for _ in 0..200 {
+            if sock_path.exists() && UnixStream::connect(&sock_path).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(sock_path.exists(), "socket should exist after startup");
+        let token = auth::read_token_file(&token_path).expect("read token");
+
+        let stream = UnixStream::connect(&sock_path)
+            .await
+            .expect("connect subscribe");
+        let mut subscribe_conn = crate::server::unix::UnixConnection::new(stream);
+        let subscribe = DaemonRequest::new(
+            10,
+            methods::MANIFEST_SUBSCRIBE,
+            &token,
+            serde_json::to_value(SubscribeManifestRequest {
+                feature_id: Some("held-open".to_string()),
+            })
+            .expect("serialize subscribe"),
+        );
+        subscribe_conn
+            .write_message(&subscribe)
+            .await
+            .expect("write subscribe");
+        let snapshot: DaemonResponse = subscribe_conn
+            .read_message()
+            .await
+            .expect("read snapshot")
+            .expect("not EOF");
+        assert!(snapshot.error.is_none(), "subscribe must succeed");
+        let _: SubscribeManifestResponse =
+            serde_json::from_value(snapshot.result.expect("snapshot result"))
+                .expect("snapshot shape");
+
+        let stream = UnixStream::connect(&sock_path)
+            .await
+            .expect("connect shutdown");
+        let mut shutdown_conn = crate::server::unix::UnixConnection::new(stream);
+        let shutdown =
+            DaemonRequest::new(11, methods::DAEMON_SHUTDOWN, &token, serde_json::json!({}));
+        shutdown_conn
+            .write_message(&shutdown)
+            .await
+            .expect("write shutdown");
+        let response: DaemonResponse = shutdown_conn
+            .read_message()
+            .await
+            .expect("read shutdown response")
+            .expect("not EOF");
+        assert!(response.error.is_none(), "shutdown response should succeed");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !daemon.is_finished(),
+            "lifecycle must not exit while an in-flight subscribe RPC is still open"
+        );
+
+        drop(subscribe_conn);
+        drop(shutdown_conn);
+        tokio::time::timeout(Duration::from_secs(5), daemon)
+            .await
+            .expect("daemon should exit after subscribe connection closes")
             .expect("join handle")
             .expect("daemon should exit cleanly");
     }

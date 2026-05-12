@@ -29,17 +29,19 @@
 //!      closes. Exit codes: 0 (Passed) / 2 (Failed|FailedInterrupted) /
 //!      3 (PendingReview) / 4 (WaitTimeout) / 5 (DaemonDisconnected).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use pice_core::cli::{CommandResponse, ExitJsonStatus};
 use pice_core::events::{ManifestEvent, ManifestEventPayload};
 use pice_core::layers::manifest::ManifestStatus;
 use pice_core::protocol::methods::MANIFEST_SUBSCRIBE;
 use pice_core::protocol::subscribe::{SubscribeManifestRequest, SubscribeManifestResponse};
 use pice_core::protocol::DaemonNotification;
+use pice_core::transport::SocketPath;
+use pice_daemon::server::auth;
 use serde_json::json;
 use tokio::time::{sleep_until, Duration, Instant};
 
-use crate::adapter::autostart::ensure_daemon_running;
+use crate::adapter::transport::DaemonClient;
 use crate::notifications::{
     self, Dispatcher, NotificationKind, NotificationState, NotificationsConfig,
     NotifyRustDispatcher,
@@ -151,16 +153,32 @@ async fn wait_until_terminal(
     timeout_secs: Option<u64>,
     json: bool,
 ) -> Result<i32> {
-    let client = ensure_daemon_running()
-        .await
-        .context("failed to open subscribe connection for --wait")?;
+    let socket_path = SocketPath::default_from_env();
+    let token_path = auth::default_token_path();
+    let mut client = match DaemonClient::connect(&socket_path, &token_path).await {
+        Ok(client) => client,
+        Err(_) => {
+            emit_daemon_disconnected(feature_id, run_id, json);
+            return Ok(ExitJsonStatus::DaemonDisconnected.exit_code());
+        }
+    };
+    if client.health_check().await.is_err() {
+        emit_daemon_disconnected(feature_id, run_id, json);
+        return Ok(ExitJsonStatus::DaemonDisconnected.exit_code());
+    }
     let params = SubscribeManifestRequest {
         feature_id: Some(feature_id.to_string()),
     };
-    let mut stream = client
+    let mut stream = match client
         .subscribe_stream::<_, SubscribeManifestResponse>(MANIFEST_SUBSCRIBE, params)
         .await
-        .context("failed to open manifest/subscribe stream")?;
+    {
+        Ok(stream) => stream,
+        Err(_) => {
+            emit_daemon_disconnected(feature_id, run_id, json);
+            return Ok(ExitJsonStatus::DaemonDisconnected.exit_code());
+        }
+    };
 
     // Short-circuit: feature may have already completed before subscribe.
     // Clone the status out of the snapshot so we can close the stream
