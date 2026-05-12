@@ -130,6 +130,23 @@ fn terminalize_cancelled_before_orchestrator_start(
     )
 }
 
+fn terminalize_shutdown_timeout(
+    feature_id: &str,
+    run_id: &RunId,
+    env: &JobEnv,
+    events: &EventBus,
+) -> Result<VerificationManifest> {
+    let halted_by = CancelledReason::JoinAborted.as_halted_by();
+    terminalize_cancelled_manifest(
+        feature_id,
+        run_id,
+        env,
+        events,
+        &halted_by,
+        halted_by.clone(),
+    )
+}
+
 fn terminalize_panicked_orchestrator(
     feature_id: &str,
     run_id: &RunId,
@@ -185,10 +202,9 @@ pub struct FeatureJobManager {
     /// so a misconfigured workflow cannot blow past the rate-limit-
     /// friendly ceiling.
     global_sem: Arc<Semaphore>,
-    /// Event bus handle used for the ONE event the manager emits
-    /// directly: `ManifestEvent::Cancelled` on a panicked task. Every
-    /// other manifest event comes from the orchestrator via
-    /// `ManifestSaver::save_and_emit`.
+    /// Event bus handle used when the manager must terminalize a task
+    /// outside normal orchestrator control. All terminal events still
+    /// flow through `ManifestSaver::save_and_emit`.
     events: EventBus,
     /// Clamped capacity of `global_sem`. Tokio exposes currently available
     /// permits, not total capacity; Stack Loops needs the total to reject
@@ -525,8 +541,34 @@ impl FeatureJobManager {
                 return 0;
             }
             if tokio::time::Instant::now() >= deadline {
+                let timed_out: Vec<_> = self
+                    .jobs
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.key().clone(),
+                            entry.run_id.clone(),
+                            Arc::clone(&entry.env),
+                        )
+                    })
+                    .collect();
                 for entry in self.jobs.iter() {
                     entry.join_handle.abort();
+                }
+                for (feature_id, run_id, env) in timed_out {
+                    if let Err(err) = terminalize_shutdown_timeout(
+                        &feature_id,
+                        &run_id,
+                        env.as_ref(),
+                        &self.events,
+                    ) {
+                        tracing::error!(
+                            feature_id = %feature_id,
+                            run_id = %run_id,
+                            error = %err,
+                            "FeatureJobManager: failed to terminalize task aborted during shutdown timeout",
+                        );
+                    }
                 }
                 let abort_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
                 while !self.jobs.is_empty() && tokio::time::Instant::now() < abort_deadline {
@@ -1073,16 +1115,46 @@ mod tests {
 
     #[tokio::test]
     async fn drain_on_shutdown_timeout_reports_remaining() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let env = Arc::new(JobEnv {
+            state_dir: state_dir.path().to_path_buf(),
+            project_root: project.path().to_path_buf(),
+            workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+            contracts: Default::default(),
+            pice_state_dir_override: None,
+            pice_user_workflow_file: None,
+        });
         let events = EventBus::new();
+        let mut rx = events.subscribe_feature("feat-stuck");
         let manager = FeatureJobManager::new(events, 4);
-        let env = stub_env();
+        let run_id = manager.next_run_id();
+        let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+            "feat-stuck",
+            project.path(),
+            state_dir.path(),
+        );
+        let mut manifest = VerificationManifest::new("feat-stuck", project.path());
+        manifest.run_id = Some(run_id.clone());
+        manifest.overall_status = ManifestStatus::InProgress;
+        manifest.layers.push(LayerResult {
+            name: "backend".to_string(),
+            status: LayerStatus::InProgress,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: None,
+            final_confidence: None,
+            total_cost_usd: None,
+            escalation_events: None,
+        });
+        manifest.save(&manifest_path).unwrap();
 
         // Spawn a feature that IGNORES the cancel token — simulates an
         // orchestrator that hangs past the shutdown budget.
         manager
             .spawn(
                 "feat-stuck",
-                manager.next_run_id(),
+                run_id.clone(),
                 env,
                 move |_env, _permit, _cancel| async move {
                     tokio::time::sleep(Duration::from_secs(10)).await;
@@ -1106,6 +1178,30 @@ mod tests {
             manager.active_count(),
             0,
             "timeout path should abort stuck jobs before returning control to shutdown"
+        );
+
+        let persisted = VerificationManifest::load(&manifest_path).unwrap();
+        assert_eq!(persisted.overall_status, ManifestStatus::Failed);
+        assert_eq!(persisted.run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(
+            persisted.layers[0].status,
+            LayerStatus::Failed,
+            "stuck in-progress layer should be terminalized"
+        );
+        assert_eq!(
+            persisted.layers[0].halted_by.as_deref(),
+            Some("cancelled:join_aborted")
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("cancelled event")
+            .expect("event");
+        assert_eq!(event.event, pice_core::events::ManifestEvent::Cancelled);
+        assert_eq!(event.run_id, run_id);
+        assert_eq!(
+            event.data["reason"].as_str(),
+            Some("cancelled:join_aborted")
         );
     }
 
