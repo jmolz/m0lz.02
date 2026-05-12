@@ -563,8 +563,18 @@ async fn fail_closed_after_background_error(
         error = %err,
         "background worker returned Err; attempting fail-closed terminalization"
     );
-    let mut manifest = VerificationManifest::load(&args.manifest_path)
-        .unwrap_or_else(|_| VerificationManifest::new(&args.feature_id, &args.env.project_root));
+    let mut manifest = match VerificationManifest::load(&args.manifest_path) {
+        Ok(manifest) => manifest,
+        Err(load_err) => {
+            events.emit_cancelled(&args.feature_id, &args.run_id, "manifest-load-failed");
+            logs.append_terminal_frame(&args.feature_id, &args.run_id, "manifest-load-failed")
+                .await;
+            return Err(load_err.context(format!(
+                "failed to load manifest {}; refusing to replace source of truth after worker failure: {err:#}",
+                args.manifest_path.display()
+            )));
+        }
+    };
     manifest.run_id = Some(args.run_id.clone());
     manifest.overall_status = ManifestStatus::Failed;
     manifest
@@ -1325,6 +1335,70 @@ paths = ["src/**"]
         let history = logs.snapshot("feat-error", None).await;
         assert!(history.iter().any(|chunk| {
             chunk.terminal && chunk.run_id == "r-error" && chunk.reason.as_deref() == Some("failed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn background_error_path_does_not_replace_unloadable_manifest() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::new(state_tmp.path());
+        let project_tmp = tempfile::tempdir().unwrap();
+        let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+            "feat-corrupt",
+            project_tmp.path(),
+            state_tmp.path(),
+        );
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, "{not-json").unwrap();
+
+        let events = EventBus::new();
+        let mut rx = events.subscribe_feature("feat-corrupt");
+        let logs = crate::logs::LogStore::new();
+        let args = OrchestratorSpawnArgs {
+            feature_id: "feat-corrupt".into(),
+            run_id: "r-corrupt".into(),
+            plan_path: project_tmp.path().join("plan.md"),
+            manifest_path: manifest_path.clone(),
+            env: Arc::new(JobEnv {
+                state_dir: state_tmp.path().to_path_buf(),
+                project_root: project_tmp.path().to_path_buf(),
+                workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+                contracts: BTreeMap::new(),
+                pice_state_dir_override: None,
+                pice_user_workflow_file: None,
+            }),
+            plan_content: "# Plan\n".to_string(),
+            layers_config: None,
+            contract_contents: BTreeMap::new(),
+            stack_loop_snapshot: None,
+        };
+
+        let err =
+            fail_closed_after_background_error(&args, &events, &logs, anyhow::anyhow!("boom"))
+                .await
+                .expect_err("unloadable manifest must not be replaced");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("refusing to replace source of truth"),
+            "unexpected error: {rendered}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&manifest_path).unwrap(),
+            "{not-json"
+        );
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("cancelled event")
+            .expect("event");
+        assert_eq!(event.event, pice_core::events::ManifestEvent::Cancelled);
+        assert_eq!(event.data["reason"].as_str(), Some("manifest-load-failed"));
+
+        let history = logs.snapshot("feat-corrupt", None).await;
+        assert!(history.iter().any(|chunk| {
+            chunk.terminal
+                && chunk.run_id == "r-corrupt"
+                && chunk.reason.as_deref() == Some("manifest-load-failed")
         }));
     }
 }

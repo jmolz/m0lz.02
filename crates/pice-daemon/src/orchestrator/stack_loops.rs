@@ -146,6 +146,30 @@ fn replace_or_add_layer_result(manifest: &mut VerificationManifest, result: Laye
     }
 }
 
+fn persist_layer_started_checkpoint(
+    manifest: &mut VerificationManifest,
+    manifest_path: Option<&Path>,
+    saver: &dyn ManifestSaver,
+    layer_name: &str,
+) -> Result<()> {
+    if let Some(path) = manifest_path {
+        replace_or_add_layer_result(manifest, in_progress_layer_result(layer_name));
+        manifest.compute_overall_status();
+        saver
+            .save_and_emit(
+                manifest,
+                path,
+                SaveIntent::LayerStarted {
+                    layer: layer_name.to_string(),
+                },
+            )
+            .with_context(|| {
+                format!("persisting LayerStarted checkpoint for layer {layer_name}")
+            })?;
+    }
+    Ok(())
+}
+
 /// Run the Stack Loops evaluation pipeline.
 ///
 /// For each active layer (determined by changed files and `always_run`),
@@ -471,6 +495,12 @@ pub async fn run_stack_loops_with_cancel(
                     )
                 };
                 info!(layer = %layer_name, always_run = is_always_run, "empty diff for active layer");
+                persist_layer_started_checkpoint(
+                    &mut manifest,
+                    manifest_path.as_deref(),
+                    cfg.saver,
+                    layer_name,
+                )?;
                 let seam_checks = run_seams_for_layer(SeamRunRequest {
                     layer_name,
                     active_layers: &active_set,
@@ -489,9 +519,6 @@ pub async fn run_stack_loops_with_cancel(
                     Some(failed_id) => (LayerStatus::Failed, format!("seam:{failed_id}")),
                     None => (status, reason),
                 };
-                if final_status != LayerStatus::Skipped {
-                    started_layers.push(layer_name.clone());
-                }
                 immediate_results.insert(
                     layer_name.clone(),
                     LayerResult {
@@ -536,28 +563,18 @@ pub async fn run_stack_loops_with_cancel(
         }
 
         // Phase 7: emit exactly one LayerStarted event per layer that
-        // actually enters active work. The partition above filters out
-        // inactive / dependency-cascade Skipped layers first, so background
-        // subscribers never see false starts for configured-but-inactive
-        // layers. Each start event is backed by a durable InProgress layer
-        // entry so any subsequent snapshot or crash reconciliation can
-        // observe the same layer state.
-        if let Some(ref path) = manifest_path {
-            for layer_name in &started_layers {
-                replace_or_add_layer_result(&mut manifest, in_progress_layer_result(layer_name));
-                manifest.compute_overall_status();
-                cfg.saver
-                    .save_and_emit(
-                        &manifest,
-                        path,
-                        SaveIntent::LayerStarted {
-                            layer: layer_name.clone(),
-                        },
-                    )
-                    .with_context(|| {
-                        format!("persisting LayerStarted checkpoint for layer {layer_name}")
-                    })?;
-            }
+        // actually enters active work. Empty-diff active layers checkpoint
+        // inline before seam/static verification; non-empty provider-backed
+        // layers checkpoint here before provider dispatch. Inactive layers
+        // never enter either path, so subscribers still avoid false starts
+        // for configured-but-inactive layers.
+        for layer_name in &started_layers {
+            persist_layer_started_checkpoint(
+                &mut manifest,
+                manifest_path.as_deref(),
+                cfg.saver,
+                layer_name,
+            )?;
         }
 
         // Dispatch the real-work subset: parallel when allowed, sequential
@@ -2182,6 +2199,102 @@ mod tests {
                 .iter()
                 .any(|(name, status)| name == "backend" && *status == LayerStatus::InProgress)),
             "LayerStarted save should persist backend as InProgress first, got {snapshots:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_diff_always_run_layer_checkpoints_before_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec!["infrastructure".to_string()],
+                defs: BTreeMap::from([(
+                    "infrastructure".to_string(),
+                    LayerDef {
+                        paths: vec!["infra/**".to_string()],
+                        always_run: true,
+                        contract: None,
+                        depends_on: Vec::new(),
+                        layer_type: None,
+                        environment_variants: None,
+                    },
+                )]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let bus = crate::events::EventBus::new();
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_path = manifest_path.clone();
+        let hook_snapshots = std::sync::Arc::clone(&snapshots);
+        let after_save = move || {
+            if let Ok(manifest) = VerificationManifest::load(&hook_path) {
+                let statuses: Vec<(String, LayerStatus)> = manifest
+                    .layers
+                    .iter()
+                    .map(|layer| (layer.name.clone(), layer.status.clone()))
+                    .collect();
+                hook_snapshots.lock().unwrap().push(statuses);
+            }
+        };
+        let hooks = crate::events::EventEmittingSaverHooks {
+            before_save: None,
+            after_save_before_emit: Some(&after_save),
+        };
+        let saver = crate::events::EventEmittingSaver::new_with_hooks(&bus, hooks);
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test-provider",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(""),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .unwrap();
+        let snapshots = snapshots.lock().unwrap();
+        let started_pos = snapshots
+            .iter()
+            .position(|statuses| {
+                statuses.iter().any(|(name, status)| {
+                    name == "infrastructure" && *status == LayerStatus::InProgress
+                })
+            })
+            .expect("empty-diff always_run layer should checkpoint InProgress");
+        let completed_pos = snapshots
+            .iter()
+            .position(|statuses| {
+                statuses.iter().any(|(name, status)| {
+                    name == "infrastructure" && *status == LayerStatus::Pending
+                })
+            })
+            .expect("empty-diff always_run layer should complete as Pending");
+        assert!(
+            started_pos < completed_pos,
+            "LayerStarted checkpoint must precede completion, got {snapshots:?}"
         );
     }
 

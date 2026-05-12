@@ -11,14 +11,15 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::Utc;
 use dashmap::DashMap;
+use pice_core::cli::CancelledReason;
 use pice_core::jobs::JobEnv;
-use pice_core::layers::manifest::VerificationManifest;
+use pice_core::layers::manifest::{LayerResult, LayerStatus, ManifestStatus, VerificationManifest};
 use pice_core::workflow::schema::MAX_GLOBAL_PROVIDER_CONCURRENCY_HARD_CAP;
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::events::EventBus;
+use crate::events::{EventBus, EventEmittingSaver, ManifestSaver, SaveIntent};
 
 /// String-typed run identifier. Constructed by
 /// [`FeatureJobManager::next_run_id`] in the format
@@ -46,6 +47,52 @@ impl Drop for CompletionSignal {
             let _ = tx.send(());
         }
     }
+}
+
+fn terminalize_cancelled_before_orchestrator_start(
+    feature_id: &str,
+    run_id: &RunId,
+    env: &JobEnv,
+    events: &EventBus,
+) -> Result<VerificationManifest> {
+    let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+        feature_id,
+        &env.project_root,
+        &env.state_dir,
+    );
+    let mut manifest = VerificationManifest::load(&manifest_path).map_err(|err| {
+        anyhow::anyhow!(
+            "background job cancelled before orchestrator start, but queued manifest could not be loaded from {}: {err:#}",
+            manifest_path.display()
+        )
+    })?;
+    let halted_by = CancelledReason::PreSpawn.as_halted_by();
+    manifest.run_id = Some(run_id.clone());
+    manifest.overall_status = ManifestStatus::Failed;
+    manifest.layers.push(LayerResult {
+        name: feature_id.to_string(),
+        status: LayerStatus::Failed,
+        passes: Vec::new(),
+        seam_checks: Vec::new(),
+        halted_by: Some(halted_by.clone()),
+        final_confidence: None,
+        total_cost_usd: None,
+        escalation_events: None,
+    });
+    let saver = EventEmittingSaver::new(events);
+    saver
+        .save_and_emit(
+            &manifest,
+            &manifest_path,
+            SaveIntent::Cancelled { reason: halted_by },
+        )
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "background job cancelled before orchestrator start, but terminal manifest save failed at {}: {err:#}",
+                manifest_path.display()
+            )
+        })?;
+    Ok(manifest)
 }
 
 /// Per-feature live state held in the manager's DashMap.
@@ -225,21 +272,48 @@ impl FeatureJobManager {
                 let global_sem = Arc::clone(&self.global_sem);
                 let env_for_task = Arc::clone(&env);
                 let cancel_for_task = cancel.clone();
+                let events_for_task = self.events.clone();
+                let feat_for_task = feature_id.clone();
+                let run_id_for_task = run_id.clone();
                 let worker_handle = tokio::spawn(async move {
                     let _completion_signal = CompletionSignal(Some(completion_tx));
                     if let Some(start_rx) = start_rx {
-                        start_rx.await.map_err(|_| {
-                            anyhow::anyhow!("background job start signal dropped before release")
-                        })?;
+                        tokio::select! {
+                            result = start_rx => {
+                                result.map_err(|_| {
+                                    anyhow::anyhow!("background job start signal dropped before release")
+                                })?;
+                            }
+                            _ = cancel_for_task.cancelled() => {
+                                return terminalize_cancelled_before_orchestrator_start(
+                                    &feat_for_task,
+                                    &run_id_for_task,
+                                    env_for_task.as_ref(),
+                                    &events_for_task,
+                                );
+                            }
+                        }
                     }
                     // SAFETY note: `acquire_owned` returns `Err` only if the
                     // underlying semaphore is closed. We never `close()` it, so
                     // this path is unreachable in production. Map the error to
                     // anyhow for the JoinHandle's Result type.
-                    let permit = match global_sem.acquire_owned().await {
-                        Ok(p) => p,
-                        Err(e) => {
-                            return Err(anyhow::anyhow!("global provider semaphore closed: {e}"));
+                    let permit = tokio::select! {
+                        permit = global_sem.acquire_owned() => {
+                            match permit {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    return Err(anyhow::anyhow!("global provider semaphore closed: {e}"));
+                                }
+                            }
+                        }
+                        _ = cancel_for_task.cancelled() => {
+                            return terminalize_cancelled_before_orchestrator_start(
+                                &feat_for_task,
+                                &run_id_for_task,
+                                env_for_task.as_ref(),
+                                &events_for_task,
+                            );
                         }
                     };
                     future_builder(env_for_task, permit, cancel_for_task).await
@@ -842,6 +916,100 @@ mod tests {
 
         let remaining = manager.drain_on_shutdown(Duration::from_secs(3)).await;
         assert_eq!(remaining, 0, "drain should bring count to zero");
+    }
+
+    #[tokio::test]
+    async fn drain_on_shutdown_terminalizes_job_waiting_for_global_semaphore() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let env = Arc::new(JobEnv {
+            state_dir: state_dir.path().to_path_buf(),
+            project_root: project.path().to_path_buf(),
+            workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+            contracts: Default::default(),
+            pice_state_dir_override: None,
+            pice_user_workflow_file: None,
+        });
+        let events = EventBus::new();
+        let mut rx = events.subscribe_feature("feat-waiting");
+        let manager = FeatureJobManager::new(events, 1);
+
+        let holder_started = Arc::new(tokio::sync::Notify::new());
+        let holder_started_clone = holder_started.clone();
+        manager
+            .spawn(
+                "feat-holder",
+                manager.next_run_id(),
+                env.clone(),
+                move |_env, permit, cancel| async move {
+                    let _permit = permit;
+                    holder_started_clone.notify_one();
+                    cancel.cancelled().await;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok(stub_manifest("feat-holder"))
+                },
+            )
+            .expect("spawn holder");
+        tokio::time::timeout(Duration::from_secs(1), holder_started.notified())
+            .await
+            .expect("holder acquired semaphore");
+
+        let run_id = manager.next_run_id();
+        let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+            "feat-waiting",
+            project.path(),
+            state_dir.path(),
+        );
+        let mut queued = VerificationManifest::new("feat-waiting", project.path());
+        queued.run_id = Some(run_id.clone());
+        queued.overall_status = ManifestStatus::Queued;
+        queued.save(&manifest_path).unwrap();
+
+        let waiting_started = Arc::new(tokio::sync::Notify::new());
+        let waiting_started_clone = waiting_started.clone();
+        manager
+            .spawn(
+                "feat-waiting",
+                run_id.clone(),
+                env,
+                move |_env, _permit, _cancel| async move {
+                    waiting_started_clone.notify_one();
+                    Ok(stub_manifest("feat-waiting"))
+                },
+            )
+            .expect("spawn waiting job");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), waiting_started.notified())
+                .await
+                .is_err(),
+            "waiting job must remain behind the global semaphore before shutdown"
+        );
+
+        let remaining = manager.drain_on_shutdown(Duration::from_secs(3)).await;
+        assert_eq!(remaining, 0, "drain should finish after terminal save");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), waiting_started.notified())
+                .await
+                .is_err(),
+            "cancelled waiting job must not start its orchestrator future"
+        );
+
+        let persisted = VerificationManifest::load(&manifest_path).unwrap();
+        assert_eq!(persisted.overall_status, ManifestStatus::Failed);
+        assert_eq!(persisted.run_id.as_deref(), Some(run_id.as_str()));
+        let halted_by = persisted
+            .layers
+            .iter()
+            .find(|layer| layer.name == "feat-waiting")
+            .and_then(|layer| layer.halted_by.as_deref());
+        assert_eq!(halted_by, Some("cancelled:pre_spawn"));
+
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("cancelled event")
+            .expect("event");
+        assert_eq!(event.event, pice_core::events::ManifestEvent::Cancelled);
+        assert_eq!(event.data["reason"].as_str(), Some("cancelled:pre_spawn"));
     }
 
     #[tokio::test]
