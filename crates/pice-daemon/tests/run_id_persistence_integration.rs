@@ -18,6 +18,7 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use pice_core::cli::{
@@ -31,8 +32,16 @@ use pice_daemon::server::auth;
 use pice_daemon::server::unix::UnixConnection;
 use pice_daemon::test_support::StateDirGuard;
 use tokio::net::UnixStream;
+use tokio::sync::Mutex;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+static RUN_ID_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn run_id_test_lock() -> &'static Mutex<()> {
+    // Both tests mutate process-wide PICE_STATE_DIR via StateDirGuard.
+    RUN_ID_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 async fn wait_for_socket(path: &std::path::Path) {
     for _ in 0..200 {
@@ -210,6 +219,7 @@ async fn shutdown_daemon(
 /// and verify reconciliation preserves its `run_id` while flipping status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn run_id_persists_through_dispatch_and_restart() {
+    let _serial = run_id_test_lock().lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let state_dir = dir.path().join("state");
     std::fs::create_dir_all(&state_dir).unwrap();
@@ -408,6 +418,7 @@ async fn run_id_persists_through_dispatch_and_restart() {
 /// and asserts the reconciler preserved the run_id.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_id_preserved_when_reconciler_rewrites_in_progress_to_failed() {
+    let _serial = run_id_test_lock().lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let state_dir = dir.path().join("state");
     std::fs::create_dir_all(&state_dir).unwrap();
