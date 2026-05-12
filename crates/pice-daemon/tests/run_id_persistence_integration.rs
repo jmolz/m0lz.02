@@ -44,6 +44,16 @@ async fn wait_for_socket(path: &std::path::Path) {
     panic!("socket did not appear at {}", path.display());
 }
 
+async fn wait_for_token(path: &std::path::Path) -> String {
+    for _ in 0..200 {
+        if let Ok(token) = auth::read_token_file(path) {
+            return token;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("token did not appear at {}", path.display());
+}
+
 fn write_plan_with_contract(root: &std::path::Path, file_stem: &str) -> std::path::PathBuf {
     let plans_dir = root.join(".claude/plans");
     std::fs::create_dir_all(&plans_dir).unwrap();
@@ -221,7 +231,7 @@ async fn run_id_persists_through_dispatch_and_restart() {
     let tp = token_path.clone();
     let handle1 = tokio::spawn(lifecycle::run_with_paths(socket_path, tp));
     wait_for_socket(&sock_path).await;
-    let token1 = auth::read_token_file(&token_path).expect("token");
+    let token1 = wait_for_token(&token_path).await;
 
     // ── Step 2: dispatch --background ────────────────────────────────────────
     let dispatch_resp = wire_dispatch(
@@ -312,7 +322,7 @@ async fn run_id_persists_through_dispatch_and_restart() {
     let tp2 = token_path2.clone();
     let handle2 = tokio::spawn(lifecycle::run_with_paths(socket_path2, tp2));
     wait_for_socket(&sock_path2).await;
-    let token2 = auth::read_token_file(&token_path2).expect("token2");
+    let token2 = wait_for_token(&token_path2).await;
 
     // ── Step 6: assert run_id preserved after restart ─────────────────────────
     // Startup reconciliation: terminal manifests are untouched; InProgress
@@ -427,7 +437,7 @@ async fn run_id_preserved_when_reconciler_rewrites_in_progress_to_failed() {
     let tp = token_path.clone();
     let handle = tokio::spawn(lifecycle::run_with_paths(socket_path, tp));
     wait_for_socket(&sock_path).await;
-    let token = auth::read_token_file(&token_path).expect("token");
+    let token = wait_for_token(&token_path).await;
 
     // At this point reconciliation has run. Reload the manifest.
     let reconciled = VerificationManifest::load(&manifest_path).expect("load reconciled");
