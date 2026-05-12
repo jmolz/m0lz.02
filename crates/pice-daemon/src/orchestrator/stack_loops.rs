@@ -33,7 +33,7 @@ use super::adaptive_loop::{
     run_adaptive_passes, AdaptiveContext, AdaptiveOutcome, PassMetricsSink,
 };
 use super::{run_seams_for_layer, ProviderOrchestrator, SeamRunRequest, StreamSink};
-use crate::events::{ManifestSaver, SaveIntent};
+use crate::events::{terminal_save_intent_for_manifest, ManifestSaver, SaveIntent};
 use crate::prompt::layer_builder::build_layer_evaluation_prompt;
 
 /// Hard cap on parallel cohort tasks. Rate-limit-friendly against Anthropic /
@@ -935,13 +935,15 @@ pub async fn run_stack_loops_with_cancel(
     manifest.compute_overall_status();
 
     // Persist final manifest state. Phase 7 couples the final save with
-    // a `FeatureCompleted` event; subscribers observe the terminal
-    // `overall_status` in the event's `data` payload. A follow-up
+    // the matching terminal event; cooperative cancellation emits
+    // `Cancelled`, while normal pass/fail/pending-review completion emits
+    // `FeatureComplete`. A follow-up
     // `LogChunk { terminal: true }` is emitted by the dispatch wrapper
     // (Task 10) — the orchestrator itself does not own the LogStore.
     if let Some(ref path) = manifest_path {
+        let intent = terminal_save_intent_for_manifest(&manifest);
         cfg.saver
-            .save_and_emit(&manifest, path, SaveIntent::FeatureCompleted)
+            .save_and_emit(&manifest, path, intent)
             .context("persisting final terminal manifest")?;
     }
 
@@ -2106,7 +2108,10 @@ mod tests {
         let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
         let diff = "diff --git a/src/backend/app.rs b/src/backend/app.rs\n+++ b/src/backend/app.rs\n+fn changed() {}\n";
-        let saver = crate::events::NullSaver;
+        let intents = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let saver = RecordingSaver {
+            intents: intents.clone(),
+        };
         let cfg = StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -2148,6 +2153,14 @@ mod tests {
                 .is_some_and(|reason| reason.starts_with("cancelled:")),
             "remaining active layer should be cancelled, got {:?}",
             backend.halted_by
+        );
+        assert!(
+            intents
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|intent| matches!(intent, SaveIntent::Cancelled { .. })),
+            "terminal save for cancelled manifest must emit Cancelled"
         );
     }
 

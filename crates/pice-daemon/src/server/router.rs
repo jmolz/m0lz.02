@@ -565,11 +565,12 @@ fn handle_health(id: u64, ctx: &DaemonContext) -> DaemonResponse {
 /// 2. `await ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT)` — fires
 ///    every feature's `CancellationToken` and waits up to 10s for the
 ///    supervisor tasks to exit.
-/// 3. Emit the success response.
+/// 3. Emit the success response only if all jobs drained and any forced
+///    terminalization saves succeeded.
 ///
 /// The `drained_remaining` field reports how many jobs were still live
-/// when the 10s budget elapsed; tests assert it is 0 under the
-/// happy-path and nonzero when a job refuses cancellation. The flag-
+/// when the 10s budget elapsed; nonzero remaining jobs make shutdown
+/// fail closed. The flag-
 /// based poll in `lifecycle::run_unix` also calls drain for the
 /// SIGTERM path (no caller waiting there), keeping the two entry
 /// points symmetric.
@@ -584,7 +585,8 @@ async fn handle_shutdown(id: u64, ctx: &DaemonContext) -> DaemonResponse {
             id,
             INTERNAL_ERROR_CODE,
             format!(
-                "shutdown failed to terminalize {} background job(s)",
+                "shutdown failed to drain {} background job(s); terminalization failures: {}",
+                remaining.remaining,
                 remaining.terminalization_failures.len()
             ),
         );

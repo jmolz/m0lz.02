@@ -16,6 +16,7 @@
 //! evaluate stays on the Stack Loops surface; projects without layers
 //! fail closed before dispatch.
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use pice_core::cli::{
@@ -26,6 +27,39 @@ use pice_daemon::handlers::dispatch;
 use pice_daemon::orchestrator::NullSink;
 use pice_daemon::server::router::DaemonContext;
 use pice_daemon::test_support::StateDirGuard;
+use tokio::sync::Mutex;
+
+static INLINE_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn inline_env_lock() -> &'static Mutex<()> {
+    INLINE_ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct InlineEnvGuard {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+    prior: Option<String>,
+}
+
+impl InlineEnvGuard {
+    async fn set(value: &str) -> Self {
+        let guard = inline_env_lock().lock().await;
+        let prior = std::env::var("PICE_DAEMON_INLINE").ok();
+        std::env::set_var("PICE_DAEMON_INLINE", value);
+        Self {
+            _guard: guard,
+            prior,
+        }
+    }
+}
+
+impl Drop for InlineEnvGuard {
+    fn drop(&mut self) {
+        match &self.prior {
+            Some(v) => std::env::set_var("PICE_DAEMON_INLINE", v),
+            None => std::env::remove_var("PICE_DAEMON_INLINE"),
+        }
+    }
+}
 
 fn write_plan_with_contract(root: &std::path::Path, file_stem: &str) -> std::path::PathBuf {
     let plans_dir = root.join(".claude/plans");
@@ -272,12 +306,9 @@ async fn inline_mode_rejects_background_dispatch() {
 
     let ctx = DaemonContext::new("tok".to_string(), project.path().to_path_buf());
 
-    // Activate inline mode for the duration of this test. We hold the
-    // state_dir lock already; the inline env var lives on its own,
-    // but `dispatch_background` reads it synchronously before any
-    // `.await`, so we restore it on drop.
-    let prior_inline = std::env::var("PICE_DAEMON_INLINE").ok();
-    std::env::set_var("PICE_DAEMON_INLINE", "1");
+    // Activate inline mode for the duration of this test. The env var is
+    // process-wide, so the guard serializes access and restores it on panic.
+    let _inline = InlineEnvGuard::set("1").await;
 
     let req = CommandRequest::Evaluate(EvaluateRequest {
         plan_path,
@@ -287,13 +318,6 @@ async fn inline_mode_rejects_background_dispatch() {
         timeout_secs: None,
     });
     let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
-
-    // Restore inline env immediately — don't let it leak if the
-    // assertion below panics.
-    match prior_inline {
-        Some(v) => std::env::set_var("PICE_DAEMON_INLINE", v),
-        None => std::env::remove_var("PICE_DAEMON_INLINE"),
-    }
 
     match resp {
         CommandResponse::ExitJson { code, value } => {

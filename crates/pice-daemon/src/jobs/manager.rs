@@ -43,7 +43,7 @@ pub struct ShutdownDrainReport {
 
 impl ShutdownDrainReport {
     pub fn is_clean(&self) -> bool {
-        self.terminalization_failures.is_empty()
+        self.remaining == 0 && self.terminalization_failures.is_empty()
     }
 }
 
@@ -1217,7 +1217,10 @@ mod tests {
 
         let report = manager.drain_on_shutdown(Duration::from_millis(300)).await;
         assert_eq!(report.remaining, 1, "stuck feature should still be counted");
-        assert!(report.is_clean());
+        assert!(
+            !report.is_clean(),
+            "a shutdown drain that timed out with remaining jobs is not clean"
+        );
         for _ in 0..50 {
             if manager.active_count() == 0 {
                 break;

@@ -47,7 +47,7 @@ use serde_json::json;
 use tokio::sync::{oneshot, OwnedMutexGuard, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
-use crate::events::{ManifestSaver, NullSaver, SaveIntent};
+use crate::events::{terminal_save_intent_for_manifest, ManifestSaver, NullSaver, SaveIntent};
 use crate::jobs::SpawnError;
 use crate::server::router::DaemonContext;
 
@@ -639,16 +639,20 @@ pub fn transition_queued_to_in_progress(
     Ok(manifest)
 }
 
-/// Persist a terminal manifest from the spawned future and emit the
-/// `FeatureComplete` event. Wrapping the save behind a helper keeps
-/// both evaluate and execute closures consistent.
+/// Persist a terminal manifest from the spawned future and emit the matching
+/// terminal event. Wrapping the save behind a helper keeps both evaluate and
+/// execute closures consistent.
 pub fn finalize_terminal_manifest(
     manifest: &VerificationManifest,
     manifest_path: &Path,
     events: &crate::events::EventBus,
 ) -> Result<()> {
     let saver = crate::events::EventEmittingSaver::new(events);
-    saver.save_and_emit(manifest, manifest_path, SaveIntent::FeatureCompleted)?;
+    saver.save_and_emit(
+        manifest,
+        manifest_path,
+        terminal_save_intent_for_manifest(manifest),
+    )?;
     Ok(())
 }
 

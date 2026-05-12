@@ -22,5 +22,6 @@ pub mod saver;
 
 pub use bus::EventBus;
 pub use saver::{
-    EventEmittingSaver, EventEmittingSaverHooks, ManifestSaver, NullSaver, SaveIntent,
+    terminal_save_intent_for_manifest, EventEmittingSaver, EventEmittingSaverHooks, ManifestSaver,
+    NullSaver, SaveIntent,
 };

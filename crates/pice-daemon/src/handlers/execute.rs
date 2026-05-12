@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use pice_core::cli::{CommandResponse, ExecuteRequest, ExitJsonStatus};
+use pice_core::cli::{CancelledReason, CommandResponse, ExecuteRequest, ExitJsonStatus};
 use pice_core::layers::manifest::ManifestStatus;
 use pice_core::plan_parser::ParsedPlan;
 use serde_json::json;
@@ -233,6 +233,11 @@ async fn run_background(
                 }
                 Err(e) => {
                     manifest.overall_status = ManifestStatus::Failed;
+                    let halted_by = if cancel.is_cancelled() {
+                        CancelledReason::InFlight.as_halted_by()
+                    } else {
+                        format!("runtime_error:{e}")
+                    };
                     // Record the error on the manifest's gates-free
                     // layers list as a synthetic `execute` layer so
                     // downstream readers can surface the reason. If
@@ -245,7 +250,7 @@ async fn run_background(
                             status: pice_core::layers::manifest::LayerStatus::Failed,
                             passes: Vec::new(),
                             seam_checks: Vec::new(),
-                            halted_by: Some(format!("runtime_error:{e}")),
+                            halted_by: Some(halted_by),
                             final_confidence: None,
                             total_cost_usd: None,
                             escalation_events: None,

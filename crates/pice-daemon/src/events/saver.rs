@@ -25,6 +25,7 @@
 //! consumer, not speculative scaffolding.
 
 use super::bus::EventBus;
+use pice_core::cli::ExitJsonStatus;
 use pice_core::layers::manifest::VerificationManifest;
 use std::path::Path;
 
@@ -87,6 +88,22 @@ pub enum SaveIntent {
     /// orchestrator future). Emits `ManifestEvent::Cancelled` with
     /// `{reason}`.
     Cancelled { reason: String },
+}
+
+/// Choose the terminal event kind for a manifest that has reached an
+/// overall terminal state. Normal pass/fail/pending-review completion emits
+/// `FeatureComplete`; cooperative cancellation emits `Cancelled` so
+/// subscribers do not have to infer cancellation from layer internals.
+pub fn terminal_save_intent_for_manifest(manifest: &VerificationManifest) -> SaveIntent {
+    manifest
+        .layers
+        .iter()
+        .filter_map(|layer| layer.halted_by.as_deref())
+        .find(|halted_by| ExitJsonStatus::is_cancelled(halted_by))
+        .map(|reason| SaveIntent::Cancelled {
+            reason: reason.to_string(),
+        })
+        .unwrap_or(SaveIntent::FeatureCompleted)
 }
 
 /// Abstraction for the `save + emit` pair. Every daemon-side manifest
@@ -300,7 +317,9 @@ impl ManifestSaver for NullSaver {
 mod tests {
     use super::*;
     use pice_core::events::ManifestEvent;
-    use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
+    use pice_core::layers::manifest::{
+        LayerResult, LayerStatus, ManifestStatus, VerificationManifest,
+    };
     use tempfile::tempdir;
 
     fn sample_manifest(feature_id: &str, run_id: Option<&str>) -> VerificationManifest {
@@ -313,6 +332,38 @@ mod tests {
             overall_status: ManifestStatus::InProgress,
             run_id: run_id.map(|s| s.to_string()),
         }
+    }
+
+    #[test]
+    fn terminal_save_intent_uses_cancelled_for_cancelled_layer_halt() {
+        let mut manifest = sample_manifest("feat-terminal-intent", Some("run-terminal-intent"));
+        assert_eq!(
+            terminal_save_intent_for_manifest(&manifest),
+            SaveIntent::FeatureCompleted
+        );
+
+        manifest.layers.push(LayerResult {
+            name: "backend".into(),
+            status: LayerStatus::Failed,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: Some("runtime_error:provider failed".into()),
+            final_confidence: None,
+            total_cost_usd: None,
+            escalation_events: None,
+        });
+        assert_eq!(
+            terminal_save_intent_for_manifest(&manifest),
+            SaveIntent::FeatureCompleted
+        );
+
+        manifest.layers[0].halted_by = Some("cancelled:in_flight".into());
+        assert_eq!(
+            terminal_save_intent_for_manifest(&manifest),
+            SaveIntent::Cancelled {
+                reason: "cancelled:in_flight".into()
+            }
+        );
     }
 
     #[tokio::test]
