@@ -983,6 +983,6 @@ pnpm build
 **Known limitations / follow-ups:**
 
 - **Gate timeout reconciler (Phase 6 Task 8) remains deferred to Phase 6.1.** Phase 7 does NOT introduce the daemon-startup polling reconciler. If a gate times out while nobody runs `pice evaluate`, it stays `Pending` until someone runs evaluate (Phase 6's inline reconcile-on-resume). Phase 7's background mode does NOT accelerate this — the inline reconcile still runs on `--background` dispatch entry.
-- **`pice clean` log purge is not wired.** `LogStore::purge` exists but `pice clean` does not call it. Phase 5.5 will wire worktree + log cleanup together.
+- **`pice clean` log purge is not wired.** `LogStore::purge` is intentionally not defined yet because there is no `pice clean` consumer. Phase 5.5 will wire worktree + log cleanup together.
 - **Dashboard gate UI (v0.3) cannot yet consume `gate_requested` notifications** — the handler exists, but no dashboard. Phase 7 emits the events in the correct format; v0.3 is responsible for consuming them.
 - **Provider rate limit awareness** — when a provider returns 429, the daemon currently logs + fails the pass. A future release (likely v0.7.x) adds exponential backoff at the job manager level to pause affected features until the rate-limit window passes.
