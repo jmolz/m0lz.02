@@ -566,7 +566,6 @@ async fn fail_closed_after_background_error(
     let mut manifest = match VerificationManifest::load(&args.manifest_path) {
         Ok(manifest) => manifest,
         Err(load_err) => {
-            events.emit_cancelled(&args.feature_id, &args.run_id, "manifest-load-failed");
             logs.append_terminal_frame(&args.feature_id, &args.run_id, "manifest-load-failed")
                 .await;
             return Err(load_err.context(format!(
@@ -597,7 +596,6 @@ async fn fail_closed_after_background_error(
             Ok(manifest)
         }
         Err(save_err) => {
-            events.emit_cancelled(&args.feature_id, &args.run_id, "terminal-save-failed");
             logs.append_terminal_frame(&args.feature_id, &args.run_id, "terminal-save-failed")
                 .await;
             Err(save_err.context(format!(
@@ -1387,12 +1385,12 @@ paths = ["src/**"]
             "{not-json"
         );
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
-            .await
-            .expect("cancelled event")
-            .expect("event");
-        assert_eq!(event.event, pice_core::events::ManifestEvent::Cancelled);
-        assert_eq!(event.data["reason"].as_str(), Some("manifest-load-failed"));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "unloadable manifest path must not emit a terminal manifest/event without a save"
+        );
 
         let history = logs.snapshot("feat-corrupt", None).await;
         assert!(history.iter().any(|chunk| {

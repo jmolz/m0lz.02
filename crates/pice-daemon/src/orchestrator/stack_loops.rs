@@ -392,6 +392,7 @@ pub async fn run_stack_loops_with_cancel(
         let mut immediate_results: HashMap<String, LayerResult> = HashMap::new();
         let mut immediate_chunks: HashMap<String, Vec<String>> = HashMap::new();
         let mut work_inputs: Vec<LayerInputs> = Vec::new();
+        let mut empty_diff_inputs: Vec<EmptyDiffLayerInput> = Vec::new();
         let mut started_layers: Vec<String> = Vec::new();
 
         for layer_name in cohort {
@@ -495,47 +496,13 @@ pub async fn run_stack_loops_with_cancel(
                     )
                 };
                 info!(layer = %layer_name, always_run = is_always_run, "empty diff for active layer");
-                persist_layer_started_checkpoint(
-                    &mut manifest,
-                    manifest_path.as_deref(),
-                    cfg.saver,
-                    layer_name,
-                )?;
-                let seam_checks = run_seams_for_layer(SeamRunRequest {
-                    layer_name,
-                    active_layers: &active_set,
-                    merged_seams,
-                    registry: seam_registry_arc.as_ref(),
-                    repo_root: project_root,
-                    full_diff: &full_diff,
-                    layer_paths: &layer_paths,
-                    file_contents: cfg.seam_file_contents,
+                started_layers.push(layer_name.clone());
+                empty_diff_inputs.push(EmptyDiffLayerInput {
+                    layer_name: layer_name.clone(),
+                    status,
+                    label,
+                    reason,
                 });
-                let first_failed = seam_checks
-                    .iter()
-                    .find(|c| c.status == CheckStatus::Failed)
-                    .map(|c| c.name.clone());
-                let (final_status, final_reason) = match first_failed {
-                    Some(failed_id) => (LayerStatus::Failed, format!("seam:{failed_id}")),
-                    None => (status, reason),
-                };
-                immediate_results.insert(
-                    layer_name.clone(),
-                    LayerResult {
-                        name: layer_name.clone(),
-                        status: final_status,
-                        passes: Vec::new(),
-                        seam_checks,
-                        halted_by: Some(final_reason),
-                        final_confidence: None,
-                        total_cost_usd: None,
-                        escalation_events: None,
-                    },
-                );
-                immediate_chunks.insert(
-                    layer_name.clone(),
-                    vec![format!("  [{layer_name}] {label} (no file changes)\n")],
-                );
                 continue;
             }
 
@@ -563,11 +530,11 @@ pub async fn run_stack_loops_with_cancel(
         }
 
         // Phase 7: emit exactly one LayerStarted event per layer that
-        // actually enters active work. Empty-diff active layers checkpoint
-        // inline before seam/static verification; non-empty provider-backed
-        // layers checkpoint here before provider dispatch. Inactive layers
-        // never enter either path, so subscribers still avoid false starts
-        // for configured-but-inactive layers.
+        // actually enters active work. The scan above records both
+        // empty-diff seam/static work and non-empty provider work in DAG
+        // order; checkpoint all starts before running either work class so
+        // subscribers see a topological LayerStarted stream and every layer
+        // has a durable InProgress entry before its own work begins.
         for layer_name in &started_layers {
             persist_layer_started_checkpoint(
                 &mut manifest,
@@ -575,6 +542,47 @@ pub async fn run_stack_loops_with_cancel(
                 cfg.saver,
                 layer_name,
             )?;
+        }
+
+        for empty in empty_diff_inputs {
+            let seam_checks = run_seams_for_layer(SeamRunRequest {
+                layer_name: &empty.layer_name,
+                active_layers: &active_set,
+                merged_seams,
+                registry: seam_registry_arc.as_ref(),
+                repo_root: project_root,
+                full_diff: &full_diff,
+                layer_paths: &layer_paths,
+                file_contents: cfg.seam_file_contents,
+            });
+            let first_failed = seam_checks
+                .iter()
+                .find(|c| c.status == CheckStatus::Failed)
+                .map(|c| c.name.clone());
+            let (final_status, final_reason) = match first_failed {
+                Some(failed_id) => (LayerStatus::Failed, format!("seam:{failed_id}")),
+                None => (empty.status, empty.reason),
+            };
+            immediate_results.insert(
+                empty.layer_name.clone(),
+                LayerResult {
+                    name: empty.layer_name.clone(),
+                    status: final_status,
+                    passes: Vec::new(),
+                    seam_checks,
+                    halted_by: Some(final_reason),
+                    final_confidence: None,
+                    total_cost_usd: None,
+                    escalation_events: None,
+                },
+            );
+            immediate_chunks.insert(
+                empty.layer_name.clone(),
+                vec![format!(
+                    "  [{}] {} (no file changes)\n",
+                    empty.layer_name, empty.label
+                )],
+            );
         }
 
         // Dispatch the real-work subset: parallel when allowed, sequential
@@ -1588,6 +1596,13 @@ struct LayerOutcome {
     streamed_chunks: Vec<String>,
 }
 
+struct EmptyDiffLayerInput {
+    layer_name: String,
+    status: LayerStatus,
+    label: &'static str,
+    reason: String,
+}
+
 /// Extract LAYER-OWN inputs from `cfg` for `layer_name`. The result owns
 /// its data and has no lifetime parameter — spawn-safe by construction.
 ///
@@ -2003,6 +2018,23 @@ mod tests {
         }
     }
 
+    struct RecordingSaver {
+        intents: std::sync::Arc<std::sync::Mutex<Vec<SaveIntent>>>,
+    }
+
+    impl crate::events::ManifestSaver for RecordingSaver {
+        fn save_and_emit(
+            &self,
+            manifest: &VerificationManifest,
+            path: &std::path::Path,
+            intent: SaveIntent,
+        ) -> anyhow::Result<()> {
+            manifest.save(path)?;
+            self.intents.lock().unwrap().push(intent);
+            Ok(())
+        }
+    }
+
     #[test]
     fn extract_changed_files_basic() {
         let diff = [
@@ -2295,6 +2327,121 @@ mod tests {
         assert!(
             started_pos < completed_pos,
             "LayerStarted checkpoint must precede completion, got {snapshots:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_empty_and_non_empty_cohort_starts_in_dag_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec![
+                    "api".to_string(),
+                    "infrastructure".to_string(),
+                    "web".to_string(),
+                ],
+                defs: BTreeMap::from([
+                    (
+                        "api".to_string(),
+                        LayerDef {
+                            paths: vec!["src/api/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                    (
+                        "infrastructure".to_string(),
+                        LayerDef {
+                            paths: vec!["infra/**".to_string()],
+                            always_run: true,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                    (
+                        "web".to_string(),
+                        LayerDef {
+                            paths: vec!["src/web/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                ]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let diff = [
+            "diff --git a/src/api/app.rs b/src/api/app.rs",
+            "+++ b/src/api/app.rs",
+            "+fn api() {}",
+            "diff --git a/src/web/app.ts b/src/web/app.ts",
+            "+++ b/src/web/app.ts",
+            "+export const x = 1;",
+        ]
+        .join("\n");
+        let intents = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let saver = RecordingSaver {
+            intents: std::sync::Arc::clone(&intents),
+        };
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "not-a-real-provider-kjsdfhgsd",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(&diff),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .unwrap();
+        let started: Vec<String> = intents
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|intent| match intent {
+                SaveIntent::LayerStarted { layer } => Some(layer.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            started,
+            vec![
+                "api".to_string(),
+                "infrastructure".to_string(),
+                "web".to_string(),
+            ],
+            "LayerStarted events must follow cohort DAG order"
         );
     }
 

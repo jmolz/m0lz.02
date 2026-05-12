@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::Result;
 use chrono::Utc;
 use dashmap::DashMap;
-use pice_core::cli::CancelledReason;
+use pice_core::cli::{CancelledReason, ExitJsonStatus};
 use pice_core::jobs::JobEnv;
 use pice_core::layers::manifest::{LayerResult, LayerStatus, ManifestStatus, VerificationManifest};
 use pice_core::workflow::schema::MAX_GLOBAL_PROVIDER_CONCURRENCY_HARD_CAP;
@@ -49,11 +49,13 @@ impl Drop for CompletionSignal {
     }
 }
 
-fn terminalize_cancelled_before_orchestrator_start(
+fn terminalize_cancelled_manifest(
     feature_id: &str,
     run_id: &RunId,
     env: &JobEnv,
     events: &EventBus,
+    event_reason: &str,
+    halted_by: String,
 ) -> Result<VerificationManifest> {
     let manifest_path = VerificationManifest::manifest_path_in_state_dir(
         feature_id,
@@ -62,37 +64,86 @@ fn terminalize_cancelled_before_orchestrator_start(
     );
     let mut manifest = VerificationManifest::load(&manifest_path).map_err(|err| {
         anyhow::anyhow!(
-            "background job cancelled before orchestrator start, but queued manifest could not be loaded from {}: {err:#}",
+            "background job cancellation could not terminalize because the manifest could not be loaded from {}: {err:#}",
             manifest_path.display()
         )
     })?;
-    let halted_by = CancelledReason::PreSpawn.as_halted_by();
     manifest.run_id = Some(run_id.clone());
+    for layer in &mut manifest.layers {
+        if matches!(
+            layer.status,
+            LayerStatus::InProgress | LayerStatus::Pending | LayerStatus::PendingReview
+        ) {
+            layer.status = LayerStatus::Failed;
+            layer.halted_by = Some(halted_by.clone());
+        }
+    }
+    if !manifest
+        .layers
+        .iter()
+        .any(|layer| layer.halted_by.as_deref() == Some(halted_by.as_str()))
+    {
+        manifest.layers.push(LayerResult {
+            name: feature_id.to_string(),
+            status: LayerStatus::Failed,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: Some(halted_by.clone()),
+            final_confidence: None,
+            total_cost_usd: None,
+            escalation_events: None,
+        });
+    }
     manifest.overall_status = ManifestStatus::Failed;
-    manifest.layers.push(LayerResult {
-        name: feature_id.to_string(),
-        status: LayerStatus::Failed,
-        passes: Vec::new(),
-        seam_checks: Vec::new(),
-        halted_by: Some(halted_by.clone()),
-        final_confidence: None,
-        total_cost_usd: None,
-        escalation_events: None,
-    });
     let saver = EventEmittingSaver::new(events);
     saver
         .save_and_emit(
             &manifest,
             &manifest_path,
-            SaveIntent::Cancelled { reason: halted_by },
+            SaveIntent::Cancelled {
+                reason: event_reason.to_string(),
+            },
         )
         .map_err(|err| {
             anyhow::anyhow!(
-                "background job cancelled before orchestrator start, but terminal manifest save failed at {}: {err:#}",
+                "background job cancellation terminal manifest save failed at {}: {err:#}",
                 manifest_path.display()
             )
         })?;
     Ok(manifest)
+}
+
+fn terminalize_cancelled_before_orchestrator_start(
+    feature_id: &str,
+    run_id: &RunId,
+    env: &JobEnv,
+    events: &EventBus,
+) -> Result<VerificationManifest> {
+    let halted_by = CancelledReason::PreSpawn.as_halted_by();
+    terminalize_cancelled_manifest(
+        feature_id,
+        run_id,
+        env,
+        events,
+        &halted_by,
+        halted_by.clone(),
+    )
+}
+
+fn terminalize_panicked_orchestrator(
+    feature_id: &str,
+    run_id: &RunId,
+    env: &JobEnv,
+    events: &EventBus,
+) -> Result<VerificationManifest> {
+    terminalize_cancelled_manifest(
+        feature_id,
+        run_id,
+        env,
+        events,
+        "panic",
+        ExitJsonStatus::FAILED_INTERRUPTED_HALT.to_string(),
+    )
 }
 
 /// Per-feature live state held in the manager's DashMap.
@@ -362,11 +413,19 @@ impl FeatureJobManager {
                             run_id = %run_id_for_supervisor,
                             "FeatureJobManager: orchestrator panicked",
                         );
-                        events_for_supervisor.emit_cancelled(
+                        if let Err(err) = terminalize_panicked_orchestrator(
                             &feat_for_supervisor,
                             &run_id_for_supervisor,
-                            "panic",
-                        );
+                            h.env.as_ref(),
+                            &events_for_supervisor,
+                        ) {
+                            tracing::error!(
+                                feature_id = %feat_for_supervisor,
+                                run_id = %run_id_for_supervisor,
+                                error = %err,
+                                "FeatureJobManager: failed to terminalize panicked orchestrator",
+                            );
+                        }
                     }
                     Err(_cancelled) => {
                         // The JoinHandle was aborted (e.g., by

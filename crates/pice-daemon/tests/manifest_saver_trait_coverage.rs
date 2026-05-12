@@ -138,3 +138,56 @@ fn zero_raw_manifest_save_calls_in_orchestrator() {
         }
     }
 }
+
+#[test]
+fn zero_direct_cancelled_event_emits_outside_saver() {
+    use std::fs;
+    use std::path::Path;
+
+    let daemon_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let allowed = [
+        daemon_src.join("events/saver.rs"),
+        daemon_src.join("events/bus.rs"),
+    ];
+    let mut offenders = Vec::<String>::new();
+
+    fn walk(dir: &Path, f: &mut dyn FnMut(&Path, &str)) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                walk(&p, f);
+            } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
+                if let Ok(s) = fs::read_to_string(&p) {
+                    f(&p, &s);
+                }
+            }
+        }
+    }
+
+    walk(&daemon_src, &mut |path, content| {
+        if allowed.iter().any(|allowed_path| path == allowed_path) {
+            return;
+        }
+        let mut in_test_module = false;
+        for (i, line) in content.lines().enumerate() {
+            if line.trim() == "#[cfg(test)]" {
+                in_test_module = true;
+            }
+            if in_test_module {
+                continue;
+            }
+            if line.contains(".emit_cancelled(") {
+                offenders.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+            }
+        }
+    });
+
+    assert!(
+        offenders.is_empty(),
+        "terminal Cancelled manifest/events must go through ManifestSaver::save_and_emit:\n{}",
+        offenders.join("\n")
+    );
+}
