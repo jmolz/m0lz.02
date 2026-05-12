@@ -549,6 +549,7 @@ async fn scenario_8_cancellation_during_pending_review() {
         full_diff: None,
         claude_md: None,
         layer_paths: None,
+        seam_file_contents: None,
         manifest_path: None,
         global_provider_semaphore: None,
         global_provider_capacity: None,

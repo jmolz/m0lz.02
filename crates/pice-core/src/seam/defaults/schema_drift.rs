@@ -29,8 +29,7 @@ impl SeamCheck for SchemaDriftCheck {
         let mut ddl_file: BTreeMap<String, PathBuf> = BTreeMap::new();
 
         for rel in ctx.boundary_files {
-            let full = ctx.repo_root.join(rel);
-            let Ok(content) = std::fs::read_to_string(&full) else {
+            let Ok(content) = ctx.read_file_to_string(rel) else {
                 continue;
             };
             let ext = rel
@@ -379,6 +378,7 @@ mod tests {
             boundary,
             filtered_diff: "",
             repo_root: dir.path(),
+            file_contents: None,
             boundary_files: rels,
             args: None,
         }

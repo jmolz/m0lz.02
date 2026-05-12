@@ -188,6 +188,7 @@ mod tests {
             boundary: &boundary,
             filtered_diff: "",
             repo_root: &root,
+            file_contents: None,
             boundary_files: &files,
             args: None,
         };

@@ -234,6 +234,7 @@ pub struct StackLoopInputSnapshot {
     pub full_diff: String,
     pub claude_md: String,
     pub layer_paths: BTreeMap<String, Vec<PathBuf>>,
+    pub seam_file_contents: BTreeMap<PathBuf, String>,
 }
 
 pub fn collect_stack_loop_input_snapshot(
@@ -260,12 +261,30 @@ pub fn collect_stack_loop_input_snapshot(
         &merged_seams,
         project_root,
     );
+    let seam_file_contents = collect_seam_file_contents(project_root, &layer_paths);
 
     Ok(StackLoopInputSnapshot {
         full_diff,
         claude_md,
         layer_paths,
+        seam_file_contents,
     })
+}
+
+fn collect_seam_file_contents(
+    project_root: &Path,
+    layer_paths: &BTreeMap<String, Vec<PathBuf>>,
+) -> BTreeMap<PathBuf, String> {
+    let mut contents = BTreeMap::new();
+    for rel in layer_paths.values().flatten() {
+        if contents.contains_key(rel) {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(project_root.join(rel)) {
+            contents.insert(rel.clone(), content);
+        }
+    }
+    contents
 }
 
 /// Pre-write the `ManifestStatus::Queued` manifest to disk. Must use
@@ -751,6 +770,20 @@ paths = ["src/frontend/**"]
                     .iter()
                     .any(|p| p == &PathBuf::from("src/frontend/app.ts"))),
             "seam path snapshot should include unchanged counterpart files"
+        );
+        assert_eq!(
+            snapshot
+                .seam_file_contents
+                .get(&PathBuf::from("src/backend/app.rs"))
+                .map(String::as_str),
+            Some("fn original_snapshot() {}\n")
+        );
+        assert_eq!(
+            snapshot
+                .seam_file_contents
+                .get(&PathBuf::from("src/frontend/app.ts"))
+                .map(String::as_str),
+            Some("export const old = 1;\n")
         );
     }
 

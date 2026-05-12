@@ -32,7 +32,7 @@ use tracing::{debug, info, warn};
 use super::adaptive_loop::{
     run_adaptive_passes, AdaptiveContext, AdaptiveOutcome, PassMetricsSink,
 };
-use super::{run_seams_for_layer, ProviderOrchestrator, StreamSink};
+use super::{run_seams_for_layer, ProviderOrchestrator, SeamRunRequest, StreamSink};
 use crate::events::{ManifestSaver, SaveIntent};
 use crate::prompt::layer_builder::build_layer_evaluation_prompt;
 
@@ -88,6 +88,10 @@ pub struct StackLoopsConfig<'a> {
     /// Optional dispatch-time snapshot of seam file paths. Background jobs
     /// pass this so seam checks cannot walk a later filesystem state.
     pub layer_paths: Option<&'a BTreeMap<String, Vec<PathBuf>>>,
+    /// Optional dispatch-time snapshot of seam file contents keyed by
+    /// repo-relative path. Background jobs pass this so seam checks cannot
+    /// read mutated files after dispatch.
+    pub seam_file_contents: Option<&'a BTreeMap<PathBuf, String>>,
     /// Optional dispatch-time manifest path. Background jobs pass the path
     /// derived from `JobEnv.state_dir`; foreground calls leave this unset and
     /// compute from the live environment.
@@ -474,15 +478,16 @@ pub async fn run_stack_loops_with_cancel(
                     )
                 };
                 info!(layer = %layer_name, always_run = is_always_run, "empty diff for active layer");
-                let seam_checks = run_seams_for_layer(
+                let seam_checks = run_seams_for_layer(SeamRunRequest {
                     layer_name,
-                    &active_set,
+                    active_layers: &active_set,
                     merged_seams,
-                    seam_registry_arc.as_ref(),
-                    project_root,
-                    &full_diff,
-                    &layer_paths,
-                );
+                    registry: seam_registry_arc.as_ref(),
+                    repo_root: project_root,
+                    full_diff: &full_diff,
+                    layer_paths: &layer_paths,
+                    file_contents: cfg.seam_file_contents,
+                });
                 let first_failed = seam_checks
                     .iter()
                     .find(|c| c.status == CheckStatus::Failed)
@@ -1546,6 +1551,7 @@ struct LayerInputs {
     active_set: HashSet<String>,
     merged_seams: BTreeMap<String, Vec<String>>,
     layer_paths: BTreeMap<String, Vec<PathBuf>>,
+    seam_file_contents: Option<BTreeMap<PathBuf, String>>,
     project_root: PathBuf,
     full_diff: String,
     seam_registry: Arc<Registry>,
@@ -1605,6 +1611,7 @@ fn build_per_layer_inputs(
         active_set: active_set.clone(),
         merged_seams: cfg.merged_seams.clone(),
         layer_paths: layer_paths.clone(),
+        seam_file_contents: cfg.seam_file_contents.cloned(),
         project_root: cfg.project_root.to_path_buf(),
         full_diff: full_diff.to_string(),
         seam_registry,
@@ -1697,15 +1704,16 @@ async fn evaluate_one_layer(
 
     // Seam checks run after the adaptive loop. Cheap + deterministic, no
     // cancellation plumbing needed here.
-    let seam_checks = run_seams_for_layer(
-        &inputs.layer_name,
-        &inputs.active_set,
-        &inputs.merged_seams,
-        inputs.seam_registry.as_ref(),
-        &inputs.project_root,
-        &inputs.full_diff,
-        &inputs.layer_paths,
-    );
+    let seam_checks = run_seams_for_layer(SeamRunRequest {
+        layer_name: &inputs.layer_name,
+        active_layers: &inputs.active_set,
+        merged_seams: &inputs.merged_seams,
+        registry: inputs.seam_registry.as_ref(),
+        repo_root: &inputs.project_root,
+        full_diff: &inputs.full_diff,
+        layer_paths: &inputs.layer_paths,
+        file_contents: inputs.seam_file_contents.as_ref(),
+    });
     let first_failed_seam = seam_checks
         .iter()
         .find(|c| c.status == CheckStatus::Failed)
@@ -1810,6 +1818,7 @@ async fn try_run_layer_adaptive_owned(
         full_diff: None,
         claude_md: None,
         layer_paths: None,
+        seam_file_contents: None,
         manifest_path: None,
         global_provider_semaphore,
         global_provider_capacity,
@@ -2047,6 +2056,7 @@ mod tests {
             full_diff: Some(diff),
             claude_md: Some(""),
             layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
             manifest_path: Some(manifest_path.as_path()),
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2139,6 +2149,7 @@ mod tests {
             full_diff: Some(diff),
             claude_md: Some(""),
             layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
             manifest_path: Some(manifest_path.as_path()),
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2209,6 +2220,7 @@ mod tests {
             full_diff: None,
             claude_md: None,
             layer_paths: None,
+            seam_file_contents: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2320,6 +2332,7 @@ mod tests {
             full_diff: None,
             claude_md: None,
             layer_paths: None,
+            seam_file_contents: None,
             manifest_path: Some(manifest_path.as_path()),
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2385,6 +2398,7 @@ mod tests {
             full_diff: None,
             claude_md: None,
             layer_paths: None,
+            seam_file_contents: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2585,6 +2599,7 @@ mod tests {
             full_diff: None,
             claude_md: None,
             layer_paths: None,
+            seam_file_contents: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,

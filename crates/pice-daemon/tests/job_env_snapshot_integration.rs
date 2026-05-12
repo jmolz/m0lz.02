@@ -232,6 +232,7 @@ async fn stack_loops_uses_dispatch_manifest_path_after_env_mutation() {
         full_diff: None,
         claude_md: None,
         layer_paths: None,
+        seam_file_contents: None,
         manifest_path: Some(dispatch_path.as_path()),
         global_provider_semaphore: None,
         global_provider_capacity: None,

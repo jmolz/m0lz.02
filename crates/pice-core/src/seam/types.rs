@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io;
 use std::path::{Path, PathBuf};
 
 // ─── Boundary ───────────────────────────────────────────────────────────────
@@ -185,6 +186,10 @@ pub struct SeamContext<'a> {
     pub filtered_diff: &'a str,
     /// Repository root for reads that require filesystem access.
     pub repo_root: &'a Path,
+    /// Optional dispatch-time content snapshot for `boundary_files`.
+    /// Background jobs use this so seam checks cannot observe file mutations
+    /// after dispatch; foreground runs leave it `None` and read from disk.
+    pub file_contents: Option<&'a BTreeMap<PathBuf, String>>,
     /// Concrete file set defining the boundary — the union of files touched
     /// in either `a` or `b` layers, relative to `repo_root`. Checks should
     /// treat this list as the only allowed read set.
@@ -193,6 +198,24 @@ pub struct SeamContext<'a> {
     /// Always `None` in v0.2 (no default check consumes args yet) but
     /// plumbed through so plugin crates may consume structured args.
     pub args: Option<&'a BTreeMap<String, serde_json::Value>>,
+}
+
+impl SeamContext<'_> {
+    /// Read a boundary file as UTF-8 text, honoring a dispatch-time snapshot
+    /// when one was supplied. Missing snapshot entries behave like missing
+    /// files so checks preserve their existing skip-on-read-error semantics.
+    pub fn read_file_to_string(&self, rel: &Path) -> io::Result<String> {
+        if let Some(file_contents) = self.file_contents {
+            return file_contents.get(rel).cloned().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("{} not present in seam file snapshot", rel.display()),
+                )
+            });
+        }
+
+        std::fs::read_to_string(self.repo_root.join(rel))
+    }
 }
 
 // ─── Check result ───────────────────────────────────────────────────────────
