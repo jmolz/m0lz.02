@@ -37,6 +37,7 @@ use anyhow::{Context, Result};
 use pice_core::cli::{CommandResponse, ExitJsonStatus};
 use pice_core::jobs::JobEnv;
 use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
+use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
 use pice_core::workflow::WorkflowConfig;
 use serde_json::json;
 use tokio::sync::{oneshot, OwnedSemaphorePermit};
@@ -228,6 +229,45 @@ pub fn collect_contract_contents(
     contracts
 }
 
+#[derive(Clone)]
+pub struct StackLoopInputSnapshot {
+    pub full_diff: String,
+    pub claude_md: String,
+    pub layer_paths: BTreeMap<String, Vec<PathBuf>>,
+}
+
+pub fn collect_stack_loop_input_snapshot(
+    project_root: &Path,
+    layers: &pice_core::layers::LayersConfig,
+    workflow: &WorkflowConfig,
+) -> Result<StackLoopInputSnapshot> {
+    let full_diff = get_git_diff(project_root)?;
+    let claude_md = read_claude_md(project_root)?;
+    let changed_files =
+        crate::orchestrator::stack_loops::extract_changed_files_from_diff(&full_diff);
+
+    let mut merged_seams_opt = layers.seams.clone();
+    let mut seam_violations = Vec::new();
+    pice_core::workflow::merge::merge_seams(
+        &mut merged_seams_opt,
+        workflow.seams.as_ref(),
+        &mut seam_violations,
+    );
+    let merged_seams = merged_seams_opt.unwrap_or_default();
+    let layer_paths = crate::orchestrator::stack_loops::collect_layer_paths_for_seams(
+        layers,
+        &changed_files,
+        &merged_seams,
+        project_root,
+    );
+
+    Ok(StackLoopInputSnapshot {
+        full_diff,
+        claude_md,
+        layer_paths,
+    })
+}
+
 /// Pre-write the `ManifestStatus::Queued` manifest to disk. Must use
 /// the [`NullSaver`] — Queued is a pre-work state and emits no event
 /// (the orchestrator future emits `LayerStarted` on the Queued →
@@ -259,6 +299,7 @@ pub struct OrchestratorSpawnArgs {
     pub plan_content: String,
     pub layers_config: Option<pice_core::layers::LayersConfig>,
     pub contract_contents: BTreeMap<String, String>,
+    pub stack_loop_snapshot: Option<StackLoopInputSnapshot>,
 }
 
 /// Dispatch a background `{evaluate, execute}` request.
@@ -322,6 +363,12 @@ where
         .as_ref()
         .map(|layers| collect_contract_contents(ctx.project_root(), layers))
         .unwrap_or_default();
+    let stack_loop_snapshot = layers_config
+        .as_ref()
+        .map(|layers| {
+            collect_stack_loop_input_snapshot(ctx.project_root(), layers, &workflow_snapshot)
+        })
+        .transpose()?;
     let env = Arc::new(build_job_env(
         ctx.project_root(),
         workflow_snapshot,
@@ -347,6 +394,7 @@ where
         plan_content,
         layers_config,
         contract_contents,
+        stack_loop_snapshot,
     };
     let events_for_rescue = ctx.events().clone();
     let logs_for_rescue = ctx.logs().clone();
@@ -614,6 +662,99 @@ paths = ["src/frontend/**"]
     }
 
     #[test]
+    fn collect_stack_loop_input_snapshot_freezes_diff_guidance_and_seam_paths() {
+        let project_tmp = tempfile::tempdir().unwrap();
+        let root = project_tmp.path();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::create_dir_all(root.join("src/backend")).unwrap();
+        std::fs::create_dir_all(root.join("src/frontend")).unwrap();
+        std::fs::write(root.join("src/backend/app.rs"), "fn old() {}\n").unwrap();
+        std::fs::write(root.join("src/frontend/app.ts"), "export const old = 1;\n").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        std::fs::write(
+            root.join("src/backend/app.rs"),
+            "fn original_snapshot() {}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "original guidance").unwrap();
+
+        let layers = pice_core::layers::LayersConfig {
+            layers: pice_core::layers::LayersTable {
+                order: vec!["backend".to_string(), "frontend".to_string()],
+                defs: BTreeMap::from([
+                    (
+                        "backend".to_string(),
+                        pice_core::layers::LayerDef {
+                            paths: vec!["src/backend/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                    (
+                        "frontend".to_string(),
+                        pice_core::layers::LayerDef {
+                            paths: vec!["src/frontend/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                ]),
+            },
+            seams: Some(BTreeMap::from([(
+                "backend↔frontend".to_string(),
+                vec!["config_mismatch".to_string()],
+            )])),
+            external_contracts: None,
+            stacks: None,
+        };
+        let workflow = pice_core::workflow::loader::embedded_defaults();
+
+        let snapshot = collect_stack_loop_input_snapshot(root, &layers, &workflow).unwrap();
+        std::fs::write(root.join("src/backend/app.rs"), "fn late_mutation() {}\n").unwrap();
+        std::fs::write(root.join("CLAUDE.md"), "late guidance").unwrap();
+
+        assert!(snapshot.full_diff.contains("original_snapshot"));
+        assert!(!snapshot.full_diff.contains("late_mutation"));
+        assert_eq!(snapshot.claude_md, "original guidance");
+        assert!(
+            snapshot
+                .layer_paths
+                .get("frontend")
+                .is_some_and(|paths| paths
+                    .iter()
+                    .any(|p| p == &PathBuf::from("src/frontend/app.ts"))),
+            "seam path snapshot should include unchanged counterpart files"
+        );
+    }
+
+    #[test]
     fn background_dispatched_response_shape() {
         let resp = background_dispatched_response("feat-y", "r-abc");
         match resp {
@@ -682,6 +823,7 @@ paths = ["src/frontend/**"]
             plan_content: "# Plan\n".to_string(),
             layers_config: None,
             contract_contents: BTreeMap::new(),
+            stack_loop_snapshot: None,
         };
         let manifest = transition_queued_to_in_progress(&args).unwrap();
         assert_eq!(manifest.overall_status, ManifestStatus::InProgress);
@@ -745,6 +887,7 @@ paths = ["src/**"]
                         .map(|layers| layers.layers.order.clone())
                         .unwrap_or_default(),
                     args.contract_contents.get("backend").cloned(),
+                    args.stack_loop_snapshot.is_some(),
                 );
                 let _ = obs_tx.send(observed);
                 Ok(VerificationManifest::new(
@@ -772,7 +915,7 @@ paths = ["web/**"]
         std::fs::write(contracts_dir.join("backend.toml"), "contract-mutated").unwrap();
         drop(held);
 
-        let (plan_content, layer_order, contract_content) =
+        let (plan_content, layer_order, contract_content, has_stack_snapshot) =
             tokio::time::timeout(std::time::Duration::from_secs(2), obs_rx)
                 .await
                 .expect("worker observed snapshots")
@@ -780,6 +923,7 @@ paths = ["web/**"]
         assert_eq!(plan_content, "# Original\n");
         assert_eq!(layer_order, vec!["backend".to_string()]);
         assert_eq!(contract_content.as_deref(), Some("contract-original"));
+        assert!(has_stack_snapshot);
     }
 
     #[tokio::test]
@@ -814,6 +958,7 @@ paths = ["web/**"]
             plan_content: "# Plan\n".to_string(),
             layers_config: None,
             contract_contents: BTreeMap::new(),
+            stack_loop_snapshot: None,
         };
 
         let manifest =

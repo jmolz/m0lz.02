@@ -714,6 +714,9 @@ pub async fn run(
             workflow: &workflow,
             merged_seams: &merged_seams,
             contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
             manifest_path: None,
             global_provider_semaphore: Some(ctx.jobs().provider_semaphore()),
             global_provider_capacity: Some(ctx.jobs().provider_capacity()),
@@ -1815,6 +1818,10 @@ async fn run_evaluate_orchestrator(
     }
     let merged_seams: std::collections::BTreeMap<String, Vec<String>> =
         merged_seams_opt.unwrap_or_default();
+    let stack_snapshot = args
+        .stack_loop_snapshot
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("background evaluation missing stack input snapshot"))?;
 
     // Invoke run_stack_loops_with_cancel with owned config. The saver
     // is the daemon's `EventEmittingSaver` so subscribers observe the
@@ -1830,6 +1837,9 @@ async fn run_evaluate_orchestrator(
         workflow: workflow_snapshot,
         merged_seams: &merged_seams,
         contract_contents: Some(&args.contract_contents),
+        full_diff: Some(stack_snapshot.full_diff.as_str()),
+        claude_md: Some(stack_snapshot.claude_md.as_str()),
+        layer_paths: Some(&stack_snapshot.layer_paths),
         manifest_path: Some(args.manifest_path.as_path()),
         global_provider_semaphore: Some(provider_semaphore),
         global_provider_capacity: Some(provider_capacity),
@@ -2065,6 +2075,7 @@ paths = ["Dockerfile"]
             plan_content: std::fs::read_to_string(&plan_path).unwrap(),
             layers_config: Some(layers_snapshot),
             contract_contents: BTreeMap::new(),
+            stack_loop_snapshot: None,
         };
 
         let manifest = run_evaluate_orchestrator(

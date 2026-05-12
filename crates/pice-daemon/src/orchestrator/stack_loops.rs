@@ -80,6 +80,14 @@ pub struct StackLoopsConfig<'a> {
     /// Background jobs pass this so queued work cannot evaluate different
     /// contract text if project files change before provider work starts.
     pub contract_contents: Option<&'a BTreeMap<String, String>>,
+    /// Optional dispatch-time snapshot of the git diff. Background jobs pass
+    /// this so queued work cannot evaluate a later worktree state.
+    pub full_diff: Option<&'a str>,
+    /// Optional dispatch-time snapshot of CLAUDE.md guidance.
+    pub claude_md: Option<&'a str>,
+    /// Optional dispatch-time snapshot of seam file paths. Background jobs
+    /// pass this so seam checks cannot walk a later filesystem state.
+    pub layer_paths: Option<&'a BTreeMap<String, Vec<PathBuf>>>,
     /// Optional dispatch-time manifest path. Background jobs pass the path
     /// derived from `JobEnv.state_dir`; foreground calls leave this unset and
     /// compute from the live environment.
@@ -111,6 +119,27 @@ pub struct StackLoopsConfig<'a> {
 #[inline]
 fn no_seam_checks() -> Vec<pice_core::layers::manifest::SeamCheckResult> {
     Vec::new()
+}
+
+fn in_progress_layer_result(layer_name: &str) -> LayerResult {
+    LayerResult {
+        name: layer_name.to_string(),
+        status: LayerStatus::InProgress,
+        passes: Vec::new(),
+        seam_checks: no_seam_checks(),
+        halted_by: None,
+        final_confidence: None,
+        total_cost_usd: None,
+        escalation_events: None,
+    }
+}
+
+fn replace_or_add_layer_result(manifest: &mut VerificationManifest, result: LayerResult) {
+    if let Some(existing) = manifest.layers.iter_mut().find(|l| l.name == result.name) {
+        *existing = result;
+    } else {
+        manifest.add_layer_result(result);
+    }
 }
 
 /// Run the Stack Loops evaluation pipeline.
@@ -159,9 +188,17 @@ pub async fn run_stack_loops_with_cancel(
         .unwrap_or("unknown")
         .to_string();
 
-    // Get full diff and CLAUDE.md
-    let full_diff = get_git_diff(project_root)?;
-    let claude_md = read_claude_md(project_root)?;
+    // Get full diff and CLAUDE.md. Background jobs pass dispatch-time
+    // snapshots so queued work cannot evaluate a later worktree/guidance
+    // state after waiting on global provider capacity.
+    let full_diff = match cfg.full_diff {
+        Some(diff) => diff.to_string(),
+        None => get_git_diff(project_root)?,
+    };
+    let claude_md = match cfg.claude_md {
+        Some(content) => content.to_string(),
+        None => read_claude_md(project_root)?,
+    };
 
     // Extract changed file paths from the diff
     let changed_files = extract_changed_files_from_diff(&full_diff);
@@ -195,34 +232,9 @@ pub async fn run_stack_loops_with_cancel(
     // We only walk the disk for layers referenced by `merged_seams` (either
     // side of any declared boundary). All-layer scans would inflate cost
     // on repos where most layers aren't seam-connected.
-    let seam_layer_names: HashSet<String> = merged_seams
-        .keys()
-        .filter_map(|raw| LayerBoundary::parse(raw).ok())
-        .flat_map(|b| [b.a, b.b])
-        .collect();
-
-    let mut layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    for file in &changed_files {
-        for layer in pice_core::layers::tag_file_to_layers(config, file) {
-            layer_paths
-                .entry(layer)
-                .or_default()
-                .push(PathBuf::from(file));
-        }
-    }
-    for layer_name in &seam_layer_names {
-        let Some(def) = config.layers.defs.get(layer_name) else {
-            continue;
-        };
-        let scanned = scan_files_by_globs(project_root, &def.paths);
-        let entry = layer_paths.entry(layer_name.clone()).or_default();
-        let mut seen: HashSet<PathBuf> = entry.iter().cloned().collect();
-        for p in scanned {
-            if seen.insert(p.clone()) {
-                entry.push(p);
-            }
-        }
-    }
+    let layer_paths = cfg.layer_paths.cloned().unwrap_or_else(|| {
+        collect_layer_paths_for_seams(config, &changed_files, merged_seams, project_root)
+    });
 
     // Invariant: every path in layer_paths must be repo-relative (no
     // absolute prefixes). Both sources — changed-file diff extraction and
@@ -529,9 +541,13 @@ pub async fn run_stack_loops_with_cancel(
         // actually enters active work. The partition above filters out
         // inactive / dependency-cascade Skipped layers first, so background
         // subscribers never see false starts for configured-but-inactive
-        // layers.
+        // layers. Each start event is backed by a durable InProgress layer
+        // entry so any subsequent snapshot or crash reconciliation can
+        // observe the same layer state.
         if let Some(ref path) = manifest_path {
             for layer_name in &started_layers {
+                replace_or_add_layer_result(&mut manifest, in_progress_layer_result(layer_name));
+                manifest.compute_overall_status();
                 if let Err(e) = cfg.saver.save_and_emit(
                     &manifest,
                     path,
@@ -720,7 +736,7 @@ pub async fn run_stack_loops_with_cancel(
             }
 
             let completed_layer_name = layer_result.name.clone();
-            manifest.add_layer_result(layer_result);
+            replace_or_add_layer_result(&mut manifest, layer_result);
 
             if let Some(ref path) = manifest_path {
                 if let Err(e) = cfg.saver.save_and_emit(
@@ -746,6 +762,28 @@ pub async fn run_stack_loops_with_cancel(
         // cohort if the token fired.
         if cancel.is_cancelled() {
             warn!("cancellation observed between cohorts; aborting remaining cohorts");
+            for remaining in dag.cohorts.iter().skip(cohort_idx + 1) {
+                for layer_name in remaining {
+                    if !active_set.contains(layer_name)
+                        || manifest.layers.iter().any(|l| &l.name == layer_name)
+                    {
+                        continue;
+                    }
+                    replace_or_add_layer_result(
+                        &mut manifest,
+                        LayerResult {
+                            name: layer_name.clone(),
+                            status: LayerStatus::Failed,
+                            passes: Vec::new(),
+                            seam_checks: no_seam_checks(),
+                            halted_by: Some(CancelledReason::InFlight.as_halted_by()),
+                            final_confidence: None,
+                            total_cost_usd: None,
+                            escalation_events: None,
+                        },
+                    );
+                }
+            }
             break;
         }
 
@@ -1769,6 +1807,9 @@ async fn try_run_layer_adaptive_owned(
         workflow: &workflow,
         merged_seams: &dummy_seams,
         contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
         manifest_path: None,
         global_provider_semaphore,
         global_provider_capacity,
@@ -1790,7 +1831,7 @@ async fn try_run_layer_adaptive_owned(
 /// Parses `diff --git a/... b/...` headers to extract the `b/` path
 /// (the new file path). For deleted files (`+++ /dev/null`), uses the
 /// `a/` path.
-fn extract_changed_files_from_diff(diff: &str) -> Vec<String> {
+pub(crate) fn extract_changed_files_from_diff(diff: &str) -> Vec<String> {
     let mut files = Vec::new();
 
     for line in diff.lines() {
@@ -1804,6 +1845,43 @@ fn extract_changed_files_from_diff(diff: &str) -> Vec<String> {
     }
 
     files
+}
+
+pub(crate) fn collect_layer_paths_for_seams(
+    config: &LayersConfig,
+    changed_files: &[String],
+    merged_seams: &BTreeMap<String, Vec<String>>,
+    project_root: &Path,
+) -> BTreeMap<String, Vec<PathBuf>> {
+    let seam_layer_names: HashSet<String> = merged_seams
+        .keys()
+        .filter_map(|raw| LayerBoundary::parse(raw).ok())
+        .flat_map(|b| [b.a, b.b])
+        .collect();
+
+    let mut layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for file in changed_files {
+        for layer in pice_core::layers::tag_file_to_layers(config, file) {
+            layer_paths
+                .entry(layer)
+                .or_default()
+                .push(PathBuf::from(file));
+        }
+    }
+    for layer_name in &seam_layer_names {
+        let Some(def) = config.layers.defs.get(layer_name) else {
+            continue;
+        };
+        let scanned = scan_files_by_globs(project_root, &def.paths);
+        let entry = layer_paths.entry(layer_name.clone()).or_default();
+        let mut seen: HashSet<PathBuf> = entry.iter().cloned().collect();
+        for p in scanned {
+            if seen.insert(p.clone()) {
+                entry.push(p);
+            }
+        }
+    }
+    layer_paths
 }
 
 #[cfg(test)]
@@ -1913,6 +1991,175 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_between_cohorts_marks_remaining_active_layers_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        let manifest_path = dir.path().join("manifest.json");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec!["setup".to_string(), "backend".to_string()],
+                defs: BTreeMap::from([
+                    (
+                        "setup".to_string(),
+                        LayerDef {
+                            paths: vec!["setup/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                    (
+                        "backend".to_string(),
+                        LayerDef {
+                            paths: vec!["src/backend/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: vec!["setup".to_string()],
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                ]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let diff = "diff --git a/src/backend/app.rs b/src/backend/app.rs\n+++ b/src/backend/app.rs\n+fn changed() {}\n";
+        let saver = crate::events::NullSaver;
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test-provider",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(diff),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        let manifest = run_stack_loops_with_cancel(&cfg, &NullSink, false, pass_sink, cancel)
+            .await
+            .unwrap();
+        assert_eq!(manifest.overall_status, ManifestStatus::Failed);
+        let backend = manifest
+            .layers
+            .iter()
+            .find(|layer| layer.name == "backend")
+            .expect("remaining active backend layer should be represented");
+        assert_eq!(backend.status, LayerStatus::Failed);
+        assert!(
+            backend
+                .halted_by
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("cancelled:")),
+            "remaining active layer should be cancelled, got {:?}",
+            backend.halted_by
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_started_checkpoint_persists_in_progress_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec!["backend".to_string()],
+                defs: BTreeMap::from([(
+                    "backend".to_string(),
+                    LayerDef {
+                        paths: vec!["src/backend/**".to_string()],
+                        always_run: false,
+                        contract: None,
+                        depends_on: Vec::new(),
+                        layer_type: None,
+                        environment_variants: None,
+                    },
+                )]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let diff = "diff --git a/src/backend/app.rs b/src/backend/app.rs\n+++ b/src/backend/app.rs\n+fn changed() {}\n";
+        let bus = crate::events::EventBus::new();
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_path = manifest_path.clone();
+        let hook_snapshots = std::sync::Arc::clone(&snapshots);
+        let after_save = move || {
+            if let Ok(manifest) = VerificationManifest::load(&hook_path) {
+                let statuses: Vec<(String, LayerStatus)> = manifest
+                    .layers
+                    .iter()
+                    .map(|layer| (layer.name.clone(), layer.status.clone()))
+                    .collect();
+                hook_snapshots.lock().unwrap().push(statuses);
+            }
+        };
+        let hooks = crate::events::EventEmittingSaverHooks {
+            before_save: None,
+            after_save_before_emit: Some(&after_save),
+        };
+        let saver = crate::events::EventEmittingSaver::new_with_hooks(&bus, hooks);
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "not-a-real-provider-kjsdfhgsd",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(diff),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .unwrap();
+        let snapshots = snapshots.lock().unwrap();
+        assert!(
+            snapshots.iter().any(|statuses| statuses
+                .iter()
+                .any(|(name, status)| name == "backend" && *status == LayerStatus::InProgress)),
+            "LayerStarted save should persist backend as InProgress first, got {snapshots:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn run_stack_loops_with_git_repo() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1959,6 +2206,9 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2067,6 +2317,9 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
             manifest_path: Some(manifest_path.as_path()),
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2129,6 +2382,9 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,
@@ -2326,6 +2582,9 @@ mod tests {
             workflow: &workflow,
             merged_seams: &seams,
             contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
             manifest_path: None,
             global_provider_semaphore: None,
             global_provider_capacity: None,

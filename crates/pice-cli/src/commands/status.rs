@@ -299,16 +299,18 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
                     }
                 }
                 if let Some((_, code)) = terminal_from_event(&payload) {
-                    if stream_json {
-                        emit_stream_terminal(code)?;
-                    } else {
-                        eprintln!("feature {} terminal — closing stream", payload.feature_id);
+                    if should_close_follow_on_terminal(feature_id_filter.as_deref()) {
+                        if stream_json {
+                            emit_stream_terminal(code)?;
+                        } else {
+                            eprintln!("feature {} terminal — closing stream", payload.feature_id);
+                        }
+                        stream.close().await;
+                        if code != 0 {
+                            std::process::exit(code);
+                        }
+                        return Ok(());
                     }
-                    stream.close().await;
-                    if code != 0 {
-                        std::process::exit(code);
-                    }
-                    return Ok(());
                 }
             }
             None => {
@@ -714,6 +716,10 @@ fn terminal_from_event(payload: &ManifestEventPayload) -> Option<(String, i32)> 
     }
 }
 
+fn should_close_follow_on_terminal(feature_id_filter: Option<&str>) -> bool {
+    feature_id_filter.is_some()
+}
+
 // ─── Phase 7 Criterion 20: inline-mode follow/wait behavior ─────────────────
 
 /// `pice status --follow` under `PICE_DAEMON_INLINE=1` — graceful
@@ -925,6 +931,12 @@ mod tests {
             };
             assert!(terminal_from_event(&payload).is_none(), "{ev:?}");
         }
+    }
+
+    #[test]
+    fn wildcard_follow_does_not_close_on_feature_terminal() {
+        assert!(!should_close_follow_on_terminal(None));
+        assert!(should_close_follow_on_terminal(Some("feature-a")));
     }
 
     #[test]
