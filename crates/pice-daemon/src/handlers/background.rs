@@ -11,8 +11,10 @@
 //! 5. Build a [`JobEnv`] snapshot from [`DaemonContext`] state.
 //! 6. Hand an owned closure to [`FeatureJobManager::spawn_after_signal`],
 //!    using the manager's DashMap entry as the single atomic admission point.
-//! 7. After admission succeeds, write `ManifestStatus::Queued` via
-//!    [`NullSaver`] and release the spawned future's start gate. Queued
+//! 7. After admission succeeds, acquire the same per-manifest process +
+//!    fs2 locks as foreground evaluation, write `ManifestStatus::Queued`
+//!    via [`NullSaver`], then transfer those locks into the spawned
+//!    future before releasing its start gate. Queued
 //!    is a pre-work state and MUST NOT emit a `LayerStarted` event
 //!    (Stack Loops emits `LayerStarted` only after it computes the active
 //!    DAG for the spawned future).
@@ -29,9 +31,10 @@
 //! first `global_sem.acquire_owned().await`.
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use anyhow::{Context, Result};
 use pice_core::cli::{CommandResponse, ExitJsonStatus};
@@ -40,7 +43,7 @@ use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
 use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
 use pice_core::workflow::WorkflowConfig;
 use serde_json::json;
-use tokio::sync::{oneshot, OwnedSemaphorePermit};
+use tokio::sync::{oneshot, OwnedMutexGuard, OwnedSemaphorePermit};
 use tokio_util::sync::CancellationToken;
 
 use crate::events::{ManifestSaver, NullSaver, SaveIntent};
@@ -321,6 +324,55 @@ pub struct OrchestratorSpawnArgs {
     pub stack_loop_snapshot: Option<StackLoopInputSnapshot>,
 }
 
+/// Guards that make a background feature the single writer for its
+/// manifest until the spawned worker finishes.
+///
+/// Foreground evaluation takes both locks directly in `handlers::evaluate`.
+/// Background dispatch must take the same locks before the Queued write and
+/// keep them alive across the detached future; otherwise foreground and
+/// background runs of the same plan can race on the manifest source of truth.
+struct BackgroundManifestLocks {
+    _process_guard: OwnedMutexGuard<()>,
+    _file_guard: File,
+}
+
+async fn acquire_background_manifest_locks(
+    ctx: &DaemonContext,
+    feature_id: &str,
+    manifest_path: &Path,
+) -> Result<BackgroundManifestLocks> {
+    let project_namespace =
+        pice_core::layers::manifest::manifest_project_namespace(ctx.project_root().as_path());
+    let process_lock = ctx.manifest_lock_for(&project_namespace, feature_id);
+    let process_guard = process_lock.lock_owned().await;
+
+    let manifest_path = manifest_path.to_path_buf();
+    let file_guard = tokio::task::spawn_blocking(move || {
+        use fs2::FileExt;
+        use std::fs::OpenOptions;
+
+        if let Some(parent) = manifest_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let lock_path = manifest_path.with_extension("manifest.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+        file.lock_exclusive()?;
+        anyhow::Ok(file)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("spawn_blocking joined with error: {e}"))??;
+
+    Ok(BackgroundManifestLocks {
+        _process_guard: process_guard,
+        _file_guard: file_guard,
+    })
+}
+
 /// Dispatch a background `{evaluate, execute}` request.
 ///
 /// The caller supplies a `future_builder` that owns all runtime state
@@ -402,6 +454,8 @@ where
         &env.state_dir,
     );
     let (start_tx, start_rx) = oneshot::channel::<()>();
+    let manifest_locks_slot: Arc<StdMutex<Option<BackgroundManifestLocks>>> =
+        Arc::new(StdMutex::new(None));
 
     // Step 7: hand the owned builder to the job manager.
     let spawn_args = OrchestratorSpawnArgs {
@@ -417,6 +471,7 @@ where
     };
     let events_for_rescue = ctx.events().clone();
     let logs_for_rescue = ctx.logs().clone();
+    let manifest_locks_for_task = Arc::clone(&manifest_locks_slot);
     let spawn_result = ctx.jobs().spawn_after_signal(
         feature_id.clone(),
         run_id.clone(),
@@ -426,7 +481,18 @@ where
             let rescue_args = spawn_args.clone();
             let events_for_rescue = events_for_rescue.clone();
             let logs_for_rescue = logs_for_rescue.clone();
+            let manifest_locks_for_task = Arc::clone(&manifest_locks_for_task);
             async move {
+                let _manifest_locks = {
+                    let mut slot = manifest_locks_for_task
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    slot.take().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "background manifest locks were not installed before worker start"
+                        )
+                    })?
+                };
                 match future_builder(spawn_args, permit, cancel).await {
                     Ok(manifest) => Ok(manifest),
                     Err(err) => {
@@ -445,6 +511,15 @@ where
     match spawn_result {
         Ok(_actual_run_id) => {
             ctx.logs().reset_feature(&feature_id).await;
+            let manifest_locks =
+                match acquire_background_manifest_locks(ctx, &feature_id, &manifest_path).await {
+                    Ok(locks) => locks,
+                    Err(e) => {
+                        ctx.jobs().cancel(&feature_id);
+                        drop(start_tx);
+                        return Err(e);
+                    }
+                };
             if let Err(e) =
                 write_queued_manifest(&feature_id, &run_id, ctx.project_root(), &manifest_path)
             {
@@ -452,9 +527,13 @@ where
                 drop(start_tx);
                 return Err(e);
             }
-            start_tx
-                .send(())
-                .map_err(|_| anyhow::anyhow!("background worker exited before Queued release"))?;
+            {
+                let mut slot = manifest_locks_slot
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                *slot = Some(manifest_locks);
+            }
+            ctx.defer_background_start(&feature_id, &run_id, start_tx);
             Ok(background_dispatched_response(&feature_id, &run_id))
         }
         Err(SpawnError {
@@ -522,8 +601,8 @@ async fn fail_closed_after_background_error(
 ///
 /// Loads the just-written Queued manifest from disk, flips
 /// `overall_status` to `InProgress`, stamps `run_id`, and saves via an
-/// [`EventEmittingSaver`] so subscribers see the background task start
-/// after the durable transition lands on disk. This transition deliberately
+/// [`NullSaver`] so the durable transition lands on disk without emitting a
+/// layer event. This transition deliberately
 /// does NOT emit a `LayerStarted` event: Stack Loops owns those events after
 /// it computes the active DAG, so subscribers never see a false start for an
 /// inactive first configured layer.
@@ -608,6 +687,16 @@ mod tests {
                 assert_eq!(value["run_id"].as_str().unwrap(), "r-1");
             }
             other => panic!("expected ExitJson, got {other:?}"),
+        }
+    }
+
+    fn json_response_run_id(resp: &CommandResponse) -> String {
+        match resp {
+            CommandResponse::Json { value } => value["run_id"]
+                .as_str()
+                .expect("response has run_id")
+                .to_string(),
+            other => panic!("expected Json response, got {other:?}"),
         }
     }
 
@@ -932,6 +1021,7 @@ paths = ["src/**"]
         .await
         .expect("dispatch");
         assert!(matches!(resp, CommandResponse::Json { .. }));
+        let run_id = json_response_run_id(&resp);
 
         std::fs::write(&plan_path, "# Mutated\n").unwrap();
         std::fs::write(
@@ -947,6 +1037,7 @@ paths = ["web/**"]
         .unwrap();
         std::fs::write(contracts_dir.join("backend.toml"), "contract-mutated").unwrap();
         drop(held);
+        assert!(ctx.release_background_start("snapshot-feature", &run_id));
 
         let (plan_content, layer_order, contract_content, has_stack_snapshot) =
             tokio::time::timeout(std::time::Duration::from_secs(2), obs_rx)
@@ -957,6 +1048,225 @@ paths = ["web/**"]
         assert_eq!(layer_order, vec!["backend".to_string()]);
         assert_eq!(contract_content.as_deref(), Some("contract-original"));
         assert!(has_stack_snapshot);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_background_defers_worker_start_until_response_release() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::new(state_tmp.path());
+        let project_tmp = tempfile::tempdir().unwrap();
+        let project_root = project_tmp.path();
+        let pice_dir = project_root.join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        let plan_path = project_root.join("deferred.md");
+        std::fs::write(&plan_path, "# Plan\n").unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#,
+        )
+        .unwrap();
+        let layers_snapshot = pice_core::layers::LayersConfig::load(&pice_dir.join("layers.toml"))
+            .expect("layers load");
+        let ctx = DaemonContext::new("tok".to_string(), project_root.to_path_buf());
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::channel(1);
+
+        let resp = dispatch_background(
+            "deferred-feature".to_string(),
+            true,
+            &plan_path,
+            &ctx,
+            pice_core::workflow::loader::embedded_defaults(),
+            Some(layers_snapshot),
+            move |args, _permit, _cancel| async move {
+                started_tx.send(args.run_id.clone()).await.unwrap();
+                Ok(VerificationManifest::new(
+                    &args.feature_id,
+                    &args.env.project_root,
+                ))
+            },
+        )
+        .await
+        .expect("dispatch");
+        let run_id = json_response_run_id(&resp);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), started_rx.recv())
+                .await
+                .is_err(),
+            "worker must not start before the dispatch response has been released"
+        );
+        assert_eq!(ctx.deferred_background_start_count(), 1);
+        assert!(ctx.release_background_start("deferred-feature", &run_id));
+        let observed_run =
+            tokio::time::timeout(std::time::Duration::from_secs(2), started_rx.recv())
+                .await
+                .expect("worker starts after release")
+                .expect("started message");
+        assert_eq!(observed_run, run_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_background_waits_for_manifest_lock_before_queued_write() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::new(state_tmp.path());
+        let project_tmp = tempfile::tempdir().unwrap();
+        let project_root = project_tmp.path();
+        let pice_dir = project_root.join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        let plan_path = project_root.join("locked.md");
+        std::fs::write(&plan_path, "# Plan\n").unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#,
+        )
+        .unwrap();
+        let layers_snapshot = pice_core::layers::LayersConfig::load(&pice_dir.join("layers.toml"))
+            .expect("layers load");
+        let ctx = Arc::new(DaemonContext::new(
+            "tok".to_string(),
+            project_root.to_path_buf(),
+        ));
+        let feature_id = "locked-feature".to_string();
+        let namespace = pice_core::layers::manifest::manifest_project_namespace(project_root);
+        let held_lock = ctx
+            .manifest_lock_for(&namespace, &feature_id)
+            .lock_owned()
+            .await;
+        let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+            &feature_id,
+            project_root,
+            state_tmp.path(),
+        );
+
+        let ctx_for_task = Arc::clone(&ctx);
+        let plan_for_task = plan_path.clone();
+        let feature_for_task = feature_id.clone();
+        let dispatch_task = tokio::spawn(async move {
+            dispatch_background(
+                feature_for_task,
+                true,
+                &plan_for_task,
+                ctx_for_task.as_ref(),
+                pice_core::workflow::loader::embedded_defaults(),
+                Some(layers_snapshot),
+                move |args, _permit, _cancel| async move {
+                    Ok(VerificationManifest::new(
+                        &args.feature_id,
+                        &args.env.project_root,
+                    ))
+                },
+            )
+            .await
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !manifest_path.exists(),
+            "background dispatch must not write Queued while the manifest lock is held"
+        );
+        assert!(
+            !dispatch_task.is_finished(),
+            "dispatch should wait for the same manifest lock used by foreground evaluate"
+        );
+
+        drop(held_lock);
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch_task)
+            .await
+            .expect("dispatch unblocked after manifest lock release")
+            .expect("dispatch task joined")
+            .expect("dispatch succeeded");
+        assert!(matches!(resp, CommandResponse::Json { .. }));
+        let run_id = json_response_run_id(&resp);
+        assert!(
+            manifest_path.exists(),
+            "Queued manifest should be written after the lock is released"
+        );
+        assert!(ctx.release_background_start(&feature_id, &run_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_background_holds_manifest_lock_until_worker_finishes() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::new(state_tmp.path());
+        let project_tmp = tempfile::tempdir().unwrap();
+        let project_root = project_tmp.path();
+        let pice_dir = project_root.join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        let plan_path = project_root.join("held.md");
+        std::fs::write(&plan_path, "# Plan\n").unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#,
+        )
+        .unwrap();
+        let layers_snapshot = pice_core::layers::LayersConfig::load(&pice_dir.join("layers.toml"))
+            .expect("layers load");
+        let ctx = DaemonContext::new("tok".to_string(), project_root.to_path_buf());
+        let feature_id = "held-feature".to_string();
+        let namespace = pice_core::layers::manifest::manifest_project_namespace(project_root);
+        let lock = ctx.manifest_lock_for(&namespace, &feature_id);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+
+        let resp = dispatch_background(
+            feature_id.clone(),
+            true,
+            &plan_path,
+            &ctx,
+            pice_core::workflow::loader::embedded_defaults(),
+            Some(layers_snapshot),
+            move |args, _permit, _cancel| async move {
+                let _ = started_tx.send(());
+                finish_rx.await.expect("test releases background worker");
+                Ok(VerificationManifest::new(
+                    &args.feature_id,
+                    &args.env.project_root,
+                ))
+            },
+        )
+        .await
+        .expect("dispatch");
+        assert!(matches!(resp, CommandResponse::Json { .. }));
+        let run_id = json_response_run_id(&resp);
+        assert!(ctx.release_background_start(&feature_id, &run_id));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+            .await
+            .expect("worker started")
+            .expect("started sender");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                lock.clone().lock_owned()
+            )
+            .await
+            .is_err(),
+            "background worker must keep the manifest lock for its full lifecycle"
+        );
+
+        finish_tx.send(()).expect("release worker");
+        let _guard_after =
+            tokio::time::timeout(std::time::Duration::from_secs(2), lock.clone().lock_owned())
+                .await
+                .expect("manifest lock released after worker finish");
     }
 
     #[tokio::test]

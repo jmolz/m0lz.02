@@ -31,7 +31,7 @@ use pice_core::cli::CommandRequest;
 use pice_core::config::PiceConfig;
 use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
 use serde_json::json;
-use tokio::sync::{Mutex as TokioMutex, Notify};
+use tokio::sync::{oneshot, Mutex as TokioMutex, Notify};
 
 use super::auth;
 use crate::events::EventBus;
@@ -53,6 +53,7 @@ use crate::orchestrator::NullSink;
 /// of the Arc can live in both the map (for future acquirers) and the
 /// current holder (so it stays alive for the evaluation's lifetime).
 pub type ManifestLockMap = Arc<StdMutex<HashMap<(String, String), Arc<TokioMutex<()>>>>>;
+type DeferredBackgroundStartMap = Arc<StdMutex<HashMap<(String, String), oneshot::Sender<()>>>>;
 
 /// JSON-RPC error code for "method not found" (standard JSON-RPC 2.0).
 const METHOD_NOT_FOUND_CODE: i32 = -32601;
@@ -117,6 +118,15 @@ pub struct DaemonContext {
     /// `VerificationManifest::save()` + `~/.pice/state/.../manifest.json`.
     manifest_locks: ManifestLockMap,
 
+    /// Background dispatch start gates keyed by `(feature_id, run_id)`.
+    ///
+    /// `dispatch_background` registers a spawned worker here after it writes
+    /// the Queued manifest. The connection handler releases the gate only
+    /// after it has attempted to write the background-dispatched RPC response,
+    /// preserving the hard ordering that dispatch returns before provider
+    /// work can begin.
+    deferred_background_starts: DeferredBackgroundStartMap,
+
     /// Phase 7 Task 4: manifest-event pub/sub bus. The orchestrator
     /// publishes `ManifestEvent`s via the typed `emit_*` helpers; the
     /// `manifest/subscribe` router handler (Task 6) acquires receivers
@@ -162,6 +172,7 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
             events,
             logs: LogStore::new(),
             jobs,
@@ -192,6 +203,7 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
             events,
             logs: LogStore::new(),
             jobs,
@@ -302,6 +314,7 @@ impl DaemonContext {
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config: PiceConfig::default(),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
             events,
             logs: LogStore::new(),
             jobs,
@@ -327,6 +340,7 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
             events,
             logs: LogStore::new(),
             jobs,
@@ -356,6 +370,75 @@ impl DaemonContext {
         map.entry(key)
             .or_insert_with(|| Arc::new(TokioMutex::new(())))
             .clone()
+    }
+
+    /// Register a background worker start gate that must be released only
+    /// after the daemon has attempted to write the dispatch response.
+    pub fn defer_background_start(
+        &self,
+        feature_id: &str,
+        run_id: &str,
+        start_tx: oneshot::Sender<()>,
+    ) {
+        let mut map = self
+            .deferred_background_starts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        map.insert((feature_id.to_string(), run_id.to_string()), start_tx);
+    }
+
+    /// Release a deferred background worker start gate.
+    ///
+    /// Returns `true` when a matching gate was found. Sending may still fail
+    /// if the worker exited before release; that is not actionable here.
+    pub fn release_background_start(&self, feature_id: &str, run_id: &str) -> bool {
+        let tx = {
+            let mut map = self
+                .deferred_background_starts
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            map.remove(&(feature_id.to_string(), run_id.to_string()))
+        };
+        let Some(tx) = tx else {
+            return false;
+        };
+        let _ = tx.send(());
+        true
+    }
+
+    /// If `resp` is a background-dispatched command response, release the
+    /// corresponding worker start gate. Called by connection handlers after
+    /// the response write completes or fails; on write failure there is no
+    /// caller left to observe the response, but the detached job must still
+    /// outlive the originating RPC connection.
+    pub fn release_background_start_from_response(&self, resp: &DaemonResponse) -> bool {
+        let Some(result) = resp.result.as_ref() else {
+            return false;
+        };
+        if result.get("type").and_then(|v| v.as_str()) != Some("json") {
+            return false;
+        }
+        let Some(value) = result.get("value") else {
+            return false;
+        };
+        if value.get("status").and_then(|v| v.as_str()) != Some("background-dispatched") {
+            return false;
+        }
+        let Some(feature_id) = value.get("feature_id").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        let Some(run_id) = value.get("run_id").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        self.release_background_start(feature_id, run_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deferred_background_start_count(&self) -> usize {
+        self.deferred_background_starts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
     }
 }
 

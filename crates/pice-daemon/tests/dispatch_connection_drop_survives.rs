@@ -433,8 +433,10 @@ fn spawn_accept_loop(
                                 }
                                 let resp = pice_daemon::server::router::route(req, &ctx).await;
                                 if conn.write_message(&resp).await.is_err() {
+                                    ctx.release_background_start_from_response(&resp);
                                     break;
                                 }
+                                ctx.release_background_start_from_response(&resp);
                             }
                         });
                     }

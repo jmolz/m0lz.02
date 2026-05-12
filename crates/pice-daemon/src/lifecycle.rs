@@ -209,6 +209,7 @@ async fn handle_connection_unix(
         let is_shutdown = req.method == methods::DAEMON_SHUTDOWN;
         let resp = crate::server::router::route(req, &ctx).await;
         let write_result = conn.write_message(&resp).await;
+        ctx.release_background_start_from_response(&resp);
         if is_shutdown && ctx.is_shutdown_requested() {
             ctx.mark_shutdown_response_observed();
         }
@@ -316,6 +317,7 @@ async fn handle_connection_windows(
         let is_shutdown = req.method == methods::DAEMON_SHUTDOWN;
         let resp = crate::server::router::route(req, &ctx).await;
         let write_result = conn.write_message(&resp).await;
+        ctx.release_background_start_from_response(&resp);
         if is_shutdown && ctx.is_shutdown_requested() {
             ctx.mark_shutdown_response_observed();
         }

@@ -9,7 +9,7 @@
 use assert_cmd::Command;
 use pice_core::cli::{CommandResponse, ExitJsonStatus};
 use pice_core::events::{ManifestEvent, ManifestEventPayload};
-use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
+use pice_core::layers::manifest::{LayerResult, LayerStatus, ManifestStatus, VerificationManifest};
 use pice_core::protocol::methods::{
     CLI_DISPATCH, DAEMON_HEALTH, MANIFEST_EVENT, MANIFEST_SUBSCRIBE,
 };
@@ -104,19 +104,86 @@ fn evaluate_background_wait_json_exits_five_on_subscribe_disconnect() {
     assert_eq!(json["status"], ExitJsonStatus::DaemonDisconnected.as_str());
 }
 
+#[test]
+fn evaluate_background_wait_disconnect_then_restart_reconciles_failed_interrupted() {
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let state_dir = home.path().join("state");
+    let manifest_path = seed_in_progress_wait_manifest(&state_dir, home.path());
+
+    let output = run_fake_evaluate_background_wait_in_home(home.path(), None, None, true);
+    assert_eq!(output.status.code(), Some(5));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], ExitJsonStatus::DaemonDisconnected.as_str());
+
+    let report = pice_daemon::jobs::reconcile_on_startup(&state_dir).expect("reconcile");
+    assert_eq!(
+        report.reconciled_interrupted,
+        vec!["eval-wait-feat".to_string()]
+    );
+    let reconciled = VerificationManifest::load(&manifest_path).expect("load reconciled");
+    assert_eq!(reconciled.overall_status, ManifestStatus::Failed);
+    assert_eq!(
+        reconciled
+            .layers
+            .first()
+            .and_then(|layer| layer.halted_by.as_deref()),
+        Some("failed-interrupted")
+    );
+}
+
+fn seed_in_progress_wait_manifest(
+    state_dir: &std::path::Path,
+    project_root: &std::path::Path,
+) -> std::path::PathBuf {
+    let path =
+        VerificationManifest::manifest_path_in_state_dir("eval-wait-feat", project_root, state_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create manifest parent");
+    }
+    let mut manifest = VerificationManifest::new("eval-wait-feat", project_root);
+    manifest.overall_status = ManifestStatus::InProgress;
+    manifest.run_id = Some("r-eval-wait".to_string());
+    manifest.layers.push(LayerResult {
+        name: "backend".to_string(),
+        status: LayerStatus::InProgress,
+        passes: Vec::new(),
+        seam_checks: Vec::new(),
+        halted_by: None,
+        final_confidence: None,
+        total_cost_usd: None,
+        escalation_events: None,
+    });
+    manifest.save(&path).expect("save in-progress manifest");
+    path
+}
+
 fn run_fake_evaluate_background_wait(
     terminal_status: Option<&'static str>,
     timeout_secs: Option<&'static str>,
     close_after_snapshot: bool,
 ) -> std::process::Output {
-    let home = tempfile::tempdir().unwrap();
-    let pice_dir = home.path().join(".pice");
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    run_fake_evaluate_background_wait_in_home(
+        home.path(),
+        terminal_status,
+        timeout_secs,
+        close_after_snapshot,
+    )
+}
+
+fn run_fake_evaluate_background_wait_in_home(
+    home: &std::path::Path,
+    terminal_status: Option<&'static str>,
+    timeout_secs: Option<&'static str>,
+    close_after_snapshot: bool,
+) -> std::process::Output {
+    let pice_dir = home.join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
-    let plan_path = home.path().join("plan.md");
+    let plan_path = home.join("plan.md");
     std::fs::write(&plan_path, "# Plan\n\n## Contract\n\n```json\n{}\n```\n").unwrap();
 
-    let socket_path = home.path().join("daemon.sock");
+    let socket_path = home.join("daemon.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
     let server = std::thread::spawn(move || {
         let (mut dispatch_stream, _) = listener.accept().expect("accept dispatch client");
@@ -209,7 +276,7 @@ fn run_fake_evaluate_background_wait(
     });
 
     let mut cmd = Command::cargo_bin("pice").unwrap();
-    cmd.env("HOME", home.path())
+    cmd.env("HOME", home)
         .env("PICE_DAEMON_SOCKET", &socket_path)
         .env_remove("PICE_DAEMON_INLINE")
         .args([
