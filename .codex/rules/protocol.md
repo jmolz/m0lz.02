@@ -157,7 +157,7 @@ Daemon RPC is newline-delimited JSON-RPC 2.0 over Unix socket (`~/.pice/daemon.s
 | `evaluate/create` | Start an evaluation run (optionally background) |
 | `manifest/get` | Fetch full manifest for a feature |
 | `manifest/list` | List all features with summary |
-| `manifest/subscribe` / `manifest/unsubscribe` | Stream manifest events |
+| `manifest/subscribe` | Stream manifest events; closing the connection is unsubscribe |
 | `gate/list` | List pending gates |
 | `gate/decide` | Submit gate decision (approve/reject/skip) |
 | `worktree/list` / `worktree/prune` | Worktree management |

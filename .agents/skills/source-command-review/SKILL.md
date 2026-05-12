@@ -19,8 +19,14 @@ Perform a thorough code review of the current changes AND run the cumulative reg
 Before starting the standard review, check if the most recent plan has a contract:
 
 ```bash
-# Find the most recently modified plan file
-ls -t .codex/plans/*.md 2>/dev/null | head -1
+# Find the most recently modified plan file across Codex-native and legacy roots.
+find .codex/plans .claude/plans -maxdepth 1 -type f -name '*.md' -print 2>/dev/null \
+  | while IFS= read -r plan; do
+      printf '%s\t%s\n' "$(stat -f '%m' "$plan" 2>/dev/null || stat -c '%Y' "$plan")" "$plan"
+    done \
+  | sort -rn \
+  | head -1 \
+  | cut -f2-
 ```
 
 If a plan file exists, read its `## Contract` section. If a contract is found:
