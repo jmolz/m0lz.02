@@ -7,6 +7,7 @@ pub mod execute;
 pub mod handoff;
 pub mod init;
 pub mod layers;
+pub mod logs;
 pub mod metrics;
 pub mod plan;
 pub mod prime;

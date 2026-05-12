@@ -30,5 +30,5 @@ pub use adaptive_loop::{
     RecordingPassEvent, RecordingPassSink,
 };
 pub use core::{PerPassOutcome, ProviderOrchestrator};
-pub use seam_runner::run_seams_for_layer;
+pub use seam_runner::{run_seams_for_layer, SeamRunRequest};
 pub use stream::{NoticeLevel, NullSink, SharedSink, StreamEvent, StreamSink};

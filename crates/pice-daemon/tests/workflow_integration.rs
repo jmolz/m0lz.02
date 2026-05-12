@@ -18,6 +18,10 @@ use pice_daemon::orchestrator::stack_loops::{run_stack_loops, StackLoopsConfig};
 use pice_daemon::orchestrator::{NullPassSink, NullSink};
 use std::path::Path;
 
+/// Phase 7: `'static` null saver for fixtures that construct
+/// `StackLoopsConfig` directly.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
+
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();
@@ -123,6 +127,15 @@ layer_overrides:
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &empty_seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &NULL_SAVER,
     };
 
     let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
@@ -218,6 +231,15 @@ paths = ["src/server/**"]
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &empty_seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &NULL_SAVER,
     };
 
     let pass_sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =

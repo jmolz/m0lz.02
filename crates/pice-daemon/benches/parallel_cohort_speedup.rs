@@ -36,6 +36,9 @@ use pice_core::workflow::schema::AdaptiveAlgo;
 use pice_core::workflow::WorkflowConfig;
 use pice_daemon::orchestrator::stack_loops::{run_stack_loops_with_cancel, StackLoopsConfig};
 use pice_daemon::orchestrator::{NullPassSink, NullSink, PassMetricsSink};
+
+/// Phase 7: `'static` null saver for the bench fixture.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
 use tokio_util::sync::CancellationToken;
 
 fn git_init(dir: &Path) {
@@ -166,6 +169,15 @@ async fn run_once(parallel: bool, latency_ms: u64) {
         pice_config: &pice_config,
         workflow: &wf,
         merged_seams: &seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &NULL_SAVER,
     };
 
     // Env setup — serialized by the caller (criterion runs benches

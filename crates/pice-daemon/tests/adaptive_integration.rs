@@ -26,10 +26,12 @@ use pice_core::config::{
     AdversarialConfig, EvalProviderConfig, EvaluationConfig, InitConfig, MetricsConfig, PiceConfig,
     ProviderConfig, TelemetryConfig, TiersConfig,
 };
-use pice_core::layers::manifest::LayerStatus;
+use pice_core::events::ManifestEvent;
+use pice_core::layers::manifest::{LayerStatus, ManifestStatus};
 use pice_core::layers::{LayerDef, LayersConfig, LayersTable};
-use pice_core::workflow::schema::AdaptiveAlgo;
+use pice_core::workflow::schema::{AdaptiveAlgo, OnTimeout, ReviewConfig};
 use pice_core::workflow::WorkflowConfig;
+use pice_daemon::events::{EventBus, EventEmittingSaver};
 use pice_daemon::orchestrator::stack_loops::{run_stack_loops, StackLoopsConfig};
 use pice_daemon::orchestrator::{NullPassSink, NullSink, RecordingPassSink};
 use std::collections::BTreeMap;
@@ -359,6 +361,11 @@ fn setup_minimal_repo(dir: &Path) -> std::path::PathBuf {
     plan_path
 }
 
+/// Phase 7: `'static` null saver so test helpers constructing a
+/// `StackLoopsConfig<'a>` can satisfy the `saver: &'a dyn ManifestSaver`
+/// field without threading an extra lifetime through each fixture.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
+
 /// Construct a `StackLoopsConfig` with the supplied workflow and pice config.
 fn make_cfg<'a>(
     layers: &'a LayersConfig,
@@ -377,6 +384,15 @@ fn make_cfg<'a>(
         pice_config,
         workflow,
         merged_seams: seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &NULL_SAVER,
     }
 }
 
@@ -424,6 +440,86 @@ async fn sprt_accepts_and_halts_before_max_passes() {
         backend.passes.len() < 8,
         "SPRT should halt before max_passes; got {}",
         backend.passes.len()
+    );
+}
+
+// ─── Phase 7 regression: PendingReview is terminal for subscribers ───────────
+
+#[tokio::test]
+async fn pending_review_emits_feature_complete_terminal_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_minimal_repo(dir.path());
+    let layers = single_layer_config();
+    let pice_config = stub_pice_config(false);
+    let mut workflow = workflow_with_adaptive(AdaptiveAlgo::BayesianSprt, 0.90, 8, 10.0, None);
+    workflow.review = Some(ReviewConfig {
+        enabled: true,
+        trigger: Some("layer == backend".to_string()),
+        timeout_hours: 24,
+        on_timeout: OnTimeout::Reject,
+        notification: "stdout".to_string(),
+        retry_on_reject: 1,
+    });
+    let seams = BTreeMap::new();
+    let manifest_path = dir.path().join("pending-review.manifest.json");
+    let bus = EventBus::new();
+    let mut rx = bus.subscribe_feature("phase4-test");
+    let saver = EventEmittingSaver::new(&bus);
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: dir.path(),
+        primary_provider: "stub",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &workflow,
+        merged_seams: &seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: Some(&manifest_path),
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &saver,
+    };
+
+    let _stub = StubScoresGuard::new(
+        "9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001",
+    );
+
+    let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(NullPassSink);
+    let manifest = run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap();
+    assert_eq!(manifest.overall_status, ManifestStatus::PendingReview);
+
+    let mut saw_gate = false;
+    let mut saw_terminal_pending_review = false;
+    for _ in 0..8 {
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event should arrive")
+            .expect("receiver should stay open");
+        match payload.event {
+            ManifestEvent::GateRequested => saw_gate = true,
+            ManifestEvent::FeatureComplete => {
+                saw_terminal_pending_review =
+                    payload.data.get("overall_status").and_then(|v| v.as_str())
+                        == Some("pending-review");
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        saw_gate,
+        "review gate request should be emitted before terminal pending-review"
+    );
+    assert!(
+        saw_terminal_pending_review,
+        "PendingReview must emit FeatureComplete so live wait/follow subscribers exit 3"
     );
 }
 
@@ -2282,6 +2378,15 @@ async fn unresolvable_provider_remains_phase1_pending_not_failed() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &NULL_SAVER,
     };
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =

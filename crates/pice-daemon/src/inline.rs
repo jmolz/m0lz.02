@@ -47,7 +47,10 @@ mod tests {
 
     #[tokio::test]
     async fn inline_status_returns_text_response() {
-        let req = CommandRequest::Status(StatusRequest { json: false });
+        let req = CommandRequest::Status(StatusRequest {
+            json: false,
+            ..Default::default()
+        });
         let resp = run_command(req, &NullSink).await.expect("run_command");
         match resp {
             CommandResponse::Text { content } => {
@@ -64,7 +67,10 @@ mod tests {
     async fn inline_json_mode_returns_json_variant() {
         // Evaluate with a missing plan file returns Exit in JSON mode
         // (plan file not found), so use status --json instead.
-        let req = CommandRequest::Status(StatusRequest { json: true });
+        let req = CommandRequest::Status(StatusRequest {
+            json: true,
+            ..Default::default()
+        });
         let resp = run_command(req, &NullSink).await.expect("run_command");
         match resp {
             CommandResponse::Json { value } => {

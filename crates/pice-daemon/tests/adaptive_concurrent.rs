@@ -18,6 +18,10 @@ use pice_daemon::metrics::db::MetricsDb;
 use pice_daemon::metrics::store::{self, DbBackedPassSink};
 use pice_daemon::orchestrator::stack_loops::{run_stack_loops, StackLoopsConfig};
 use pice_daemon::orchestrator::NullSink;
+
+/// Phase 7: `'static` null saver for fixtures that construct
+/// `StackLoopsConfig` directly.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -262,6 +266,15 @@ async fn concurrent_evaluations_on_shared_db_have_disjoint_pass_events() {
             pice_config: &pice_a,
             workflow: &wf_a,
             merged_seams: &seams_a,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: None,
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &NULL_SAVER,
         };
         run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap()
     });
@@ -282,6 +295,15 @@ async fn concurrent_evaluations_on_shared_db_have_disjoint_pass_events() {
             pice_config: &pice_b,
             workflow: &wf_b,
             merged_seams: &seams_b,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: None,
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &NULL_SAVER,
         };
         run_stack_loops(&cfg, &NullSink, true, sink).await.unwrap()
     });

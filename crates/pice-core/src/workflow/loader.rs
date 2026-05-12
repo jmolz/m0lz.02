@@ -298,6 +298,7 @@ phases:
                 budget_usd: 3.0,
                 cost_cap_behavior: CostCapBehavior::Warn,
                 max_parallelism: Some(4),
+                max_global_provider_concurrency: None,
             },
             phases: Phases {
                 plan: PhaseConfig {

@@ -1,8 +1,22 @@
 //! `pice status` handler — show project state and recent evaluations.
+//!
+//! Phase 7 Task 12 extends the handler to branch on [`StatusMode`]:
+//!
+//! - [`StatusMode::List`] (default): scans `.claude/plans/` for plan files,
+//!   decorates each with the latest evaluation + verification manifest
+//!   snapshot. Historical behavior — unchanged so existing tests pass.
+//! - [`StatusMode::Detail`]: looks up a single feature's
+//!   [`VerificationManifest`] by `feature_id` from the project-namespaced
+//!   state directory and returns it verbatim (JSON) or pretty-printed (text).
+//! - [`StatusMode::Follow`] / [`StatusMode::Wait`]: rejected here — the CLI
+//!   is expected to bypass `cli/dispatch` and call `manifest/subscribe`
+//!   directly. If one of these reaches the dispatch handler it is a CLI
+//!   routing bug; the handler surfaces it with a structured `Exit` so the
+//!   mis-routing is debuggable rather than silent.
 
 use anyhow::Result;
-use pice_core::cli::{CommandResponse, StatusRequest};
-use pice_core::layers::manifest::VerificationManifest;
+use pice_core::cli::{CommandResponse, ExitJsonStatus, StatusMode, StatusRequest};
+use pice_core::layers::manifest::{manifest_project_namespace, VerificationManifest};
 use pice_core::plan_parser::ParsedPlan;
 use serde_json::{json, Value};
 
@@ -15,6 +29,130 @@ pub async fn run(
     ctx: &DaemonContext,
     _sink: &dyn StreamSink,
 ) -> Result<CommandResponse> {
+    match req.mode {
+        StatusMode::Detail => run_detail(req, ctx).await,
+        StatusMode::Follow | StatusMode::Wait => Ok(CommandResponse::Exit {
+            code: 1,
+            message: format!(
+                "pice status {:?} must route via manifest/subscribe, not cli/dispatch \
+                 (CLI routing bug)",
+                req.mode
+            ),
+        }),
+        StatusMode::List => run_list(req, ctx).await,
+    }
+}
+
+/// `StatusMode::Detail` — return one manifest by feature_id.
+///
+/// Resolves `state_dir/{project_hash}/{feature_id}.manifest.json`. Missing
+/// or unreadable manifests surface as [`ExitJsonStatus::FeatureNotFound`]
+/// (JSON mode) or `Exit { code: 1, message }` (text mode) — the Phase 7
+/// structured-failure discriminant the CLI tests pin against.
+async fn run_detail(req: StatusRequest, ctx: &DaemonContext) -> Result<CommandResponse> {
+    let feature_id = match req.feature_id.as_deref() {
+        Some(id) if !id.is_empty() => id,
+        _ => {
+            return Ok(CommandResponse::Exit {
+                code: 1,
+                message: "pice status <feature_id>: feature_id positional required for detail mode"
+                    .to_string(),
+            });
+        }
+    };
+    let project_root = ctx.project_root();
+    let manifest_path = VerificationManifest::manifest_path_for(feature_id, project_root)?;
+    if !manifest_path.exists() {
+        if req.json {
+            return Ok(CommandResponse::ExitJson {
+                code: ExitJsonStatus::FeatureNotFound.exit_code(),
+                value: json!({
+                    "status": ExitJsonStatus::FeatureNotFound.as_str(),
+                    "feature_id": feature_id,
+                }),
+            });
+        }
+        return Ok(CommandResponse::Exit {
+            code: ExitJsonStatus::FeatureNotFound.exit_code(),
+            message: format!("no manifest found for feature_id '{feature_id}'"),
+        });
+    }
+    let manifest = VerificationManifest::load(&manifest_path)?;
+    if req.json {
+        return Ok(CommandResponse::Json {
+            value: serde_json::to_value(&manifest)?,
+        });
+    }
+    Ok(CommandResponse::Text {
+        content: render_manifest_detail(&manifest),
+    })
+}
+
+/// Pretty-print a [`VerificationManifest`] for text-mode `pice status <id>`.
+///
+/// Matches the summary-table aesthetic of list mode — header with feature
+/// id + overall status, one line per layer with key adaptive fields, plus
+/// a pending-gates block when applicable.
+fn render_manifest_detail(m: &VerificationManifest) -> String {
+    use pice_core::layers::manifest::GateStatus;
+    let mut out = String::new();
+    out.push_str(&format!("Feature: {}\n", m.feature_id));
+    if let Some(run_id) = &m.run_id {
+        out.push_str(&format!("Run ID: {run_id}\n"));
+    }
+    let overall = serde_json::to_value(&m.overall_status)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "?".to_string());
+    out.push_str(&format!("Overall: {overall}\n"));
+    out.push_str(&format!("Layers ({}):\n", m.layers.len()));
+    for layer in &m.layers {
+        let status = serde_json::to_value(&layer.status)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "?".to_string());
+        let passes = layer.passes.len();
+        let conf = layer
+            .final_confidence
+            .map(|c| format!("{c:.3}"))
+            .unwrap_or_else(|| "-".to_string());
+        out.push_str(&format!(
+            "  {:<16} {:<14} passes={passes:<2}  conf={conf}\n",
+            layer.name, status,
+        ));
+        if let Some(halted) = &layer.halted_by {
+            out.push_str(&format!("    halted_by: {halted}\n"));
+        }
+    }
+    let pending: Vec<_> = m
+        .gates
+        .iter()
+        .filter(|g| g.status == GateStatus::Pending)
+        .collect();
+    if !pending.is_empty() {
+        out.push_str(&format!("\nPending review gates ({}):\n", pending.len()));
+        for g in pending {
+            out.push_str(&format!(
+                "  {} (layer: {}, timeout_at: {})\n",
+                g.id, g.layer, g.timeout_at
+            ));
+        }
+        out.push_str("Run `pice review-gate --list` to act.\n");
+    }
+    out
+}
+
+/// `StatusMode::List` — historical plan-scan behavior. Preserves the
+/// pre-Phase-7 rendering so existing CLI integration and inline tests pass
+/// unchanged.
+async fn run_list(req: StatusRequest, ctx: &DaemonContext) -> Result<CommandResponse> {
+    // Phase 7 list-mode augmentation: gather ManifestSummary for every
+    // manifest under the project's state directory so the list view can
+    // surface cross-project state (features with no plan file, live runs
+    // from `pice evaluate --background`). Appended under `summaries` in
+    // JSON mode; text mode is unchanged.
+    let summaries = collect_project_summaries(ctx);
+
     let project_root = ctx.project_root();
 
     // Scan .claude/plans/ for plan files
@@ -104,6 +242,7 @@ pub async fn run(
             value: json!({
                 "plans": plans,
                 "git": git_info,
+                "summaries": summaries,
             }),
         })
     } else {
@@ -335,6 +474,50 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Scan `state_dir/{project_hash}/*.manifest.json` and build a
+/// [`ManifestSummary`] for every manifest. Enriches each with its live
+/// `run_id` from the daemon's [`FeatureJobManager`] when one exists.
+///
+/// Best-effort: a single unreadable manifest is skipped with a `warn!`;
+/// a missing state dir returns an empty vec. The list view must always
+/// render, even when the state tree is empty or partially corrupt.
+fn collect_project_summaries(ctx: &DaemonContext) -> Vec<serde_json::Value> {
+    use pice_core::protocol::subscribe::ManifestSummary;
+    let mut out = Vec::new();
+    let Ok(state_root) = VerificationManifest::state_dir() else {
+        return out;
+    };
+    let namespace = manifest_project_namespace(ctx.project_root());
+    let project_dir = state_root.join(&namespace);
+    let Ok(entries) = std::fs::read_dir(&project_dir) else {
+        return out;
+    };
+    let live_runs = ctx.jobs().live_runs();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(manifest) = VerificationManifest::load(&path) else {
+            tracing::warn!(path = %path.display(), "skipping unreadable manifest");
+            continue;
+        };
+        let run_id = live_runs.get(&manifest.feature_id).cloned();
+        let summary = ManifestSummary::from_manifest(&manifest, run_id);
+        if let Ok(v) = serde_json::to_value(&summary) {
+            out.push(v);
+        }
+    }
+    // Stable ordering so list output bytes are deterministic across runs.
+    out.sort_by(|a, b| {
+        a.get("feature_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("feature_id").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+    out
+}
+
 fn get_git_info(project_root: &std::path::Path) -> serde_json::Value {
     let branch = std::process::Command::new("git")
         .args(["branch", "--show-current"])
@@ -395,10 +578,10 @@ mod tests {
     ) {
         let path = VerificationManifest::manifest_path_for(feature_id, project_root).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut manifest = VerificationManifest::new(feature_id, project_root);
-        manifest.layers.push(adaptive_layer);
+        let mut m = VerificationManifest::new(feature_id, project_root);
+        m.layers.push(adaptive_layer);
         // Include one legacy (pre-adaptive) layer with no halted_by/confidence.
-        manifest.layers.push(LayerResult {
+        m.layers.push(LayerResult {
             name: "legacy".to_string(),
             status: LayerStatus::Passed,
             passes: vec![],
@@ -408,8 +591,18 @@ mod tests {
             total_cost_usd: None,
             escalation_events: None,
         });
-        manifest.overall_status = ManifestStatus::InProgress;
-        manifest.save(&path).unwrap();
+        m.overall_status = ManifestStatus::InProgress;
+        // Test fixture: route through `NullSaver` so this file contains
+        // zero raw low-level save call sites (Task 9 grep-coverage
+        // invariant enforced by `manifest_saver_trait_coverage.rs`).
+        let saver = crate::events::NullSaver;
+        crate::events::ManifestSaver::save_and_emit(
+            &saver,
+            &m,
+            &path,
+            crate::events::SaveIntent::FeatureCompleted,
+        )
+        .unwrap();
     }
 
     fn adaptive_layer_fixture() -> LayerResult {
@@ -442,19 +635,27 @@ mod tests {
         }
     }
 
-    /// Process-global mutex serializing tests that set `HOME`. The variable
-    /// is process-wide, so unsynchronized tests would race on it (and on
-    /// `~/.pice/state/` resolution).
-    fn home_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
+    // Phase 7 remediation: `home_lock()` removed. Tests migrated to
+    // `crate::test_support::StateDirGuard`, which serializes on the
+    // workspace-wide `state_dir_lock()` + drives `PICE_STATE_DIR`
+    // directly (the same env var `VerificationManifest::state_dir()`
+    // reads first). The old `HOME`-based pattern only serialized among
+    // tests in this module and raced against other modules that set
+    // `PICE_STATE_DIR` concurrently — the documented flake.
 
     #[test]
     fn load_layer_snapshot_returns_none_when_manifest_missing() {
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
         let plan_path = project_root.join(".claude/plans/feature-x.md");
         let got = load_manifest_snapshot(&plan_path, project_root);
@@ -463,9 +664,17 @@ mod tests {
 
     #[test]
     fn load_layer_snapshot_surfaces_adaptive_fields_in_json() {
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
         setup_manifest_at("feature-x", project_root, adaptive_layer_fixture());
 
@@ -513,16 +722,24 @@ mod tests {
         use pice_core::layers::manifest::{GateEntry, GateStatus};
         use pice_core::workflow::schema::OnTimeout;
 
-        let _g = home_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("HOME", tmp.path());
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
         let project_root = tmp.path();
 
         // Build manifest with a PendingReview layer + its gate.
         let path = VerificationManifest::manifest_path_for("feature-gated", project_root).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut manifest = VerificationManifest::new("feature-gated", project_root);
-        manifest.layers.push(LayerResult {
+        let mut m = VerificationManifest::new("feature-gated", project_root);
+        m.layers.push(LayerResult {
             name: "infrastructure".to_string(),
             status: LayerStatus::PendingReview,
             passes: vec![],
@@ -532,7 +749,7 @@ mod tests {
             total_cost_usd: None,
             escalation_events: None,
         });
-        manifest.gates.push(GateEntry {
+        m.gates.push(GateEntry {
             id: "feature-gated:infrastructure:01".to_string(),
             layer: "infrastructure".to_string(),
             status: GateStatus::Pending,
@@ -544,8 +761,18 @@ mod tests {
             decision: None,
             decided_at: None,
         });
-        manifest.compute_overall_status();
-        manifest.save(&path).unwrap();
+        m.compute_overall_status();
+        // Test fixture: route through `NullSaver` so this file contains
+        // zero raw low-level save call sites (Task 9 grep-coverage
+        // invariant).
+        let saver = crate::events::NullSaver;
+        crate::events::ManifestSaver::save_and_emit(
+            &saver,
+            &m,
+            &path,
+            crate::events::SaveIntent::FeatureCompleted,
+        )
+        .unwrap();
 
         let plan_path = project_root.join(".claude/plans/feature-gated.md");
         let snapshot = load_manifest_snapshot(&plan_path, project_root).expect("manifest loaded");
@@ -556,12 +783,33 @@ mod tests {
 
         // Decided gates (non-Pending) must NOT surface — they live in
         // the audit trail, not the live-blocking list.
-        let mut manifest2 = manifest.clone();
-        manifest2.gates[0].status = GateStatus::Approved;
-        manifest2.gates[0].decision = Some("approve".to_string());
-        manifest2.save(&path).unwrap();
+        let mut m2 = m.clone();
+        m2.gates[0].status = GateStatus::Approved;
+        m2.gates[0].decision = Some("approve".to_string());
+        crate::events::ManifestSaver::save_and_emit(
+            &saver,
+            &m2,
+            &path,
+            crate::events::SaveIntent::FeatureCompleted,
+        )
+        .unwrap();
         let snapshot2 = load_manifest_snapshot(&plan_path, project_root).expect("reload");
         assert!(snapshot2.gates.is_empty());
+    }
+
+    #[test]
+    fn render_manifest_detail_surfaces_run_id_in_text_mode() {
+        let mut manifest =
+            VerificationManifest::new("feature-with-run-id", std::path::Path::new("/tmp/project"));
+        manifest.run_id = Some("r-public-status".to_string());
+
+        let rendered = render_manifest_detail(&manifest);
+
+        assert!(rendered.contains("Feature: feature-with-run-id"));
+        assert!(
+            rendered.contains("Run ID: r-public-status"),
+            "text-mode pice status detail must surface run_id: {rendered}"
+        );
     }
 
     #[test]
@@ -591,6 +839,179 @@ mod tests {
             "missing halted_by prefix: {out}"
         );
         assert!(out.contains("c=0.912"), "missing confidence: {out}");
+    }
+
+    /// Phase 7 Task 12: `StatusMode::Detail` returns the requested manifest
+    /// verbatim as JSON.
+    #[tokio::test]
+    // `home_lock` serializes `std::env::set_var("HOME", ...)` across the
+    // single-threaded test consumers below. The guard is held across
+    // `.await` only because the test body does no cross-task work —
+    // `run(...)` awaits synchronous IO on the current task. Using a
+    // `tokio::sync::Mutex` would defeat the test's atomic-env guarantee
+    // (per `.claude/rules/rust-core.md` "Holding MutexGuard across .await").
+    #[allow(clippy::await_holding_lock)]
+    async fn detail_mode_returns_manifest_when_feature_exists() {
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
+        let tmp = TempDir::new().unwrap();
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
+        let project_root = tmp.path();
+
+        setup_manifest_at("feature-detail", project_root, adaptive_layer_fixture());
+
+        let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
+        let req = StatusRequest {
+            json: true,
+            mode: StatusMode::Detail,
+            feature_id: Some("feature-detail".to_string()),
+            stream_json: false,
+            timeout_secs: None,
+        };
+        let resp = run(req, &ctx, &crate::orchestrator::NullSink)
+            .await
+            .expect("run");
+        match resp {
+            CommandResponse::Json { value } => {
+                assert_eq!(value["feature_id"], "feature-detail");
+                // The adaptive_layer_fixture adds one layer; setup_manifest_at
+                // adds another legacy layer.
+                let layers = value["layers"].as_array().expect("layers array");
+                assert_eq!(layers.len(), 2);
+            }
+            other => panic!("expected Json, got: {other:?}"),
+        }
+    }
+
+    /// Phase 7 Task 12: `StatusMode::Detail` with a missing feature_id
+    /// returns `ExitJsonStatus::FeatureNotFound`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn detail_mode_json_surfaces_feature_not_found() {
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
+        let tmp = TempDir::new().unwrap();
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
+        let project_root = tmp.path();
+
+        let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
+        let req = StatusRequest {
+            json: true,
+            mode: StatusMode::Detail,
+            feature_id: Some("does-not-exist".to_string()),
+            stream_json: false,
+            timeout_secs: None,
+        };
+        let resp = run(req, &ctx, &crate::orchestrator::NullSink)
+            .await
+            .expect("run");
+        match resp {
+            CommandResponse::ExitJson { code, value } => {
+                assert_eq!(code, ExitJsonStatus::FeatureNotFound.exit_code());
+                assert_eq!(value["status"], ExitJsonStatus::FeatureNotFound.as_str());
+                assert_eq!(value["feature_id"], "does-not-exist");
+            }
+            other => panic!("expected ExitJson, got: {other:?}"),
+        }
+    }
+
+    /// Phase 7 Task 12: `StatusMode::Follow` / `Wait` at cli/dispatch is a
+    /// CLI routing bug — the daemon surfaces it with a structured `Exit`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn follow_and_wait_modes_rejected_at_dispatch() {
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
+        let tmp = TempDir::new().unwrap();
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
+        let project_root = tmp.path();
+        let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
+
+        for mode in [StatusMode::Follow, StatusMode::Wait] {
+            let req = StatusRequest {
+                json: false,
+                mode,
+                feature_id: Some("f".to_string()),
+                stream_json: false,
+                timeout_secs: None,
+            };
+            let resp = run(req, &ctx, &crate::orchestrator::NullSink)
+                .await
+                .expect("run");
+            match resp {
+                CommandResponse::Exit { code, message } => {
+                    assert_eq!(code, 1);
+                    assert!(
+                        message.contains("manifest/subscribe"),
+                        "expected routing-bug message for {mode:?}, got: {message}"
+                    );
+                }
+                other => panic!("expected Exit, got: {other:?}"),
+            }
+        }
+    }
+
+    /// Phase 7 Task 12: List-mode JSON output now includes `summaries` —
+    /// one [`ManifestSummary`] per project-namespaced manifest.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn list_mode_json_includes_manifest_summaries() {
+        // Phase 7 remediation: use `StateDirGuard` from `test_support`
+        // so this test serializes on the SAME `state_dir_lock` as every
+        // other `PICE_STATE_DIR` consumer in the workspace. The prior
+        // pattern (`home_lock` + `HOME` mutation) only serialized among
+        // tests in THIS module — a concurrent `review_gate::tests` case
+        // setting `PICE_STATE_DIR` would silently redirect
+        // `VerificationManifest::state_dir()` away from the tempdir
+        // this test seeds, causing spurious failures under parallel
+        // `cargo test --workspace` runs.
+        let tmp = TempDir::new().unwrap();
+        let _g = crate::test_support::StateDirGuard::new(tmp.path());
+        let project_root = tmp.path();
+        setup_manifest_at("feature-a", project_root, adaptive_layer_fixture());
+
+        let ctx = DaemonContext::new_for_test_with_root("test-token", project_root.to_path_buf());
+        let req = StatusRequest {
+            json: true,
+            mode: StatusMode::List,
+            feature_id: None,
+            stream_json: false,
+            timeout_secs: None,
+        };
+        let resp = run(req, &ctx, &crate::orchestrator::NullSink)
+            .await
+            .expect("run");
+        match resp {
+            CommandResponse::Json { value } => {
+                let summaries = value["summaries"].as_array().expect("summaries array");
+                assert!(
+                    summaries.iter().any(|s| s["feature_id"] == "feature-a"),
+                    "feature-a should be in summaries; got {summaries:?}"
+                );
+            }
+            other => panic!("expected Json, got: {other:?}"),
+        }
     }
 
     #[test]

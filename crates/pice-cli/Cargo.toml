@@ -35,8 +35,14 @@ tracing-subscriber = { workspace = true }
 rusqlite = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+# Phase 7 Task 14: cross-platform desktop notifications. notify-rust
+# handles macOS/Linux/Windows natively (no per-platform shell-out).
+notify-rust = "4"
 
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

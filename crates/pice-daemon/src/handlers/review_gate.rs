@@ -506,7 +506,23 @@ async fn run_decide(
         }
     }
     manifest.compute_overall_status();
-    manifest.save(&manifest_path)?;
+    // Phase 7: route the post-audit manifest save through the
+    // EventEmittingSaver so `manifest/subscribe` consumers see a
+    // `GateDecided` event with `{gate_id, decision}` in the payload.
+    // The audit row is already in SQLite (step 5c above) — the event
+    // order mirrors the audit-before-manifest rule: audit write, then
+    // the (save + emit) couple.
+    let decide_saver = crate::events::EventEmittingSaver::new(ctx.events());
+    crate::events::ManifestSaver::save_and_emit(
+        &decide_saver,
+        &manifest,
+        &manifest_path,
+        crate::events::SaveIntent::GateDecided {
+            gate_id: gate_id.clone(),
+            layer: gate_layer.clone(),
+            decision: outcome.audit_decision_string().to_string(),
+        },
+    )?;
 
     // Compute remaining pending gates AFTER the mutation.
     let pending_gates: Vec<GateEntry> = manifest
@@ -643,7 +659,7 @@ mod tests {
             decision: None,
             decided_at: None,
         };
-        let manifest = VerificationManifest {
+        let m = VerificationManifest {
             schema_version: pice_core::layers::manifest::SCHEMA_VERSION.to_string(),
             feature_id: "feat".to_string(),
             project_root_hash: namespace.clone(),
@@ -659,8 +675,19 @@ mod tests {
             }],
             gates: vec![gate.clone()],
             overall_status: MS::PendingReview,
+            run_id: None,
         };
-        manifest.save(&manifest_path).unwrap();
+        // Test fixture: route through `NullSaver` so this file contains
+        // zero raw low-level save call sites (Task 9 grep-coverage
+        // invariant).
+        let saver = crate::events::NullSaver;
+        crate::events::ManifestSaver::save_and_emit(
+            &saver,
+            &m,
+            &manifest_path,
+            crate::events::SaveIntent::FeatureCompleted,
+        )
+        .unwrap();
 
         let ctx = DaemonContext::new_for_test_with_root("tok", project_root);
         // Open + migrate the metrics DB so the audit insert path works.
@@ -750,9 +777,18 @@ mod tests {
         let state_dir = std::path::PathBuf::from(std::env::var("PICE_STATE_DIR").unwrap());
         let namespace = pice_core::layers::manifest::manifest_project_namespace(ctx.project_root());
         let manifest_path = state_dir.join(&namespace).join("feat.manifest.json");
-        let mut manifest = VerificationManifest::load(&manifest_path).unwrap();
-        manifest.gates[0].reject_attempts_remaining = 0;
-        manifest.save(&manifest_path).unwrap();
+        let mut m = VerificationManifest::load(&manifest_path).unwrap();
+        m.gates[0].reject_attempts_remaining = 0;
+        // Test fixture: route through `NullSaver` (Task 9 grep-coverage
+        // invariant).
+        let saver = crate::events::NullSaver;
+        crate::events::ManifestSaver::save_and_emit(
+            &saver,
+            &m,
+            &manifest_path,
+            crate::events::SaveIntent::FeatureCompleted,
+        )
+        .unwrap();
 
         let req = ReviewGateRequest {
             json: true,

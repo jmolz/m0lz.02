@@ -2,11 +2,16 @@
 
 use anyhow::{Context, Result};
 use pice_core::cli::{CommandResponse, EvaluateRequest, ExitJsonStatus};
+use pice_core::layers::manifest::ManifestStatus;
 use pice_core::plan_parser::ParsedPlan;
 use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
 use pice_protocol::CriterionScore;
 use serde_json::json;
 
+use super::background::{
+    dispatch_background, feature_id_from_plan_path, finalize_terminal_manifest,
+    transition_queued_to_in_progress,
+};
 use crate::metrics;
 use crate::orchestrator::{ProviderOrchestrator, StreamSink};
 use crate::server::router::DaemonContext;
@@ -72,6 +77,253 @@ fn review_gate_pending_response(
     CommandResponse::Exit { code: 3, message }
 }
 
+fn layers_toml_missing_response(
+    project_root: &std::path::Path,
+    plan_path: &std::path::Path,
+    json_mode: bool,
+) -> CommandResponse {
+    let status = ExitJsonStatus::LayersTomlMissing;
+    let layers_path = project_root.join(".pice/layers.toml");
+    if json_mode {
+        return CommandResponse::ExitJson {
+            code: status.exit_code(),
+            value: json!({
+                "status": status.as_str(),
+                "plan_path": plan_path.display().to_string(),
+                "layers_path": layers_path.display().to_string(),
+                "hint": "Background evaluation requires Stack Loops. Run `pice layers detect --write` or create .pice/layers.toml, then retry.",
+            }),
+        };
+    }
+    CommandResponse::Exit {
+        code: status.exit_code(),
+        message: format!(
+            "background evaluation requires .pice/layers.toml; missing {}",
+            layers_path.display()
+        ),
+    }
+}
+
+fn layers_toml_load_failed_response(
+    layers_path: &std::path::Path,
+    error: &anyhow::Error,
+    json_mode: bool,
+) -> CommandResponse {
+    let message = format!("{error:#}");
+    if json_mode {
+        return CommandResponse::ExitJson {
+            code: ExitJsonStatus::WorkflowValidationFailed.exit_code(),
+            value: json!({
+                "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
+                "errors": [{
+                    "field": ".pice/layers.toml",
+                    "message": message,
+                }],
+                "hint": "Fix .pice/layers.toml or rerun `pice layers detect --write`, then retry.",
+            }),
+        };
+    }
+    CommandResponse::Exit {
+        code: ExitJsonStatus::WorkflowValidationFailed.exit_code(),
+        message: format!(
+            "failed to load .pice/layers.toml at {}:\n  - {}\n",
+            layers_path.display(),
+            message
+        ),
+    }
+}
+
+fn workflow_validation_failed_response(
+    errors: &[pice_core::workflow::validate::ValidationError],
+    json_mode: bool,
+) -> CommandResponse {
+    if json_mode {
+        let errors: Vec<serde_json::Value> = errors
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "field": e.field,
+                    "message": e.message,
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
+            "errors": errors,
+            "hint": "Run `pice validate` for full details.",
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    let mut message = String::from("workflow.yaml has validation errors:\n");
+    for e in errors {
+        message.push_str(&format!("  - {}: {}\n", e.field, e.message));
+    }
+    message.push_str("\nRun `pice validate` for full details.\n");
+    CommandResponse::Exit { code: 1, message }
+}
+
+fn workflow_resolve_failed_response(error: &anyhow::Error, json_mode: bool) -> CommandResponse {
+    let message = format!("{error:#}");
+    if json_mode {
+        let value = serde_json::json!({
+            "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
+            "errors": [{
+                "field": "workflow.yaml",
+                "message": message,
+            }],
+            "hint": "Run `pice validate` for full details.",
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    CommandResponse::Exit {
+        code: 1,
+        message: format!(
+            "failed to resolve workflow.yaml:\n  - workflow.yaml: {message}\n\nRun `pice validate` for full details.\n"
+        ),
+    }
+}
+
+fn seam_floor_violation_response(
+    violations: &[pice_core::workflow::merge::FloorViolation],
+    json_mode: bool,
+) -> CommandResponse {
+    if json_mode {
+        let violations: Vec<serde_json::Value> = violations
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "field": v.field,
+                    "reason": v.reason,
+                    "project": v.project,
+                    "user": v.user,
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "status": ExitJsonStatus::SeamFloorViolation.as_str(),
+            "violations": violations,
+            "hint": "workflow.yaml [seams] may REPLACE a layers.toml boundary's \
+                    check list but cannot empty-list it. Omit the key to inherit \
+                    the project list.",
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    let mut message = String::from("seam configuration floor violations:\n");
+    for v in violations {
+        message.push_str(&format!(
+            "  - {}: {} (project: {}, user: {})\n",
+            v.field, v.reason, v.project, v.user
+        ));
+    }
+    message.push_str(
+        "\nworkflow.yaml [seams] may REPLACE a layers.toml boundary's check list \
+         but cannot empty-list it. Omit the key to inherit the project list.\n",
+    );
+    CommandResponse::Exit { code: 1, message }
+}
+
+fn merged_seam_validation_failed_response(
+    errors: &[pice_core::workflow::validate::ValidationError],
+    json_mode: bool,
+) -> CommandResponse {
+    if json_mode {
+        let errors: Vec<serde_json::Value> = errors
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "field": e.field,
+                    "message": e.message,
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "status": ExitJsonStatus::MergedSeamValidationFailed.as_str(),
+            "errors": errors,
+        });
+        return CommandResponse::ExitJson { code: 1, value };
+    }
+    let mut message =
+        String::from("merged seam map has validation errors (layers.toml + workflow.yaml):\n");
+    for e in errors {
+        message.push_str(&format!("  - {}: {}\n", e.field, e.message));
+    }
+    CommandResponse::Exit { code: 1, message }
+}
+
+fn preflight_stack_loops_workflow(
+    project_root: &std::path::Path,
+    json_mode: bool,
+) -> Result<
+    std::result::Result<
+        (
+            pice_core::workflow::WorkflowConfig,
+            pice_core::layers::LayersConfig,
+        ),
+        CommandResponse,
+    >,
+> {
+    let layers_path = project_root.join(".pice/layers.toml");
+    let layers_config = match pice_core::layers::LayersConfig::load(&layers_path) {
+        Ok(config) => config,
+        Err(e) => {
+            return Ok(Err(layers_toml_load_failed_response(
+                &layers_path,
+                &e,
+                json_mode,
+            )));
+        }
+    };
+
+    let workflow = match pice_core::workflow::loader::resolve(project_root) {
+        Ok(workflow) => workflow,
+        Err(e) => return Ok(Err(workflow_resolve_failed_response(&e, json_mode))),
+    };
+
+    let seam_registry = pice_core::seam::default_registry();
+    let report = pice_core::workflow::validate::validate_all(
+        &workflow,
+        Some(&layers_config),
+        None,
+        Some(&seam_registry),
+    );
+    if !report.is_ok() {
+        return Ok(Err(workflow_validation_failed_response(
+            &report.errors,
+            json_mode,
+        )));
+    }
+
+    let mut merged_seams_opt = layers_config.seams.clone();
+    let mut seam_violations: Vec<pice_core::workflow::merge::FloorViolation> = Vec::new();
+    pice_core::workflow::merge::merge_seams(
+        &mut merged_seams_opt,
+        workflow.seams.as_ref(),
+        &mut seam_violations,
+    );
+    if !seam_violations.is_empty() {
+        return Ok(Err(seam_floor_violation_response(
+            &seam_violations,
+            json_mode,
+        )));
+    }
+
+    let mut merged_workflow = workflow.clone();
+    merged_workflow.seams = Some(merged_seams_opt.unwrap_or_default());
+    let merged_report = pice_core::workflow::validate::validate_seams(
+        &merged_workflow,
+        &layers_config,
+        &seam_registry,
+    );
+    if !merged_report.is_ok() {
+        return Ok(Err(merged_seam_validation_failed_response(
+            &merged_report.errors,
+            json_mode,
+        )));
+    }
+
+    Ok(Ok((workflow, layers_config)))
+}
+
 /// Reconcile expired review gates against the current clock. For each
 /// Pending gate whose `timeout_at` has passed, apply the pinned
 /// `on_timeout_action`: mutate the gate status, update the owning
@@ -84,12 +336,13 @@ fn review_gate_pending_response(
 /// without the background reconciler. A gate that times out is only
 /// caught when the next `pice evaluate` runs, not in real time. The
 /// full background reconciler lands in a follow-up.
-fn reconcile_expired_gates_inline(
+#[doc(hidden)]
+pub fn reconcile_expired_gates_inline(
     manifest: &mut pice_core::layers::manifest::VerificationManifest,
     now: chrono::DateTime<chrono::Utc>,
     project_root: &std::path::Path,
 ) -> usize {
-    use pice_core::gate::{GateDecision, GateDecisionOutcome};
+    use pice_core::gate::{GateDecision, GateDecisionOrigin, GateDecisionOutcome};
     use pice_core::layers::manifest::{GateStatus, LayerStatus};
 
     let db_path = project_root.join(".pice").join("metrics.db");
@@ -234,7 +487,14 @@ fn reconcile_expired_gates_inline(
                             GateStatus::Rejected,
                             LayerStatus::Failed,
                             0,
-                            Some(ExitJsonStatus::HALTED_GATE_REJECTED.to_string()),
+                            Some(
+                                if action.outcome.origin == GateDecisionOrigin::Timeout {
+                                    ExitJsonStatus::HALTED_GATE_TIMEOUT_REJECT
+                                } else {
+                                    ExitJsonStatus::HALTED_GATE_REJECTED
+                                }
+                                .to_string(),
+                            ),
                         )
                     }
                 }
@@ -294,6 +554,16 @@ pub async fn run(
     } else {
         project_root.join(&req.plan_path)
     };
+
+    // Phase 7 Task 10: background dispatch branch. Foreground path
+    // below is unchanged from v0.6. The `req.background` path MUST
+    // consult the plan file existence first — a user dispatching a
+    // background feature with a typo in the plan path should see the
+    // existing PlanNotFound response, not a ghost Queued manifest on
+    // disk.
+    if req.background && plan_path.exists() {
+        return run_background(req, ctx, &plan_path).await;
+    }
 
     if !plan_path.exists() {
         // Phase 3 third-round adversarial review fix: pre-orchestrator
@@ -379,30 +649,10 @@ pub async fn run(
             Some(&seam_registry),
         );
         if !report.is_ok() {
-            if req.json {
-                let errors: Vec<serde_json::Value> = report
-                    .errors
-                    .iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "field": e.field,
-                            "message": e.message,
-                        })
-                    })
-                    .collect();
-                let value = serde_json::json!({
-                    "status": ExitJsonStatus::WorkflowValidationFailed.as_str(),
-                    "errors": errors,
-                    "hint": "Run `pice validate` for full details.",
-                });
-                return Ok(CommandResponse::ExitJson { code: 1, value });
-            }
-            let mut message = String::from("workflow.yaml has validation errors:\n");
-            for e in &report.errors {
-                message.push_str(&format!("  - {}: {}\n", e.field, e.message));
-            }
-            message.push_str("\nRun `pice validate` for full details.\n");
-            return Ok(CommandResponse::Exit { code: 1, message });
+            return Ok(workflow_validation_failed_response(
+                &report.errors,
+                req.json,
+            ));
         }
 
         // Merge `layers.toml [seams]` with `workflow.yaml.seams` under the
@@ -418,39 +668,7 @@ pub async fn run(
             &mut seam_violations,
         );
         if !seam_violations.is_empty() {
-            if req.json {
-                let violations: Vec<serde_json::Value> = seam_violations
-                    .iter()
-                    .map(|v| {
-                        serde_json::json!({
-                            "field": v.field,
-                            "reason": v.reason,
-                            "project": v.project,
-                            "user": v.user,
-                        })
-                    })
-                    .collect();
-                let value = serde_json::json!({
-                    "status": ExitJsonStatus::SeamFloorViolation.as_str(),
-                    "violations": violations,
-                    "hint": "workflow.yaml [seams] may REPLACE a layers.toml boundary's \
-                            check list but cannot empty-list it. Omit the key to inherit \
-                            the project list.",
-                });
-                return Ok(CommandResponse::ExitJson { code: 1, value });
-            }
-            let mut message = String::from("seam configuration floor violations:\n");
-            for v in &seam_violations {
-                message.push_str(&format!(
-                    "  - {}: {} (project: {}, user: {})\n",
-                    v.field, v.reason, v.project, v.user
-                ));
-            }
-            message.push_str(
-                "\nworkflow.yaml [seams] may REPLACE a layers.toml boundary's check list \
-                 but cannot empty-list it. Omit the key to inherit the project list.\n",
-            );
-            return Ok(CommandResponse::Exit { code: 1, message });
+            return Ok(seam_floor_violation_response(&seam_violations, req.json));
         }
         let merged_seams: std::collections::BTreeMap<String, Vec<String>> =
             merged_seams_opt.unwrap_or_default();
@@ -469,32 +687,23 @@ pub async fn run(
             &seam_registry,
         );
         if !merged_report.is_ok() {
-            if req.json {
-                let errors: Vec<serde_json::Value> = merged_report
-                    .errors
-                    .iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "field": e.field,
-                            "message": e.message,
-                        })
-                    })
-                    .collect();
-                let value = serde_json::json!({
-                    "status": ExitJsonStatus::MergedSeamValidationFailed.as_str(),
-                    "errors": errors,
-                });
-                return Ok(CommandResponse::ExitJson { code: 1, value });
-            }
-            let mut message = String::from(
-                "merged seam map has validation errors (layers.toml + workflow.yaml):\n",
-            );
-            for e in &merged_report.errors {
-                message.push_str(&format!("  - {}: {}\n", e.field, e.message));
-            }
-            return Ok(CommandResponse::Exit { code: 1, message });
+            return Ok(merged_seam_validation_failed_response(
+                &merged_report.errors,
+                req.json,
+            ));
         }
 
+        // Phase 7: construct an `EventEmittingSaver` borrowed from the
+        // daemon context's `EventBus`. Background-mode dispatches (Task
+        // 10) publish events to the wildcard channel so
+        // `manifest/subscribe` consumers see layer/gate/feature
+        // transitions in real time. Inline foreground evaluate also
+        // emits events — there are simply no subscribers in inline mode,
+        // so the per-feature channel drops them. The saver trait is the
+        // single compile-time choke point that guarantees every state
+        // transition produces a matching event (see Task 9 coverage
+        // test).
+        let saver = crate::events::EventEmittingSaver::new(ctx.events());
         let stack_cfg = crate::orchestrator::stack_loops::StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -504,6 +713,15 @@ pub async fn run(
             pice_config: config,
             workflow: &workflow,
             merged_seams: &merged_seams,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: None,
+            global_provider_semaphore: Some(ctx.jobs().provider_semaphore()),
+            global_provider_capacity: Some(ctx.jobs().provider_capacity()),
+            saver: &saver,
         };
 
         // Phase 4.1 Pass-6 Codex High #2: acquire the per-manifest
@@ -705,7 +923,26 @@ pub async fn run(
                             reconcile_expired_gates_inline(&mut existing, now, project_root);
                         if reconciled > 0 {
                             existing.compute_overall_status();
-                            if let Err(e) = existing.save(&path) {
+                            // Route through the saver so subscribers see
+                            // the gate-decision events for every
+                            // timed-out gate. Reconciliation applies the
+                            // pinned `on_timeout_action`; we treat each
+                            // reconciled gate as a `GateDecided` event
+                            // regardless of variant (approve / skip /
+                            // reject) — the decision string carries the
+                            // flavor in the event payload.
+                            let reconcile_saver =
+                                crate::events::EventEmittingSaver::new(ctx.events());
+                            if let Err(e) = crate::events::ManifestSaver::save_and_emit(
+                                &reconcile_saver,
+                                &existing,
+                                &path,
+                                crate::events::SaveIntent::GateDecided {
+                                    gate_id: String::new(),
+                                    layer: String::new(),
+                                    decision: "timeout".to_string(),
+                                },
+                            ) {
                                 tracing::warn!(
                                     path = %path.display(),
                                     error = %e,
@@ -1361,14 +1598,320 @@ pub async fn run(
     }
 }
 
+/// Phase 7 Task 10: background dispatch path for `pice evaluate
+/// --background`.
+///
+/// The foreground handler body above is left untouched. The background
+/// path writes the Queued manifest + spawns a future that re-invokes
+/// the orchestrator with an owned snapshot of the daemon state. The
+/// spawned future honors cancellation via the `tokio_util` token
+/// threaded through `dispatch_background`.
+///
+/// Scope note: this landing implements the dispatch contract (SLO +
+/// FeatureAlreadyRunning + InlineMode rejection + Queued/InProgress
+/// transitions + event emission). The spawned future wires a
+/// simplified orchestrator invocation that runs Stack Loops for projects
+/// with layers.toml. Missing `.pice/layers.toml` is rejected before
+/// dispatch so the daemon never writes a synthetic Passed manifest.
+/// - Treats a provider startup failure as a runtime-error layer so the
+///   terminal manifest is observable (rather than the future silently
+///   erroring out without producing a terminal manifest).
+async fn run_background(
+    req: EvaluateRequest,
+    ctx: &DaemonContext,
+    plan_path: &std::path::Path,
+) -> Result<CommandResponse> {
+    let feature_id = feature_id_from_plan_path(plan_path);
+    if let Some(resp) = super::background::reject_inline_background_if_active(plan_path, req.json) {
+        return Ok(resp);
+    }
+
+    let layers_path = ctx.project_root().join(".pice/layers.toml");
+    if !layers_path.exists() {
+        return Ok(layers_toml_missing_response(
+            ctx.project_root(),
+            plan_path,
+            req.json,
+        ));
+    }
+
+    let (workflow_snapshot, layers_snapshot) =
+        match preflight_stack_loops_workflow(ctx.project_root(), req.json)? {
+            Ok(snapshot) => snapshot,
+            Err(resp) => return Ok(resp),
+        };
+
+    // Capture owned clones of every ctx field the spawn future needs.
+    let config_owned = ctx.config().clone();
+    let events_for_spawn = ctx.events().clone();
+    let logs_for_spawn = ctx.logs().clone();
+    let provider_semaphore_for_spawn = ctx.jobs().provider_semaphore();
+    let provider_capacity_for_spawn = ctx.jobs().provider_capacity();
+    let json_mode = req.json;
+
+    dispatch_background(
+        feature_id,
+        req.json,
+        plan_path,
+        ctx,
+        workflow_snapshot.clone(),
+        Some(layers_snapshot.clone()),
+        move |args, permit, cancel| async move {
+            // Background evaluate now enforces global concurrency at the
+            // provider-session boundary inside Stack Loops. Release the
+            // manager's admission permit immediately so it cannot deadlock
+            // with per-layer provider permits from the same semaphore.
+            drop(permit);
+            let mut manifest = transition_queued_to_in_progress(&args)?;
+
+            // Honor cancel fired between dispatch and the transition.
+            if cancel.is_cancelled() {
+                manifest.overall_status = ManifestStatus::Failed;
+                manifest
+                    .layers
+                    .push(pice_core::layers::manifest::LayerResult {
+                        name: args.feature_id.clone(),
+                        status: pice_core::layers::manifest::LayerStatus::Failed,
+                        passes: Vec::new(),
+                        seam_checks: Vec::new(),
+                        halted_by: Some("cancelled:pre-orchestrator".to_string()),
+                        final_confidence: None,
+                        total_cost_usd: None,
+                        escalation_events: None,
+                    });
+                finalize_terminal_manifest(&manifest, &args.manifest_path, &events_for_spawn)?;
+                logs_for_spawn
+                    .append_terminal_frame(&args.feature_id, &args.run_id, "cancelled")
+                    .await;
+                return Ok(manifest);
+            }
+
+            // Run the orchestrator. The helper returns a terminal
+            // manifest (Passed / Failed / PendingReview). Errors
+            // escape via a Failed layer so terminal observability is
+            // preserved.
+            let manifest = match run_evaluate_orchestrator(
+                &args,
+                &config_owned,
+                &workflow_snapshot,
+                &events_for_spawn,
+                &logs_for_spawn,
+                provider_semaphore_for_spawn.clone(),
+                provider_capacity_for_spawn,
+                json_mode,
+                &cancel,
+            )
+            .await
+            {
+                Ok(manifest) => manifest,
+                Err(e) => {
+                    tracing::error!(
+                        feature_id = %args.feature_id,
+                        run_id = %args.run_id,
+                        error = %e,
+                        "background evaluate orchestrator returned Err"
+                    );
+                    let mut err_manifest = manifest.clone();
+                    err_manifest.overall_status = ManifestStatus::Failed;
+                    err_manifest
+                        .layers
+                        .push(pice_core::layers::manifest::LayerResult {
+                            name: args.feature_id.clone(),
+                            status: pice_core::layers::manifest::LayerStatus::Failed,
+                            passes: Vec::new(),
+                            seam_checks: Vec::new(),
+                            halted_by: Some(format!("runtime_error:{e}")),
+                            final_confidence: None,
+                            total_cost_usd: None,
+                            escalation_events: None,
+                        });
+                    finalize_terminal_manifest(
+                        &err_manifest,
+                        &args.manifest_path,
+                        &events_for_spawn,
+                    )?;
+                    err_manifest
+                }
+            };
+            let reason = match manifest.overall_status {
+                ManifestStatus::Passed => "passed",
+                ManifestStatus::Failed => "failed",
+                ManifestStatus::PendingReview => "pending-review",
+                _ => "complete",
+            };
+            logs_for_spawn
+                .append_terminal_frame(&args.feature_id, &args.run_id, reason)
+                .await;
+
+            Ok(manifest)
+        },
+    )
+    .await
+}
+
+/// Run the evaluate orchestrator for a background-dispatched feature.
+///
+/// Requires `.pice/layers.toml` and runs `run_stack_loops_with_cancel`.
+/// The caller rejects missing layers before dispatch; the defensive check
+/// here exists only for a layer file deleted after admission.
+///
+/// The helper honors the cancel token at cohort boundaries (via
+/// `run_stack_loops_with_cancel`) and at the pre-provider boundary
+/// (via `cancel.is_cancelled()`).
+#[allow(clippy::too_many_arguments)]
+async fn run_evaluate_orchestrator(
+    args: &super::background::OrchestratorSpawnArgs,
+    config: &pice_core::config::PiceConfig,
+    workflow_snapshot: &pice_core::workflow::WorkflowConfig,
+    events: &crate::events::EventBus,
+    logs: &crate::logs::LogStore,
+    provider_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    provider_capacity: u32,
+    _json_mode: bool,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<pice_core::layers::manifest::VerificationManifest> {
+    use pice_core::layers::manifest::VerificationManifest;
+
+    let plan = ParsedPlan::parse(&args.plan_path, args.plan_content.clone())?;
+    let _contract = plan
+        .contract
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("no contract section found in plan"))?;
+
+    let layers_config = args
+        .layers_config
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("background evaluation missing layers snapshot"))?;
+
+    // Floor-merged seam map. Background path uses the same merge as
+    // the foreground handler; a floor violation results in a
+    // synthetic `Failed` manifest with the violation as the reason
+    // (the foreground path returns an ExitJson that the CLI surfaces;
+    // here we record it durably so `pice status` can read it).
+    let mut merged_seams_opt = layers_config.seams.clone();
+    let mut seam_violations: Vec<pice_core::workflow::merge::FloorViolation> = Vec::new();
+    pice_core::workflow::merge::merge_seams(
+        &mut merged_seams_opt,
+        workflow_snapshot.seams.as_ref(),
+        &mut seam_violations,
+    );
+    if !seam_violations.is_empty() {
+        let mut manifest = VerificationManifest::load(&args.manifest_path)?;
+        manifest.overall_status = ManifestStatus::Failed;
+        manifest
+            .layers
+            .push(pice_core::layers::manifest::LayerResult {
+                name: "seam-floor-violation".to_string(),
+                status: pice_core::layers::manifest::LayerStatus::Failed,
+                passes: Vec::new(),
+                seam_checks: Vec::new(),
+                halted_by: Some(format!(
+                    "seam_floor_violation:{} item(s)",
+                    seam_violations.len()
+                )),
+                final_confidence: None,
+                total_cost_usd: None,
+                escalation_events: None,
+            });
+        finalize_terminal_manifest(&manifest, &args.manifest_path, events)
+            .context("persisting delayed seam-floor violation terminal manifest")?;
+        return Ok(manifest);
+    }
+    let merged_seams: std::collections::BTreeMap<String, Vec<String>> =
+        merged_seams_opt.unwrap_or_default();
+    let stack_snapshot = args
+        .stack_loop_snapshot
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("background evaluation missing stack input snapshot"))?;
+
+    // Invoke run_stack_loops_with_cancel with owned config. The saver
+    // is the daemon's `EventEmittingSaver` so subscribers observe the
+    // per-layer / per-gate events fired during the cohort drain.
+    let saver = crate::events::EventEmittingSaver::new(events);
+    let cfg = crate::orchestrator::stack_loops::StackLoopsConfig {
+        layers: layers_config,
+        plan_path: args.plan_path.as_path(),
+        project_root: args.env.project_root.as_path(),
+        primary_provider: &config.evaluation.primary.provider,
+        primary_model: &config.evaluation.primary.model,
+        pice_config: config,
+        workflow: workflow_snapshot,
+        merged_seams: &merged_seams,
+        contract_contents: Some(&args.contract_contents),
+        full_diff: Some(stack_snapshot.full_diff.as_str()),
+        claude_md: Some(stack_snapshot.claude_md.as_str()),
+        layer_paths: Some(&stack_snapshot.layer_paths),
+        seam_file_contents: Some(&stack_snapshot.seam_file_contents),
+        manifest_path: Some(args.manifest_path.as_path()),
+        global_provider_semaphore: Some(provider_semaphore),
+        global_provider_capacity: Some(provider_capacity),
+        saver: &saver,
+    };
+
+    let pass_sink: std::sync::Arc<dyn crate::orchestrator::PassMetricsSink> =
+        std::sync::Arc::new(crate::orchestrator::NullPassSink);
+
+    // Background evaluate has no live CLI stream to write to, but provider
+    // chunks still need to be captured for `pice logs`. Use the same
+    // LogStore-backed sink as background execute and pass `json_mode=false`
+    // so Stack Loops does not suppress chunk forwarding.
+    let log_sink = std::sync::Arc::new(crate::logs::LogStoreSink::new(
+        logs.clone(),
+        args.feature_id.clone(),
+        args.run_id.clone(),
+        "evaluate",
+    ));
+    let sink: std::sync::Arc<dyn crate::orchestrator::StreamSink> = log_sink.clone();
+    let manifest = crate::orchestrator::stack_loops::run_stack_loops_with_cancel(
+        &cfg,
+        sink.as_ref(),
+        false,
+        pass_sink,
+        cancel.clone(),
+    )
+    .await;
+    log_sink.flush().await;
+    manifest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::router::DaemonContext;
+    use pice_core::events::ManifestEvent;
+    use pice_core::jobs::JobEnv;
     use pice_core::layers::manifest::{
-        GateEntry, GateStatus, LayerResult, LayerStatus, ManifestStatus, VerificationManifest,
-        SCHEMA_VERSION,
+        GateEntry, GateStatus, LayerResult, LayerStatus, VerificationManifest, SCHEMA_VERSION,
     };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn write_test_plan(root: &std::path::Path, stem: &str) -> std::path::PathBuf {
+        let plans_dir = root.join(".claude/plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        let plan_path = plans_dir.join(format!("{stem}.md"));
+        std::fs::write(
+            &plan_path,
+            r#"# Plan
+
+## Contract
+
+```json
+{
+  "feature": "test",
+  "tier": 1,
+  "pass_threshold": 8,
+  "criteria": [
+    {"name": "works", "threshold": 8, "validation": "manual"}
+  ]
+}
+```
+"#,
+        )
+        .unwrap();
+        plan_path
+    }
+
     /// Contract criterion #2: "Evaluate releases per-manifest locks between
     /// cohort boundaries so decide RPCs never self-deadlock." Implemented
     /// in Phase 6 via early-return on gate fire (handler return drops the
@@ -1467,10 +2010,105 @@ mod tests {
                 decided_at: None,
             }],
             overall_status: ManifestStatus::PendingReview,
+            run_id: None,
         };
         match review_gate_pending_response(&manifest, true) {
             CommandResponse::ExitJson { code, .. } => assert_eq!(code, 3),
             other => panic!("expected exit 3 ReviewGatePending, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn delayed_seam_floor_violation_persists_and_emits_terminal_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let plan_path = write_test_plan(&project_root, "delayed-seam-feature");
+        let pice_dir = project_root.join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["backend", "infrastructure"]
+
+[layers.backend]
+paths = ["src/**"]
+
+[layers.infrastructure]
+paths = ["Dockerfile"]
+
+[seams]
+"backend↔infrastructure" = ["version_skew"]
+"#,
+        )
+        .unwrap();
+
+        let feature_id = "delayed-seam-feature";
+        let run_id = "run-delayed-seam";
+        let manifest_path = tmp.path().join("delayed-seam-feature.manifest.json");
+        let mut queued = VerificationManifest::new(feature_id, &project_root);
+        queued.run_id = Some(run_id.to_string());
+        queued.save(&manifest_path).unwrap();
+
+        let mut workflow_snapshot = pice_core::workflow::loader::embedded_defaults();
+        workflow_snapshot.seams = Some(BTreeMap::from([(
+            "backend↔infrastructure".to_string(),
+            Vec::new(),
+        )]));
+
+        let events = crate::events::EventBus::new();
+        let mut rx = events.subscribe_feature(feature_id);
+        let logs = crate::logs::LogStore::new();
+        let layers_snapshot =
+            pice_core::layers::LayersConfig::load(&pice_dir.join("layers.toml")).unwrap();
+        let args = super::super::background::OrchestratorSpawnArgs {
+            feature_id: feature_id.to_string(),
+            run_id: run_id.to_string(),
+            plan_path: plan_path.clone(),
+            manifest_path: manifest_path.clone(),
+            env: Arc::new(JobEnv {
+                state_dir: tmp.path().to_path_buf(),
+                project_root: project_root.clone(),
+                workflow_snapshot: workflow_snapshot.clone(),
+                contracts: BTreeMap::new(),
+                pice_state_dir_override: None,
+                pice_user_workflow_file: None,
+            }),
+            plan_content: std::fs::read_to_string(&plan_path).unwrap(),
+            layers_config: Some(layers_snapshot),
+            contract_contents: BTreeMap::new(),
+            stack_loop_snapshot: None,
+        };
+
+        let manifest = run_evaluate_orchestrator(
+            &args,
+            &pice_core::config::PiceConfig::default(),
+            &workflow_snapshot,
+            &events,
+            &logs,
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            1,
+            true,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("delayed seam violation should return a terminal manifest");
+
+        assert_eq!(manifest.overall_status, ManifestStatus::Failed);
+        let persisted = VerificationManifest::load(&manifest_path).unwrap();
+        assert_eq!(persisted.overall_status, ManifestStatus::Failed);
+        assert_eq!(
+            persisted.layers[0].halted_by.as_deref(),
+            Some("seam_floor_violation:1 item(s)")
+        );
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("FeatureComplete event should be emitted")
+            .expect("event channel should remain open");
+        assert_eq!(event.event, ManifestEvent::FeatureComplete);
+        assert_eq!(event.feature_id, feature_id);
+        assert_eq!(event.run_id, run_id);
+        assert_eq!(event.data["status"].as_str(), Some("failed"));
     }
 }

@@ -84,6 +84,7 @@ fn seed_pending_gate_fixture(
             decided_at: None,
         }],
         overall_status: ManifestStatus::PendingReview,
+        run_id: None,
     };
     manifest.save(&manifest_path).unwrap();
     let ctx = DaemonContext::new("tok".to_string(), project_root);
@@ -275,6 +276,7 @@ async fn scenario_1_trigger_fires() {
             budget_usd: 0.0,
             cost_cap_behavior: CostCapBehavior::Halt,
             max_parallelism: None,
+            max_global_provider_concurrency: None,
         },
         phases: Phases::default(),
         layer_overrides: std::collections::BTreeMap::new(),
@@ -525,6 +527,7 @@ async fn scenario_8_cancellation_during_pending_review() {
             budget_usd: 0.0,
             cost_cap_behavior: pice_core::workflow::schema::CostCapBehavior::Halt,
             max_parallelism: None,
+            max_global_provider_concurrency: None,
         },
         phases: pice_core::workflow::schema::Phases::default(),
         layer_overrides: BTreeMap::new(),
@@ -532,6 +535,7 @@ async fn scenario_8_cancellation_during_pending_review() {
         seams: None,
     };
     let merged_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let null_saver = pice_daemon::events::NullSaver;
     let cfg = StackLoopsConfig {
         layers: &layers,
         plan_path: &plan_path,
@@ -541,6 +545,15 @@ async fn scenario_8_cancellation_during_pending_review() {
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &merged_seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &null_saver,
     };
 
     let pass_sink: Arc<dyn pice_daemon::orchestrator::PassMetricsSink> = Arc::new(NullPassSink);

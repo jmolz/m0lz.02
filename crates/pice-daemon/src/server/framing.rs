@@ -116,4 +116,14 @@ where
             .context("transport flush failed")?;
         Ok(())
     }
+
+    /// Flush and close the writer half. Tests use this to model an explicit
+    /// client-side connection close before dropping the framed wrapper, which
+    /// wakes a peer blocked in `read_message` deterministically.
+    pub async fn shutdown(&mut self) -> Result<()> {
+        self.writer
+            .shutdown()
+            .await
+            .context("transport shutdown failed")
+    }
 }

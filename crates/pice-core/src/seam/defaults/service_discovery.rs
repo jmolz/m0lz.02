@@ -26,8 +26,7 @@ impl SeamCheck for ServiceDiscoveryCheck {
         let mut referenced_hosts: BTreeSet<String> = Default::default();
 
         for rel in ctx.boundary_files {
-            let full = ctx.repo_root.join(rel);
-            let Ok(content) = std::fs::read_to_string(&full) else {
+            let Ok(content) = ctx.read_file_to_string(rel) else {
                 continue;
             };
             let fname = rel
@@ -170,6 +169,7 @@ mod tests {
             boundary: &b,
             filtered_diff: "",
             repo_root: dir.path(),
+            file_contents: None,
             boundary_files: &rels,
             args: None,
         };
@@ -190,6 +190,7 @@ mod tests {
             boundary: &b,
             filtered_diff: "",
             repo_root: dir.path(),
+            file_contents: None,
             boundary_files: &rels,
             args: None,
         };

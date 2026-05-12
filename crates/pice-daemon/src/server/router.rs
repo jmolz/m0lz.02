@@ -25,16 +25,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use pice_core::cli::CommandRequest;
 use pice_core::config::PiceConfig;
 use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
 use serde_json::json;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{oneshot, Mutex as TokioMutex, Notify};
 
 use super::auth;
+use crate::events::EventBus;
 use crate::handlers;
+use crate::jobs::FeatureJobManager;
+use crate::logs::LogStore;
 use crate::orchestrator::NullSink;
 
 /// Phase 4.1 Pass-6 Codex High #2: per-manifest single-writer lock map.
@@ -50,6 +53,8 @@ use crate::orchestrator::NullSink;
 /// of the Arc can live in both the map (for future acquirers) and the
 /// current holder (so it stays alive for the evaluation's lifetime).
 pub type ManifestLockMap = Arc<StdMutex<HashMap<(String, String), Arc<TokioMutex<()>>>>>;
+type BackgroundAdmissionLockMap = Arc<StdMutex<HashMap<(String, String), Arc<TokioMutex<()>>>>>;
+type DeferredBackgroundStartMap = Arc<StdMutex<HashMap<(String, String), oneshot::Sender<()>>>>;
 
 /// JSON-RPC error code for "method not found" (standard JSON-RPC 2.0).
 const METHOD_NOT_FOUND_CODE: i32 = -32601;
@@ -91,6 +96,13 @@ pub struct DaemonContext {
     /// event loop polls it periodically), not a synchronization fence.
     shutdown_requested: AtomicBool,
 
+    /// Set by the connection task after it attempts to write the
+    /// `daemon/shutdown` response. The lifecycle accept loop observes
+    /// [`shutdown_requested`] before that write can happen, so it must wait on
+    /// this signal before returning from `lifecycle::run`.
+    shutdown_response_observed: AtomicBool,
+    shutdown_response_notify: Notify,
+
     /// The project root directory. Handlers use this to find `.claude/plans/`,
     /// `.pice/config.toml`, the metrics DB, and other project-relative paths.
     project_root: PathBuf,
@@ -106,6 +118,46 @@ pub struct DaemonContext {
     /// serialize on the inner mutex, preventing the atomic-rename race at
     /// `VerificationManifest::save()` + `~/.pice/state/.../manifest.json`.
     manifest_locks: ManifestLockMap,
+
+    /// Short-lived background admission locks keyed by `(project_hash,
+    /// feature_id)`.
+    ///
+    /// This lock is deliberately separate from [`manifest_locks`]:
+    /// background workers hold the manifest lock until completion, while
+    /// admission only needs to serialize the brief check → Queued write →
+    /// `FeatureJobManager` insertion window.
+    background_admission_locks: BackgroundAdmissionLockMap,
+
+    /// Background dispatch start gates keyed by `(feature_id, run_id)`.
+    ///
+    /// `dispatch_background` registers a spawned worker here after it writes
+    /// the Queued manifest. The connection handler releases the gate only
+    /// after it has attempted to write the background-dispatched RPC response,
+    /// preserving the hard ordering that dispatch returns before provider
+    /// work can begin.
+    deferred_background_starts: DeferredBackgroundStartMap,
+
+    /// Phase 7 Task 4: manifest-event pub/sub bus. The orchestrator
+    /// publishes `ManifestEvent`s via the typed `emit_*` helpers; the
+    /// `manifest/subscribe` router handler (Task 6) acquires receivers
+    /// and forwards payloads as `manifest/event` notifications. Clone-
+    /// cheap (`Arc`-backed) so handler borrows are free.
+    events: EventBus,
+
+    /// Phase 7 Task 5: captured-provider-session log store. Orchestrator
+    /// writes chunks via `append_chunk` (Task 9 wires this); the
+    /// `logs/stream` router handler (Task 6) reads via `snapshot` +
+    /// `subscribe`.
+    logs: LogStore,
+
+    /// Phase 7 Task 7/10: detached-task tracker for background evaluate /
+    /// execute dispatches. Shared across every handler invocation so a
+    /// `pice evaluate --background` returning within the dispatch-SLO
+    /// leaves a running future the `manifest/subscribe` handler can
+    /// observe and `pice status --wait` can synchronize against. The
+    /// manager clamps the global provider-concurrency cap to
+    /// [`pice_core::workflow::schema::MAX_GLOBAL_PROVIDER_CONCURRENCY_HARD_CAP`].
+    jobs: FeatureJobManager,
 }
 
 impl DaemonContext {
@@ -115,14 +167,26 @@ impl DaemonContext {
     /// `project_root` is the working directory the daemon serves.
     pub fn new(token: String, project_root: PathBuf) -> Self {
         let config = load_config(&project_root);
+        let events = EventBus::new();
+        let jobs = FeatureJobManager::new(
+            events.clone(),
+            resolve_global_provider_concurrency(&project_root),
+        );
         Self {
             active_token: token,
             version: env!("CARGO_PKG_VERSION"),
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_response_observed: AtomicBool::new(false),
+            shutdown_response_notify: Notify::new(),
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            background_admission_locks: Arc::new(StdMutex::new(HashMap::new())),
+            deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
+            events,
+            logs: LogStore::new(),
+            jobs,
         }
     }
 
@@ -135,14 +199,26 @@ impl DaemonContext {
     pub fn inline() -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let config = load_config(&project_root);
+        let events = EventBus::new();
+        let jobs = FeatureJobManager::new(
+            events.clone(),
+            resolve_global_provider_concurrency(&project_root),
+        );
         Self {
             active_token: String::new(),
             version: env!("CARGO_PKG_VERSION"),
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_response_observed: AtomicBool::new(false),
+            shutdown_response_notify: Notify::new(),
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            background_admission_locks: Arc::new(StdMutex::new(HashMap::new())),
+            deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
+            events,
+            logs: LogStore::new(),
+            jobs,
         }
     }
 
@@ -164,20 +240,97 @@ impl DaemonContext {
         self.shutdown_requested.load(Ordering::Relaxed)
     }
 
+    /// Request daemon shutdown. The accept loop will stop accepting new
+    /// connections, but must not let `lifecycle::run` return until the
+    /// connection task has attempted to write the shutdown RPC response.
+    pub fn request_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::Relaxed);
+    }
+
+    /// Mark the shutdown RPC response as written or attempted.
+    pub fn mark_shutdown_response_observed(&self) {
+        if !self
+            .shutdown_response_observed
+            .swap(true, Ordering::Relaxed)
+        {
+            self.shutdown_response_notify.notify_waiters();
+        }
+    }
+
+    /// Wait until the shutdown connection task has attempted its response.
+    pub async fn wait_for_shutdown_response_observed(&self, timeout: Duration) -> bool {
+        let notified = self.shutdown_response_notify.notified();
+        if self.shutdown_response_observed.load(Ordering::Relaxed) {
+            return true;
+        }
+        tokio::time::timeout(timeout, notified).await.is_ok()
+            || self.shutdown_response_observed.load(Ordering::Relaxed)
+    }
+
+    /// Phase 7: the process-wide manifest-event pub/sub bus.
+    /// Producers go through the typed `emit_*` helpers on
+    /// [`EventBus`]; subscribers (the `manifest/subscribe` router
+    /// handler) acquire receivers via `subscribe_feature` /
+    /// `subscribe_wildcard`.
+    pub fn events(&self) -> &EventBus {
+        &self.events
+    }
+
+    /// Phase 7: the captured-provider-session log store. Orchestrator
+    /// chunks flow in via `append_chunk` (Task 9 wires the forwarding);
+    /// the `logs/stream` router handler reads via `snapshot` /
+    /// `subscribe`.
+    pub fn logs(&self) -> &LogStore {
+        &self.logs
+    }
+
+    /// Phase 7: the detached-task tracker for background dispatches.
+    /// Task 10's dispatch helper uses this to enforce
+    /// one-feature-at-a-time (`run_id_for`) and to spawn the
+    /// orchestrator future on the daemon runtime.
+    pub fn jobs(&self) -> &FeatureJobManager {
+        &self.jobs
+    }
+
+    /// Validate a request's `auth` token against the active daemon
+    /// token. Returns `Ok(())` on match; on mismatch returns an
+    /// already-formatted `DaemonResponse` error (code `-32002`) that
+    /// the caller writes back to the connection.
+    ///
+    /// Used by the Phase 7 subscribe handlers, which branch on the
+    /// method name BEFORE entering the normal [`route`] path and
+    /// therefore must authenticate independently.
+    #[allow(clippy::result_large_err)] // DaemonResponse is returned unboxed so the caller can send it directly.
+    pub fn validate_auth(
+        &self,
+        req: &pice_core::protocol::DaemonRequest,
+    ) -> Result<(), pice_core::protocol::DaemonResponse> {
+        auth::validate_request(req, &self.active_token)
+    }
+
     /// Test-only constructor with a custom version string.
     ///
     /// Uses a fixed version instead of `env!("CARGO_PKG_VERSION")` so tests
     /// can assert on a known value without depending on Cargo.toml.
     #[cfg(test)]
     pub(crate) fn new_for_test(token: &str) -> Self {
+        let events = EventBus::new();
+        let jobs = FeatureJobManager::new(events.clone(), 4);
         Self {
             active_token: token.to_string(),
             version: "0.1.0-test",
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_response_observed: AtomicBool::new(false),
+            shutdown_response_notify: Notify::new(),
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config: PiceConfig::default(),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            background_admission_locks: Arc::new(StdMutex::new(HashMap::new())),
+            deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
+            events,
+            logs: LogStore::new(),
+            jobs,
         }
     }
 
@@ -188,14 +341,23 @@ impl DaemonContext {
     #[cfg(test)]
     pub(crate) fn new_for_test_with_root(token: &str, project_root: PathBuf) -> Self {
         let config = load_config(&project_root);
+        let events = EventBus::new();
+        let jobs = FeatureJobManager::new(events.clone(), 4);
         Self {
             active_token: token.to_string(),
             version: "0.1.0-test",
             start_time: Instant::now(),
             shutdown_requested: AtomicBool::new(false),
+            shutdown_response_observed: AtomicBool::new(false),
+            shutdown_response_notify: Notify::new(),
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            background_admission_locks: Arc::new(StdMutex::new(HashMap::new())),
+            deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
+            events,
+            logs: LogStore::new(),
+            jobs,
         }
     }
 
@@ -223,12 +385,133 @@ impl DaemonContext {
             .or_insert_with(|| Arc::new(TokioMutex::new(())))
             .clone()
     }
+
+    /// Acquire the short-lived admission mutex for a background feature.
+    ///
+    /// Callers hold this only until a Queued manifest has been persisted and
+    /// the corresponding `FeatureJobManager` entry has been inserted. It
+    /// prevents a duplicate caller from observing the pre-Queued admission
+    /// gap without forcing the duplicate to wait for the entire background
+    /// run's long-held manifest lock.
+    pub fn background_admission_lock_for(
+        &self,
+        project_hash: &str,
+        feature_id: &str,
+    ) -> Arc<TokioMutex<()>> {
+        let mut map = self
+            .background_admission_locks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let key = (project_hash.to_string(), feature_id.to_string());
+        map.entry(key)
+            .or_insert_with(|| Arc::new(TokioMutex::new(())))
+            .clone()
+    }
+
+    /// Register a background worker start gate that must be released only
+    /// after the daemon has attempted to write the dispatch response.
+    pub fn defer_background_start(
+        &self,
+        feature_id: &str,
+        run_id: &str,
+        start_tx: oneshot::Sender<()>,
+    ) {
+        let mut map = self
+            .deferred_background_starts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        map.insert((feature_id.to_string(), run_id.to_string()), start_tx);
+    }
+
+    /// Release a deferred background worker start gate.
+    ///
+    /// Returns `true` when a matching gate was found. Sending may still fail
+    /// if the worker exited before release; that is not actionable here.
+    pub fn release_background_start(&self, feature_id: &str, run_id: &str) -> bool {
+        let tx = {
+            let mut map = self
+                .deferred_background_starts
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            map.remove(&(feature_id.to_string(), run_id.to_string()))
+        };
+        let Some(tx) = tx else {
+            return false;
+        };
+        let _ = tx.send(());
+        true
+    }
+
+    /// If `resp` is a background-dispatched command response, release the
+    /// corresponding worker start gate. Called by connection handlers after
+    /// the response write completes or fails; on write failure there is no
+    /// caller left to observe the response, but the detached job must still
+    /// outlive the originating RPC connection.
+    pub fn release_background_start_from_response(&self, resp: &DaemonResponse) -> bool {
+        let Some(result) = resp.result.as_ref() else {
+            return false;
+        };
+        if result.get("type").and_then(|v| v.as_str()) != Some("json") {
+            return false;
+        }
+        let Some(value) = result.get("value") else {
+            return false;
+        };
+        if value.get("status").and_then(|v| v.as_str()) != Some("background-dispatched") {
+            return false;
+        }
+        let Some(feature_id) = value.get("feature_id").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        let Some(run_id) = value.get("run_id").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        self.release_background_start(feature_id, run_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deferred_background_start_count(&self) -> usize {
+        self.deferred_background_starts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .len()
+    }
 }
 
 /// Load config from `.pice/config.toml`, falling back to defaults.
 fn load_config(project_root: &std::path::Path) -> PiceConfig {
     let config_path = project_root.join(".pice/config.toml");
     PiceConfig::load(&config_path).unwrap_or_else(|_| PiceConfig::default())
+}
+
+/// Resolve the global-provider-concurrency cap for this daemon's
+/// [`FeatureJobManager`].
+///
+/// Precedence:
+/// 1. `workflow.yaml defaults.max_global_provider_concurrency` (if
+///    present)
+/// 2. `workflow.yaml defaults.max_parallelism` (if present) — matches
+///    v0.6 single-feature behavior
+/// 3. `num_cpus::get()` — parity with per-feature cohort default
+///
+/// The final value is clamped by [`FeatureJobManager::new`] to the
+/// hard cap. Returns `u32` so clamping math stays type-consistent with
+/// the schema field.
+///
+/// Non-existent / malformed `.pice/workflow.yaml` silently falls
+/// through to `num_cpus` — the daemon must start without a workflow
+/// config (uninitialized project), and a broken workflow file will be
+/// surfaced separately at evaluate-dispatch time.
+fn resolve_global_provider_concurrency(project_root: &std::path::Path) -> u32 {
+    let default = num_cpus::get().max(1) as u32;
+    match pice_core::workflow::loader::resolve(project_root) {
+        Ok(wf) => wf
+            .defaults
+            .max_global_provider_concurrency
+            .or(wf.defaults.max_parallelism)
+            .unwrap_or(default),
+        Err(_) => default,
+    }
 }
 
 /// Authenticate and dispatch a daemon RPC request.
@@ -248,7 +531,7 @@ pub async fn route(req: DaemonRequest, ctx: &DaemonContext) -> DaemonResponse {
 
     match req.method.as_str() {
         methods::DAEMON_HEALTH => handle_health(req.id, ctx),
-        methods::DAEMON_SHUTDOWN => handle_shutdown(req.id, ctx),
+        methods::DAEMON_SHUTDOWN => handle_shutdown(req.id, ctx).await,
         methods::CLI_DISPATCH => handle_dispatch(req, ctx).await,
         _ => DaemonResponse::error(req.id, METHOD_NOT_FOUND_CODE, "method not found"),
     }
@@ -272,13 +555,49 @@ fn handle_health(id: u64, ctx: &DaemonContext) -> DaemonResponse {
 
 /// `daemon/shutdown` — request orderly shutdown.
 ///
-/// Sets the shutdown flag and returns immediately. The actual shutdown
-/// sequence (drain in-flight RPCs, flush manifests, close providers, remove
-/// socket) is driven by the lifecycle event loop in T21 — this handler only
-/// signals intent.
-fn handle_shutdown(id: u64, ctx: &DaemonContext) -> DaemonResponse {
-    ctx.shutdown_requested.store(true, Ordering::Relaxed);
-    DaemonResponse::success(id, json!({"shutting_down": true}))
+/// Phase 7 Criterion 17 contract: the response is emitted AFTER
+/// [`FeatureJobManager::drain_on_shutdown`] returns, so any in-flight
+/// background-dispatch job has a chance to observe its cancel token and
+/// flush its final manifest save BEFORE the socket closes. Ordering:
+///
+/// 1. Set `shutdown_requested` (so the accept loop stops accepting new
+///    connections on its 100ms poll).
+/// 2. `await ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT)` — fires
+///    every feature's `CancellationToken` and waits up to 10s for the
+///    supervisor tasks to exit.
+/// 3. Emit the success response only if all jobs drained and any forced
+///    terminalization saves succeeded.
+///
+/// The `drained_remaining` field reports how many jobs were still live
+/// when the 10s budget elapsed; nonzero remaining jobs make shutdown
+/// fail closed. The flag-
+/// based poll in `lifecycle::run_unix` also calls drain for the
+/// SIGTERM path (no caller waiting there), keeping the two entry
+/// points symmetric.
+async fn handle_shutdown(id: u64, ctx: &DaemonContext) -> DaemonResponse {
+    ctx.request_shutdown();
+    let remaining = ctx
+        .jobs()
+        .drain_on_shutdown(crate::lifecycle::SHUTDOWN_TIMEOUT)
+        .await;
+    if !remaining.is_clean() {
+        return DaemonResponse::error(
+            id,
+            INTERNAL_ERROR_CODE,
+            format!(
+                "shutdown failed to drain {} background job(s); terminalization failures: {}",
+                remaining.remaining,
+                remaining.terminalization_failures.len()
+            ),
+        );
+    }
+    DaemonResponse::success(
+        id,
+        json!({
+            "shutting_down": true,
+            "drained_remaining": remaining.remaining,
+        }),
+    )
 }
 
 /// `cli/dispatch` — execute a `CommandRequest` in the daemon.
@@ -461,9 +780,106 @@ mod tests {
 
         let result = resp.result.expect("should have result");
         assert_eq!(result["shutting_down"], true);
+        // Phase 7 Criterion 17: drained_remaining is reported. With no
+        // background jobs, drain returns 0 immediately.
+        assert_eq!(
+            result["drained_remaining"], 0,
+            "idle context should drain with zero remaining jobs"
+        );
         assert!(
             ctx.is_shutdown_requested(),
             "shutdown flag should be set after handler"
+        );
+    }
+
+    /// Phase 7 Criterion 17: the shutdown handler MUST await
+    /// `drain_on_shutdown` BEFORE emitting its response. This test
+    /// spawns a supervised background job that holds across a short
+    /// sleep after its cancel token fires; asserts the shutdown
+    /// response lands AFTER the job exits (not before), and that the
+    /// final `drained_remaining == 0`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutdown_awaits_drain_before_returning() {
+        use pice_core::jobs::JobEnv;
+        use pice_core::layers::manifest::VerificationManifest;
+        use pice_core::workflow::schema::{CostCapBehavior, Defaults, Phases, WorkflowConfig};
+        use std::path::PathBuf;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc as StdArc;
+
+        let ctx = test_ctx("valid-token");
+        let env = StdArc::new(JobEnv {
+            state_dir: PathBuf::from("/tmp/state"),
+            project_root: PathBuf::from("/tmp/project"),
+            workflow_snapshot: WorkflowConfig {
+                schema_version: "0.2".into(),
+                defaults: Defaults {
+                    tier: 2,
+                    min_confidence: 0.90,
+                    max_passes: 5,
+                    model: "sonnet".into(),
+                    budget_usd: 2.0,
+                    cost_cap_behavior: CostCapBehavior::Halt,
+                    max_parallelism: None,
+                    max_global_provider_concurrency: None,
+                },
+                phases: Phases::default(),
+                layer_overrides: Default::default(),
+                review: None,
+                seams: None,
+            },
+            contracts: Default::default(),
+            pice_state_dir_override: None,
+            pice_user_workflow_file: None,
+        });
+
+        let job_exited = StdArc::new(AtomicBool::new(false));
+        let job_exited_c = job_exited.clone();
+        let job_started = StdArc::new(tokio::sync::Notify::new());
+        let job_started_c = job_started.clone();
+
+        ctx.jobs()
+            .spawn(
+                "feat-drain",
+                ctx.jobs().next_run_id(),
+                env,
+                move |_env, permit, cancel| async move {
+                    let _hold = permit;
+                    job_started_c.notify_one();
+                    cancel.cancelled().await;
+                    // Simulate a manifest-save flush after the cancel.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    job_exited_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(VerificationManifest::new(
+                        "feat-drain",
+                        std::path::Path::new("/irrelevant"),
+                    ))
+                },
+            )
+            .expect("spawn should succeed");
+
+        assert_eq!(ctx.jobs().active_count(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(1), job_started.notified())
+            .await
+            .expect("job should enter closure before shutdown");
+
+        // Issue daemon/shutdown. It must block until the job exits.
+        let req = test_req(99, methods::DAEMON_SHUTDOWN, "valid-token");
+        let before = std::time::Instant::now();
+        let resp = route(req, &ctx).await;
+        let elapsed = before.elapsed();
+
+        assert!(resp.error.is_none());
+        let result = resp.result.expect("result");
+        assert_eq!(result["drained_remaining"], 0);
+        assert!(
+            job_exited.load(std::sync::atomic::Ordering::SeqCst),
+            "job must have exited BEFORE the shutdown response returned",
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(80),
+            "shutdown response must wait for the job's cancel + flush (elapsed={:?})",
+            elapsed,
         );
     }
 

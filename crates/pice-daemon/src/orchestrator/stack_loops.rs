@@ -24,7 +24,7 @@ use pice_core::workflow::WorkflowConfig;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -32,7 +32,8 @@ use tracing::{debug, info, warn};
 use super::adaptive_loop::{
     run_adaptive_passes, AdaptiveContext, AdaptiveOutcome, PassMetricsSink,
 };
-use super::{run_seams_for_layer, ProviderOrchestrator, StreamSink};
+use super::{run_seams_for_layer, ProviderOrchestrator, SeamRunRequest, StreamSink};
+use crate::events::{terminal_save_intent_for_manifest, ManifestSaver, SaveIntent};
 use crate::prompt::layer_builder::build_layer_evaluation_prompt;
 
 /// Hard cap on parallel cohort tasks. Rate-limit-friendly against Anthropic /
@@ -75,6 +76,44 @@ pub struct StackLoopsConfig<'a> {
     /// violations BEFORE invoking the orchestrator. This field is the
     /// execution-time source of truth; the orchestrator does not re-merge.
     pub merged_seams: &'a BTreeMap<String, Vec<String>>,
+    /// Optional dispatch-time snapshot of layer contract file contents.
+    /// Background jobs pass this so queued work cannot evaluate different
+    /// contract text if project files change before provider work starts.
+    pub contract_contents: Option<&'a BTreeMap<String, String>>,
+    /// Optional dispatch-time snapshot of the git diff. Background jobs pass
+    /// this so queued work cannot evaluate a later worktree state.
+    pub full_diff: Option<&'a str>,
+    /// Optional dispatch-time snapshot of CLAUDE.md guidance.
+    pub claude_md: Option<&'a str>,
+    /// Optional dispatch-time snapshot of seam file paths. Background jobs
+    /// pass this so seam checks cannot walk a later filesystem state.
+    pub layer_paths: Option<&'a BTreeMap<String, Vec<PathBuf>>>,
+    /// Optional dispatch-time snapshot of seam file contents keyed by
+    /// repo-relative path. Background jobs pass this so seam checks cannot
+    /// read mutated files after dispatch.
+    pub seam_file_contents: Option<&'a BTreeMap<PathBuf, String>>,
+    /// Optional dispatch-time manifest path. Background jobs pass the path
+    /// derived from `JobEnv.state_dir`; foreground calls leave this unset and
+    /// compute from the live environment.
+    pub manifest_path: Option<&'a Path>,
+    /// Optional global provider-session semaphore. When present, every
+    /// provider process started by a layer holds one permit until shutdown.
+    /// This is separate from `defaults.max_parallelism`, which only limits
+    /// the number of cohort tasks spawned inside one feature.
+    pub global_provider_semaphore: Option<Arc<Semaphore>>,
+    /// Total capacity of `global_provider_semaphore` after daemon-side
+    /// clamping. Required to reject impossible `acquire_many` requests (for
+    /// example ADTS needing primary+adversarial permits when the cap is 1).
+    pub global_provider_capacity: Option<u32>,
+    /// Phase 7: manifest persistence + event-bus publication handle. Every
+    /// manifest state transition in the orchestrator goes through this
+    /// saver so the save + event emission are atomic. Inline mode and
+    /// test fixtures pass `&NullSaver`; background jobs pass
+    /// `&EventEmittingSaver::new(&ctx.events())`. The grep-coverage test
+    /// (`zero_raw_manifest_save_calls_in_orchestrator`) enforces that no
+    /// call site bypasses this trait to reach the low-level save path
+    /// directly.
+    pub saver: &'a dyn ManifestSaver,
 }
 
 /// Empty seam-check slot for layer results that never ran a seam check
@@ -84,6 +123,51 @@ pub struct StackLoopsConfig<'a> {
 #[inline]
 fn no_seam_checks() -> Vec<pice_core::layers::manifest::SeamCheckResult> {
     Vec::new()
+}
+
+fn in_progress_layer_result(layer_name: &str) -> LayerResult {
+    LayerResult {
+        name: layer_name.to_string(),
+        status: LayerStatus::InProgress,
+        passes: Vec::new(),
+        seam_checks: no_seam_checks(),
+        halted_by: None,
+        final_confidence: None,
+        total_cost_usd: None,
+        escalation_events: None,
+    }
+}
+
+fn replace_or_add_layer_result(manifest: &mut VerificationManifest, result: LayerResult) {
+    if let Some(existing) = manifest.layers.iter_mut().find(|l| l.name == result.name) {
+        *existing = result;
+    } else {
+        manifest.add_layer_result(result);
+    }
+}
+
+fn persist_layer_started_checkpoint(
+    manifest: &mut VerificationManifest,
+    manifest_path: Option<&Path>,
+    saver: &dyn ManifestSaver,
+    layer_name: &str,
+) -> Result<()> {
+    if let Some(path) = manifest_path {
+        replace_or_add_layer_result(manifest, in_progress_layer_result(layer_name));
+        manifest.compute_overall_status();
+        saver
+            .save_and_emit(
+                manifest,
+                path,
+                SaveIntent::LayerStarted {
+                    layer: layer_name.to_string(),
+                },
+            )
+            .with_context(|| {
+                format!("persisting LayerStarted checkpoint for layer {layer_name}")
+            })?;
+    }
+    Ok(())
 }
 
 /// Run the Stack Loops evaluation pipeline.
@@ -132,9 +216,17 @@ pub async fn run_stack_loops_with_cancel(
         .unwrap_or("unknown")
         .to_string();
 
-    // Get full diff and CLAUDE.md
-    let full_diff = get_git_diff(project_root)?;
-    let claude_md = read_claude_md(project_root)?;
+    // Get full diff and CLAUDE.md. Background jobs pass dispatch-time
+    // snapshots so queued work cannot evaluate a later worktree/guidance
+    // state after waiting on global provider capacity.
+    let full_diff = match cfg.full_diff {
+        Some(diff) => diff.to_string(),
+        None => get_git_diff(project_root)?,
+    };
+    let claude_md = match cfg.claude_md {
+        Some(content) => content.to_string(),
+        None => read_claude_md(project_root)?,
+    };
 
     // Extract changed file paths from the diff
     let changed_files = extract_changed_files_from_diff(&full_diff);
@@ -168,34 +260,9 @@ pub async fn run_stack_loops_with_cancel(
     // We only walk the disk for layers referenced by `merged_seams` (either
     // side of any declared boundary). All-layer scans would inflate cost
     // on repos where most layers aren't seam-connected.
-    let seam_layer_names: HashSet<String> = merged_seams
-        .keys()
-        .filter_map(|raw| LayerBoundary::parse(raw).ok())
-        .flat_map(|b| [b.a, b.b])
-        .collect();
-
-    let mut layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    for file in &changed_files {
-        for layer in pice_core::layers::tag_file_to_layers(config, file) {
-            layer_paths
-                .entry(layer)
-                .or_default()
-                .push(PathBuf::from(file));
-        }
-    }
-    for layer_name in &seam_layer_names {
-        let Some(def) = config.layers.defs.get(layer_name) else {
-            continue;
-        };
-        let scanned = scan_files_by_globs(project_root, &def.paths);
-        let entry = layer_paths.entry(layer_name.clone()).or_default();
-        let mut seen: HashSet<PathBuf> = entry.iter().cloned().collect();
-        for p in scanned {
-            if seen.insert(p.clone()) {
-                entry.push(p);
-            }
-        }
-    }
+    let layer_paths = cfg.layer_paths.cloned().unwrap_or_else(|| {
+        collect_layer_paths_for_seams(config, &changed_files, merged_seams, project_root)
+    });
 
     // Invariant: every path in layer_paths must be repo-relative (no
     // absolute prefixes). Both sources — changed-file diff extraction and
@@ -220,19 +287,26 @@ pub async fn run_stack_loops_with_cancel(
     let dag = config.build_dag().context("failed to build layer DAG")?;
 
     // Compute manifest path up front so we can attempt to resume from disk.
-    let manifest_path = match VerificationManifest::manifest_path_for(&feature_id, project_root) {
-        Ok(path) => {
+    let manifest_path = match cfg.manifest_path {
+        Some(path) => {
             if let Some(parent) = path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    warn!("failed to create manifest state dir: {e}");
-                }
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create manifest state dir {}", parent.display())
+                })?;
             }
-            Some(path)
+            Some(path.to_path_buf())
         }
-        Err(e) => {
-            warn!("failed to compute manifest path: {e}");
-            None
-        }
+        None => match VerificationManifest::manifest_path_for(&feature_id, project_root) {
+            Ok(path) => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create manifest state dir {}", parent.display())
+                    })?;
+                }
+                Some(path)
+            }
+            Err(e) => return Err(e).context("failed to compute manifest path"),
+        },
     };
 
     // Resume-from-disk (Phase 6): if a manifest already exists on disk for
@@ -245,20 +319,16 @@ pub async fn run_stack_loops_with_cancel(
     // retry-after-reject, or a crash-interrupted run) and get re-evaluated
     // in this invocation — their stale entries are dropped in the per-
     // cohort layer loop below.
-    let mut manifest = manifest_path
-        .as_ref()
-        .filter(|p| p.exists())
-        .and_then(|p| match VerificationManifest::load(p) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                warn!(
-                    path = %p.display(),
-                    error = %e,
-                    "failed to load existing manifest; starting fresh"
-                );
-                None
-            }
-        })
+    let loaded_manifest = match manifest_path.as_ref().filter(|p| p.exists()) {
+        Some(path) => Some(VerificationManifest::load(path).with_context(|| {
+            format!(
+                "failed to load existing manifest {}; refusing to replace source of truth",
+                path.display()
+            )
+        })?),
+        None => None,
+    };
+    let mut manifest = loaded_manifest
         .inspect(|loaded| {
             info!(
                 feature_id = %feature_id,
@@ -270,14 +340,6 @@ pub async fn run_stack_loops_with_cancel(
         })
         .unwrap_or_else(|| VerificationManifest::new(&feature_id, project_root));
     manifest.overall_status = ManifestStatus::InProgress;
-
-    // Persist the in-progress checkpoint (fresh or resumed) so that a
-    // mid-run crash leaves the manifest discoverable by the next evaluate.
-    if let Some(ref path) = manifest_path {
-        if let Err(e) = manifest.save(path) {
-            warn!("failed to persist initial manifest: {e}");
-        }
-    }
 
     // Phase 5 cohort parallelism: compute the concurrency cap once per
     // evaluation. `defaults.max_parallelism: None` → `num_cpus::get()`
@@ -330,6 +392,8 @@ pub async fn run_stack_loops_with_cancel(
         let mut immediate_results: HashMap<String, LayerResult> = HashMap::new();
         let mut immediate_chunks: HashMap<String, Vec<String>> = HashMap::new();
         let mut work_inputs: Vec<LayerInputs> = Vec::new();
+        let mut empty_diff_inputs: Vec<EmptyDiffLayerInput> = Vec::new();
+        let mut started_layers: Vec<String> = Vec::new();
 
         for layer_name in cohort {
             // Resume-preserve: if a prior run's manifest already carries a
@@ -390,6 +454,7 @@ pub async fn run_stack_loops_with_cancel(
 
             let Some(layer_def) = config.layers.defs.get(layer_name) else {
                 warn!(layer = %layer_name, "layer defined in order but missing definition");
+                started_layers.push(layer_name.clone());
                 immediate_results.insert(
                     layer_name.clone(),
                     LayerResult {
@@ -431,44 +496,18 @@ pub async fn run_stack_loops_with_cancel(
                     )
                 };
                 info!(layer = %layer_name, always_run = is_always_run, "empty diff for active layer");
-                let seam_checks = run_seams_for_layer(
-                    layer_name,
-                    &active_set,
-                    merged_seams,
-                    seam_registry_arc.as_ref(),
-                    project_root,
-                    &full_diff,
-                    &layer_paths,
-                );
-                let first_failed = seam_checks
-                    .iter()
-                    .find(|c| c.status == CheckStatus::Failed)
-                    .map(|c| c.name.clone());
-                let (final_status, final_reason) = match first_failed {
-                    Some(failed_id) => (LayerStatus::Failed, format!("seam:{failed_id}")),
-                    None => (status, reason),
-                };
-                immediate_results.insert(
-                    layer_name.clone(),
-                    LayerResult {
-                        name: layer_name.clone(),
-                        status: final_status,
-                        passes: Vec::new(),
-                        seam_checks,
-                        halted_by: Some(final_reason),
-                        final_confidence: None,
-                        total_cost_usd: None,
-                        escalation_events: None,
-                    },
-                );
-                immediate_chunks.insert(
-                    layer_name.clone(),
-                    vec![format!("  [{layer_name}] {label} (no file changes)\n")],
-                );
+                started_layers.push(layer_name.clone());
+                empty_diff_inputs.push(EmptyDiffLayerInput {
+                    layer_name: layer_name.clone(),
+                    status,
+                    label,
+                    reason,
+                });
                 continue;
             }
 
-            let contract_content = load_layer_contract(project_root, layer_name, layer_def);
+            let contract_content =
+                load_layer_contract(project_root, layer_name, layer_def, cfg.contract_contents);
             let _prompt = build_layer_evaluation_prompt(
                 layer_name,
                 &contract_content,
@@ -476,6 +515,7 @@ pub async fn run_stack_loops_with_cancel(
                 &claude_md,
             );
 
+            started_layers.push(layer_name.clone());
             work_inputs.push(build_per_layer_inputs(
                 cfg,
                 layer_name,
@@ -487,6 +527,62 @@ pub async fn run_stack_loops_with_cancel(
                 &full_diff,
                 Arc::clone(&seam_registry_arc),
             ));
+        }
+
+        // Phase 7: emit exactly one LayerStarted event per layer that
+        // actually enters active work. The scan above records both
+        // empty-diff seam/static work and non-empty provider work in DAG
+        // order; checkpoint all starts before running either work class so
+        // subscribers see a topological LayerStarted stream and every layer
+        // has a durable InProgress entry before its own work begins.
+        for layer_name in &started_layers {
+            persist_layer_started_checkpoint(
+                &mut manifest,
+                manifest_path.as_deref(),
+                cfg.saver,
+                layer_name,
+            )?;
+        }
+
+        for empty in empty_diff_inputs {
+            let seam_checks = run_seams_for_layer(SeamRunRequest {
+                layer_name: &empty.layer_name,
+                active_layers: &active_set,
+                merged_seams,
+                registry: seam_registry_arc.as_ref(),
+                repo_root: project_root,
+                full_diff: &full_diff,
+                layer_paths: &layer_paths,
+                file_contents: cfg.seam_file_contents,
+            });
+            let first_failed = seam_checks
+                .iter()
+                .find(|c| c.status == CheckStatus::Failed)
+                .map(|c| c.name.clone());
+            let (final_status, final_reason) = match first_failed {
+                Some(failed_id) => (LayerStatus::Failed, format!("seam:{failed_id}")),
+                None => (empty.status, empty.reason),
+            };
+            immediate_results.insert(
+                empty.layer_name.clone(),
+                LayerResult {
+                    name: empty.layer_name.clone(),
+                    status: final_status,
+                    passes: Vec::new(),
+                    seam_checks,
+                    halted_by: Some(final_reason),
+                    final_confidence: None,
+                    total_cost_usd: None,
+                    escalation_events: None,
+                },
+            );
+            immediate_chunks.insert(
+                empty.layer_name.clone(),
+                vec![format!(
+                    "  [{}] {} (no file changes)\n",
+                    empty.layer_name, empty.label
+                )],
+            );
         }
 
         // Dispatch the real-work subset: parallel when allowed, sequential
@@ -664,12 +760,23 @@ pub async fn run_stack_loops_with_cancel(
                 }
             }
 
-            manifest.add_layer_result(layer_result);
+            let completed_layer_name = layer_result.name.clone();
+            replace_or_add_layer_result(&mut manifest, layer_result);
 
             if let Some(ref path) = manifest_path {
-                if let Err(e) = manifest.save(path) {
-                    warn!("failed to checkpoint manifest: {e}");
-                }
+                cfg.saver
+                    .save_and_emit(
+                        &manifest,
+                        path,
+                        SaveIntent::LayerCompleted {
+                            layer: completed_layer_name.clone(),
+                        },
+                    )
+                    .with_context(|| {
+                        format!(
+                            "persisting LayerCompleted checkpoint for layer {completed_layer_name}"
+                        )
+                    })?;
             }
         }
 
@@ -684,6 +791,28 @@ pub async fn run_stack_loops_with_cancel(
         // cohort if the token fired.
         if cancel.is_cancelled() {
             warn!("cancellation observed between cohorts; aborting remaining cohorts");
+            for remaining in dag.cohorts.iter().skip(cohort_idx + 1) {
+                for layer_name in remaining {
+                    if !active_set.contains(layer_name)
+                        || manifest.layers.iter().any(|l| &l.name == layer_name)
+                    {
+                        continue;
+                    }
+                    replace_or_add_layer_result(
+                        &mut manifest,
+                        LayerResult {
+                            name: layer_name.clone(),
+                            status: LayerStatus::Failed,
+                            passes: Vec::new(),
+                            seam_checks: no_seam_checks(),
+                            halted_by: Some(CancelledReason::InFlight.as_halted_by()),
+                            final_confidence: None,
+                            total_cost_usd: None,
+                            escalation_events: None,
+                        },
+                    );
+                }
+            }
             break;
         }
 
@@ -716,14 +845,40 @@ pub async fn run_stack_loops_with_cancel(
                     layer.status = LayerStatus::PendingReview;
                 }
             }
-            // Append gates and recompute overall status.
+            // Append gates and recompute overall status. Capture the
+            // appended gate metadata so each GateAppended event carries
+            // its {gate_id, layer, trigger_expression} payload.
+            let appended_gates: Vec<(String, String, String)> = gate_check
+                .new_gates
+                .iter()
+                .map(|g| (g.id.clone(), g.layer.clone(), g.trigger_expression.clone()))
+                .collect();
             manifest.gates.extend(gate_check.new_gates);
             manifest.compute_overall_status();
-            // Persist so the decide handler sees the gates.
+            // Persist so the decide handler sees the gates. One
+            // save_and_emit per gate so subscribers see each gate's
+            // `trigger_expression` individually; the actual manifest
+            // write is identical across the loop iterations but the
+            // event stream carries per-gate context.
             if let Some(ref path) = manifest_path {
-                if let Err(e) = manifest.save(path) {
-                    warn!("failed to persist pending-review manifest: {e}");
+                for (gate_id, layer, trigger_expression) in appended_gates {
+                    let context =
+                        format!("persisting pending-review gate {gate_id} for layer {layer}");
+                    cfg.saver
+                        .save_and_emit(
+                            &manifest,
+                            path,
+                            SaveIntent::GateAppended {
+                                gate_id,
+                                layer,
+                                trigger_expression,
+                            },
+                        )
+                        .with_context(|| context)?;
                 }
+                cfg.saver
+                    .save_and_emit(&manifest, path, SaveIntent::FeatureCompleted)
+                    .context("persisting pending-review terminal manifest")?;
             }
             info!(
                 cohort_index = cohort_idx,
@@ -779,11 +934,17 @@ pub async fn run_stack_loops_with_cancel(
     // Compute overall status and persist final manifest
     manifest.compute_overall_status();
 
-    // Persist final manifest state
+    // Persist final manifest state. Phase 7 couples the final save with
+    // the matching terminal event; cooperative cancellation emits
+    // `Cancelled`, while normal pass/fail/pending-review completion emits
+    // `FeatureComplete`. A follow-up
+    // `LogChunk { terminal: true }` is emitted by the dispatch wrapper
+    // (Task 10) — the orchestrator itself does not own the LogStore.
     if let Some(ref path) = manifest_path {
-        if let Err(e) = manifest.save(path) {
-            warn!("failed to persist final manifest: {e}");
-        }
+        let intent = terminal_save_intent_for_manifest(&manifest);
+        cfg.saver
+            .save_and_emit(&manifest, path, intent)
+            .context("persisting final terminal manifest")?;
     }
 
     info!(
@@ -825,6 +986,30 @@ enum LayerAdaptiveResult {
     /// is surfaced on the manifest's `halted_by` so operators can see
     /// *why* the layer failed at the orchestrator level.
     RuntimeError(String),
+}
+
+async fn acquire_provider_session_permits(
+    semaphore: Option<&Arc<Semaphore>>,
+    layer_name: &str,
+    session_count: u32,
+) -> Result<Option<OwnedSemaphorePermit>, String> {
+    if session_count == 0 {
+        return Ok(None);
+    }
+    let Some(semaphore) = semaphore else {
+        return Ok(None);
+    };
+    semaphore
+        .clone()
+        .acquire_many_owned(session_count)
+        .await
+        .map(Some)
+        .map_err(|e| {
+            format!(
+                "global provider semaphore closed before acquiring {session_count} provider \
+                 session permit(s) for layer {layer_name}: {e}"
+            )
+        })
 }
 
 /// Attempt to run the per-layer adaptive pass loop.
@@ -884,6 +1069,57 @@ async fn try_run_layer_adaptive(
         return LayerAdaptiveResult::NotStarted;
     }
 
+    let needs_adversarial = algo == pice_core::workflow::schema::AdaptiveAlgo::Adts
+        && cfg.pice_config.evaluation.adversarial.enabled;
+    if needs_adversarial
+        && pice_core::provider::registry::resolve(
+            &cfg.pice_config.evaluation.adversarial.provider,
+            cfg.pice_config,
+        )
+        .is_none()
+    {
+        warn!(
+            layer = %layer_name,
+            provider = %cfg.pice_config.evaluation.adversarial.provider,
+            "adversarial provider unresolvable, falling back to phase-1-pending",
+        );
+        // ADTS without adversarial is degenerate — fall back before starting
+        // the primary provider.
+        return LayerAdaptiveResult::NotStarted;
+    }
+
+    // Reserve every provider session this layer needs as one semaphore unit.
+    // ADTS starts both primary and adversarial providers; acquiring one permit
+    // at a time can deadlock when two layers each hold a primary permit and
+    // both wait for their adversarial permit. `acquire_many_owned(2)` queues
+    // the whole layer until the full pair is available.
+    let required_provider_sessions = if needs_adversarial { 2 } else { 1 };
+    if let Some(capacity) = cfg.global_provider_capacity {
+        if required_provider_sessions > capacity {
+            let msg = format!(
+                "ADTS adversarial evaluation for layer '{layer_name}' requires \
+                 {required_provider_sessions} concurrent provider-session permits, but \
+                 max_global_provider_concurrency is {capacity}. Raise the global cap to at \
+                 least {required_provider_sessions} or disable adversarial ADTS."
+            );
+            warn!(layer = %layer_name, "{msg}");
+            return LayerAdaptiveResult::RuntimeError(msg);
+        }
+    }
+    let _provider_session_permits = match acquire_provider_session_permits(
+        cfg.global_provider_semaphore.as_ref(),
+        layer_name,
+        required_provider_sessions,
+    )
+    .await
+    {
+        Ok(permit) => permit,
+        Err(msg) => {
+            warn!(layer = %layer_name, "{msg}");
+            return LayerAdaptiveResult::RuntimeError(msg);
+        }
+    };
+
     let mut primary = match ProviderOrchestrator::start(cfg.primary_provider, cfg.pice_config).await
     {
         Ok(p) => p,
@@ -939,26 +1175,7 @@ async fn try_run_layer_adaptive(
     }
 
     // Start the adversarial provider only when ADTS is selected.
-    let mut adversarial: Option<ProviderOrchestrator> = if algo
-        == pice_core::workflow::schema::AdaptiveAlgo::Adts
-        && cfg.pice_config.evaluation.adversarial.enabled
-    {
-        // Same resolve-then-start classification for the adversarial path.
-        if pice_core::provider::registry::resolve(
-            &cfg.pice_config.evaluation.adversarial.provider,
-            cfg.pice_config,
-        )
-        .is_none()
-        {
-            warn!(
-                layer = %layer_name,
-                provider = %cfg.pice_config.evaluation.adversarial.provider,
-                "adversarial provider unresolvable, falling back to phase-1-pending",
-            );
-            // ADTS without adversarial is degenerate — shut down primary and fall back.
-            let _ = primary.shutdown().await;
-            return LayerAdaptiveResult::NotStarted;
-        }
+    let mut adversarial: Option<ProviderOrchestrator> = if needs_adversarial {
         match ProviderOrchestrator::start(
             &cfg.pice_config.evaluation.adversarial.provider,
             cfg.pice_config,
@@ -1273,7 +1490,15 @@ fn load_layer_contract(
     project_root: &Path,
     layer_name: &str,
     layer_def: &pice_core::layers::LayerDef,
+    contract_contents: Option<&BTreeMap<String, String>>,
 ) -> String {
+    if let Some(contents) = contract_contents {
+        if let Some(content) = contents.get(layer_name) {
+            return content.clone();
+        }
+        return generic_layer_contract(layer_name);
+    }
+
     // Try layer's explicit contract path
     if let Some(ref contract_path) = layer_def.contract {
         let full_path = project_root.join(contract_path);
@@ -1291,6 +1516,10 @@ fn load_layer_contract(
     }
 
     // Fallback: generic contract
+    generic_layer_contract(layer_name)
+}
+
+fn generic_layer_contract(layer_name: &str) -> String {
     format!(
         "[criteria]\n{layer_name}_correctness = \"Code changes in the {layer_name} layer are correct and complete\""
     )
@@ -1348,9 +1577,12 @@ struct LayerInputs {
     active_set: HashSet<String>,
     merged_seams: BTreeMap<String, Vec<String>>,
     layer_paths: BTreeMap<String, Vec<PathBuf>>,
+    seam_file_contents: Option<BTreeMap<PathBuf, String>>,
     project_root: PathBuf,
     full_diff: String,
     seam_registry: Arc<Registry>,
+    global_provider_semaphore: Option<Arc<Semaphore>>,
+    global_provider_capacity: Option<u32>,
 }
 
 /// Outcome of one parallel cohort task. The outer `run_stack_loops_with_cancel`
@@ -1364,6 +1596,13 @@ struct LayerOutcome {
     layer_name: String,
     layer_result: LayerResult,
     streamed_chunks: Vec<String>,
+}
+
+struct EmptyDiffLayerInput {
+    layer_name: String,
+    status: LayerStatus,
+    label: &'static str,
+    reason: String,
 }
 
 /// Extract LAYER-OWN inputs from `cfg` for `layer_name`. The result owns
@@ -1405,9 +1644,12 @@ fn build_per_layer_inputs(
         active_set: active_set.clone(),
         merged_seams: cfg.merged_seams.clone(),
         layer_paths: layer_paths.clone(),
+        seam_file_contents: cfg.seam_file_contents.cloned(),
         project_root: cfg.project_root.to_path_buf(),
         full_diff: full_diff.to_string(),
         seam_registry,
+        global_provider_semaphore: cfg.global_provider_semaphore.clone(),
+        global_provider_capacity: cfg.global_provider_capacity,
     }
 }
 
@@ -1466,6 +1708,8 @@ async fn evaluate_one_layer(
         inputs.pice_config.clone(),
         inputs.workflow.clone(),
         inputs.project_root.clone(),
+        inputs.global_provider_semaphore.clone(),
+        inputs.global_provider_capacity,
         Arc::clone(&pass_sink),
     );
 
@@ -1493,15 +1737,16 @@ async fn evaluate_one_layer(
 
     // Seam checks run after the adaptive loop. Cheap + deterministic, no
     // cancellation plumbing needed here.
-    let seam_checks = run_seams_for_layer(
-        &inputs.layer_name,
-        &inputs.active_set,
-        &inputs.merged_seams,
-        inputs.seam_registry.as_ref(),
-        &inputs.project_root,
-        &inputs.full_diff,
-        &inputs.layer_paths,
-    );
+    let seam_checks = run_seams_for_layer(SeamRunRequest {
+        layer_name: &inputs.layer_name,
+        active_layers: &inputs.active_set,
+        merged_seams: &inputs.merged_seams,
+        registry: inputs.seam_registry.as_ref(),
+        repo_root: &inputs.project_root,
+        full_diff: &inputs.full_diff,
+        layer_paths: &inputs.layer_paths,
+        file_contents: inputs.seam_file_contents.as_ref(),
+    });
     let first_failed_seam = seam_checks
         .iter()
         .find(|c| c.status == CheckStatus::Failed)
@@ -1559,6 +1804,8 @@ async fn try_run_layer_adaptive_owned(
     pice_config: PiceConfig,
     workflow: WorkflowConfig,
     project_root: PathBuf,
+    global_provider_semaphore: Option<Arc<Semaphore>>,
+    global_provider_capacity: Option<u32>,
     pass_sink: Arc<dyn PassMetricsSink>,
 ) -> LayerAdaptiveResult {
     // Build a transient `StackLoopsConfig` and delegate to the shared
@@ -1585,6 +1832,12 @@ async fn try_run_layer_adaptive_owned(
     let empty_layers = LayersConfig::default();
     let dummy_plan = std::path::PathBuf::from("/dev/null");
     let dummy_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Placeholder saver: the owned wrapper calls `try_run_layer_adaptive`,
+    // which runs the adaptive loop only — it does NOT persist the manifest
+    // (the outer `run_stack_loops_with_cancel` owns all manifest writes).
+    // A `NullSaver` therefore never receives a `save_and_emit` call on
+    // this path; it's a typechecker placeholder.
+    let saver = crate::events::NullSaver;
     let cfg = StackLoopsConfig {
         layers: &empty_layers,
         plan_path: &dummy_plan,
@@ -1594,6 +1847,15 @@ async fn try_run_layer_adaptive_owned(
         pice_config: &pice_config,
         workflow: &workflow,
         merged_seams: &dummy_seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore,
+        global_provider_capacity,
+        saver: &saver,
     };
     try_run_layer_adaptive(
         &cfg,
@@ -1611,7 +1873,7 @@ async fn try_run_layer_adaptive_owned(
 /// Parses `diff --git a/... b/...` headers to extract the `b/` path
 /// (the new file path). For deleted files (`+++ /dev/null`), uses the
 /// `a/` path.
-fn extract_changed_files_from_diff(diff: &str) -> Vec<String> {
+pub(crate) fn extract_changed_files_from_diff(diff: &str) -> Vec<String> {
     let mut files = Vec::new();
 
     for line in diff.lines() {
@@ -1625,6 +1887,43 @@ fn extract_changed_files_from_diff(diff: &str) -> Vec<String> {
     }
 
     files
+}
+
+pub(crate) fn collect_layer_paths_for_seams(
+    config: &LayersConfig,
+    changed_files: &[String],
+    merged_seams: &BTreeMap<String, Vec<String>>,
+    project_root: &Path,
+) -> BTreeMap<String, Vec<PathBuf>> {
+    let seam_layer_names: HashSet<String> = merged_seams
+        .keys()
+        .filter_map(|raw| LayerBoundary::parse(raw).ok())
+        .flat_map(|b| [b.a, b.b])
+        .collect();
+
+    let mut layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for file in changed_files {
+        for layer in pice_core::layers::tag_file_to_layers(config, file) {
+            layer_paths
+                .entry(layer)
+                .or_default()
+                .push(PathBuf::from(file));
+        }
+    }
+    for layer_name in &seam_layer_names {
+        let Some(def) = config.layers.defs.get(layer_name) else {
+            continue;
+        };
+        let scanned = scan_files_by_globs(project_root, &def.paths);
+        let entry = layer_paths.entry(layer_name.clone()).or_default();
+        let mut seen: HashSet<PathBuf> = entry.iter().cloned().collect();
+        for p in scanned {
+            if seen.insert(p.clone()) {
+                entry.push(p);
+            }
+        }
+    }
+    layer_paths
 }
 
 #[cfg(test)]
@@ -1689,6 +1988,55 @@ mod tests {
         }
     }
 
+    struct FailFeatureCompleteSaver;
+
+    impl crate::events::ManifestSaver for FailFeatureCompleteSaver {
+        fn save_and_emit(
+            &self,
+            _manifest: &VerificationManifest,
+            _path: &std::path::Path,
+            intent: SaveIntent,
+        ) -> anyhow::Result<()> {
+            if matches!(intent, SaveIntent::FeatureCompleted) {
+                anyhow::bail!("terminal save refused");
+            }
+            Ok(())
+        }
+    }
+
+    struct FailLayerStartedSaver;
+
+    impl crate::events::ManifestSaver for FailLayerStartedSaver {
+        fn save_and_emit(
+            &self,
+            _manifest: &VerificationManifest,
+            _path: &std::path::Path,
+            intent: SaveIntent,
+        ) -> anyhow::Result<()> {
+            if matches!(intent, SaveIntent::LayerStarted { .. }) {
+                anyhow::bail!("layer-start save refused");
+            }
+            Ok(())
+        }
+    }
+
+    struct RecordingSaver {
+        intents: std::sync::Arc<std::sync::Mutex<Vec<SaveIntent>>>,
+    }
+
+    impl crate::events::ManifestSaver for RecordingSaver {
+        fn save_and_emit(
+            &self,
+            manifest: &VerificationManifest,
+            path: &std::path::Path,
+            intent: SaveIntent,
+        ) -> anyhow::Result<()> {
+            manifest.save(path)?;
+            self.intents.lock().unwrap().push(intent);
+            Ok(())
+        }
+    }
+
     #[test]
     fn extract_changed_files_basic() {
         let diff = [
@@ -1715,6 +2063,463 @@ mod tests {
     fn extract_changed_files_empty_diff() {
         let files = extract_changed_files_from_diff("");
         assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_between_cohorts_marks_remaining_active_layers_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        let manifest_path = dir.path().join("manifest.json");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec!["setup".to_string(), "backend".to_string()],
+                defs: BTreeMap::from([
+                    (
+                        "setup".to_string(),
+                        LayerDef {
+                            paths: vec!["setup/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                    (
+                        "backend".to_string(),
+                        LayerDef {
+                            paths: vec!["src/backend/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: vec!["setup".to_string()],
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                ]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let diff = "diff --git a/src/backend/app.rs b/src/backend/app.rs\n+++ b/src/backend/app.rs\n+fn changed() {}\n";
+        let intents = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let saver = RecordingSaver {
+            intents: intents.clone(),
+        };
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test-provider",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(diff),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        let manifest = run_stack_loops_with_cancel(&cfg, &NullSink, false, pass_sink, cancel)
+            .await
+            .unwrap();
+        assert_eq!(manifest.overall_status, ManifestStatus::Failed);
+        let backend = manifest
+            .layers
+            .iter()
+            .find(|layer| layer.name == "backend")
+            .expect("remaining active backend layer should be represented");
+        assert_eq!(backend.status, LayerStatus::Failed);
+        assert!(
+            backend
+                .halted_by
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with("cancelled:")),
+            "remaining active layer should be cancelled, got {:?}",
+            backend.halted_by
+        );
+        assert!(
+            intents
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|intent| matches!(intent, SaveIntent::Cancelled { .. })),
+            "terminal save for cancelled manifest must emit Cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_started_checkpoint_persists_in_progress_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec!["backend".to_string()],
+                defs: BTreeMap::from([(
+                    "backend".to_string(),
+                    LayerDef {
+                        paths: vec!["src/backend/**".to_string()],
+                        always_run: false,
+                        contract: None,
+                        depends_on: Vec::new(),
+                        layer_type: None,
+                        environment_variants: None,
+                    },
+                )]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let diff = "diff --git a/src/backend/app.rs b/src/backend/app.rs\n+++ b/src/backend/app.rs\n+fn changed() {}\n";
+        let bus = crate::events::EventBus::new();
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_path = manifest_path.clone();
+        let hook_snapshots = std::sync::Arc::clone(&snapshots);
+        let after_save = move || {
+            if let Ok(manifest) = VerificationManifest::load(&hook_path) {
+                let statuses: Vec<(String, LayerStatus)> = manifest
+                    .layers
+                    .iter()
+                    .map(|layer| (layer.name.clone(), layer.status.clone()))
+                    .collect();
+                hook_snapshots.lock().unwrap().push(statuses);
+            }
+        };
+        let hooks = crate::events::EventEmittingSaverHooks {
+            before_save: None,
+            after_save_before_emit: Some(&after_save),
+        };
+        let saver = crate::events::EventEmittingSaver::new_with_hooks(&bus, hooks);
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "not-a-real-provider-kjsdfhgsd",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(diff),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .unwrap();
+        let snapshots = snapshots.lock().unwrap();
+        assert!(
+            snapshots.iter().any(|statuses| statuses
+                .iter()
+                .any(|(name, status)| name == "backend" && *status == LayerStatus::InProgress)),
+            "LayerStarted save should persist backend as InProgress first, got {snapshots:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_diff_always_run_layer_checkpoints_before_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec!["infrastructure".to_string()],
+                defs: BTreeMap::from([(
+                    "infrastructure".to_string(),
+                    LayerDef {
+                        paths: vec!["infra/**".to_string()],
+                        always_run: true,
+                        contract: None,
+                        depends_on: Vec::new(),
+                        layer_type: None,
+                        environment_variants: None,
+                    },
+                )]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let bus = crate::events::EventBus::new();
+        let snapshots = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hook_path = manifest_path.clone();
+        let hook_snapshots = std::sync::Arc::clone(&snapshots);
+        let after_save = move || {
+            if let Ok(manifest) = VerificationManifest::load(&hook_path) {
+                let statuses: Vec<(String, LayerStatus)> = manifest
+                    .layers
+                    .iter()
+                    .map(|layer| (layer.name.clone(), layer.status.clone()))
+                    .collect();
+                hook_snapshots.lock().unwrap().push(statuses);
+            }
+        };
+        let hooks = crate::events::EventEmittingSaverHooks {
+            before_save: None,
+            after_save_before_emit: Some(&after_save),
+        };
+        let saver = crate::events::EventEmittingSaver::new_with_hooks(&bus, hooks);
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test-provider",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(""),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .unwrap();
+        let snapshots = snapshots.lock().unwrap();
+        let started_pos = snapshots
+            .iter()
+            .position(|statuses| {
+                statuses.iter().any(|(name, status)| {
+                    name == "infrastructure" && *status == LayerStatus::InProgress
+                })
+            })
+            .expect("empty-diff always_run layer should checkpoint InProgress");
+        let completed_pos = snapshots
+            .iter()
+            .position(|statuses| {
+                statuses.iter().any(|(name, status)| {
+                    name == "infrastructure" && *status == LayerStatus::Pending
+                })
+            })
+            .expect("empty-diff always_run layer should complete as Pending");
+        assert!(
+            started_pos < completed_pos,
+            "LayerStarted checkpoint must precede completion, got {snapshots:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_empty_and_non_empty_cohort_starts_in_dag_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec![
+                    "api".to_string(),
+                    "infrastructure".to_string(),
+                    "web".to_string(),
+                ],
+                defs: BTreeMap::from([
+                    (
+                        "api".to_string(),
+                        LayerDef {
+                            paths: vec!["src/api/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                    (
+                        "infrastructure".to_string(),
+                        LayerDef {
+                            paths: vec!["infra/**".to_string()],
+                            always_run: true,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                    (
+                        "web".to_string(),
+                        LayerDef {
+                            paths: vec!["src/web/**".to_string()],
+                            always_run: false,
+                            contract: None,
+                            depends_on: Vec::new(),
+                            layer_type: None,
+                            environment_variants: None,
+                        },
+                    ),
+                ]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let diff = [
+            "diff --git a/src/api/app.rs b/src/api/app.rs",
+            "+++ b/src/api/app.rs",
+            "+fn api() {}",
+            "diff --git a/src/web/app.ts b/src/web/app.ts",
+            "+++ b/src/web/app.ts",
+            "+export const x = 1;",
+        ]
+        .join("\n");
+        let intents = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let saver = RecordingSaver {
+            intents: std::sync::Arc::clone(&intents),
+        };
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "not-a-real-provider-kjsdfhgsd",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(&diff),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .unwrap();
+        let started: Vec<String> = intents
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|intent| match intent {
+                SaveIntent::LayerStarted { layer } => Some(layer.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            started,
+            vec![
+                "api".to_string(),
+                "infrastructure".to_string(),
+                "web".to_string(),
+            ],
+            "LayerStarted events must follow cohort DAG order"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_started_checkpoint_failure_fails_closed_before_provider_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let layers_config = LayersConfig {
+            layers: LayersTable {
+                order: vec!["backend".to_string()],
+                defs: BTreeMap::from([(
+                    "backend".to_string(),
+                    LayerDef {
+                        paths: vec!["src/backend/**".to_string()],
+                        always_run: false,
+                        contract: None,
+                        depends_on: Vec::new(),
+                        layer_type: None,
+                        environment_variants: None,
+                    },
+                )]),
+            },
+            seams: None,
+            external_contracts: None,
+            stacks: None,
+        };
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let empty_layer_paths: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        let diff = "diff --git a/src/backend/app.rs b/src/backend/app.rs\n+++ b/src/backend/app.rs\n+fn changed() {}\n";
+        let saver = FailLayerStartedSaver;
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "provider-must-not-start",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: Some(diff),
+            claude_md: Some(""),
+            layer_paths: Some(&empty_layer_paths),
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+
+        let err = run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .expect_err("LayerStarted save failure must fail closed");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("persisting LayerStarted checkpoint for layer backend")
+                && rendered.contains("layer-start save refused"),
+            "unexpected error: {rendered}"
+        );
     }
 
     #[tokio::test]
@@ -1753,6 +2558,8 @@ mod tests {
         let pice_config = PiceConfig::default();
         let workflow = test_workflow();
         let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let manifest_path = dir.path().join("manifest-state/plan.manifest.json");
+        let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -1762,6 +2569,15 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: Some(&manifest_path),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
         };
 
         let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
@@ -1823,6 +2639,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn final_feature_complete_save_failure_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("src/server")).unwrap();
+        std::fs::write(dir.path().join("src/server/main.rs"), "fn main() {}").unwrap();
+
+        let layers_config = test_layers_config();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let saver = FailFeatureCompleteSaver;
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test-provider",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: Some(manifest_path.as_path()),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+        let err = run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .expect_err("terminal save failure must propagate");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("persisting final terminal manifest")
+                && rendered.contains("terminal save refused"),
+            "unexpected error: {rendered}"
+        );
+    }
+
+    #[tokio::test]
     async fn run_stack_loops_no_changes() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1854,6 +2737,8 @@ mod tests {
         let pice_config = PiceConfig::default();
         let workflow = test_workflow();
         let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let manifest_path = dir.path().join("manifest-state/plan.manifest.json");
+        let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers_config,
             plan_path: &plan_path,
@@ -1863,6 +2748,15 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: Some(&manifest_path),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
         };
 
         let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
@@ -1912,7 +2806,7 @@ mod tests {
             environment_variants: None,
         };
 
-        let content = load_layer_contract(dir.path(), "backend", &def);
+        let content = load_layer_contract(dir.path(), "backend", &def, None);
         assert!(content.contains("[criteria]"));
         assert!(content.contains("backend"));
     }
@@ -1937,9 +2831,61 @@ mod tests {
             environment_variants: None,
         };
 
-        let content = load_layer_contract(dir.path(), "api", &def);
+        let content = load_layer_contract(dir.path(), "api", &def, None);
         assert!(content.contains("response_format"));
         assert!(content.contains("JSON"));
+    }
+
+    #[test]
+    fn load_layer_contract_prefers_dispatch_snapshot_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let live_dir = dir.path().join("live");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        std::fs::write(live_dir.join("backend.toml"), "[criteria]\nlive = \"late\"").unwrap();
+
+        let def = LayerDef {
+            paths: vec!["src/**".to_string()],
+            always_run: false,
+            contract: Some("live/backend.toml".to_string()),
+            depends_on: Vec::new(),
+            layer_type: None,
+            environment_variants: None,
+        };
+        let mut snapshot = BTreeMap::new();
+        snapshot.insert(
+            "backend".to_string(),
+            "[criteria]\nsnapshot = \"dispatch\"".to_string(),
+        );
+
+        let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot));
+        assert!(content.contains("snapshot = \"dispatch\""));
+        assert!(!content.contains("live = \"late\""));
+    }
+
+    #[test]
+    fn load_layer_contract_snapshot_mode_does_not_read_late_live_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let live_dir = dir.path().join(".pice/contracts");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        std::fs::write(
+            live_dir.join("backend.toml"),
+            "[criteria]\nlate = \"should-not-load\"",
+        )
+        .unwrap();
+
+        let def = LayerDef {
+            paths: vec!["src/backend/**".to_string()],
+            always_run: false,
+            contract: None,
+            depends_on: Vec::new(),
+            layer_type: None,
+            environment_variants: None,
+        };
+        let snapshot = BTreeMap::new();
+
+        let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot));
+        assert!(!content.contains("should-not-load"));
+        assert!(content.contains("backend_correctness"));
     }
 
     /// Seam-fail fixture: changes touch backend + infrastructure with
@@ -1993,6 +2939,8 @@ mod tests {
         let plan_path = dir.path().join("plan.md");
         std::fs::write(&plan_path, "# Plan").unwrap();
         let pice_config = PiceConfig::default();
+        let manifest_path = dir.path().join("manifest-state/plan.manifest.json");
+        let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers,
             plan_path: &plan_path,
@@ -2002,6 +2950,15 @@ mod tests {
             pice_config: &pice_config,
             workflow: &workflow,
             merged_seams: &seams,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: Some(&manifest_path),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
         };
 
         let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
@@ -2032,6 +2989,73 @@ mod tests {
                 .any(|c| c.name == "config_mismatch" && c.status == CheckStatus::Failed),
             "seam_checks should include the Failed config_mismatch entry"
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_existing_manifest_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        std::fs::create_dir_all(dir.path().join("src/server")).unwrap();
+        std::fs::write(dir.path().join("src/server/main.rs"), "fn main() {}\n").unwrap();
+
+        let layers_config = test_layers_config();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest-state/plan.manifest.json");
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, b"not valid json {{{ }}}}").unwrap();
+
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let saver = crate::events::NullSaver;
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test-provider",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: Some(&manifest_path),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+        let err = run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .expect_err("unreadable existing manifest must fail closed");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("failed to load existing manifest"));
+        assert!(rendered.contains("refusing to replace source of truth"));
     }
 
     // ─── Effective-resolution helper tests ──────────────────────────────
@@ -2163,6 +3187,7 @@ mod tests {
                 budget_usd: 0.0,
                 cost_cap_behavior: pice_core::workflow::schema::CostCapBehavior::Halt,
                 max_parallelism: None,
+                max_global_provider_concurrency: None,
             },
             phases: pice_core::workflow::schema::Phases::default(),
             layer_overrides: BTreeMap::new(),
@@ -2224,6 +3249,7 @@ mod tests {
                 budget_usd: 0.0,
                 cost_cap_behavior: pice_core::workflow::schema::CostCapBehavior::Halt,
                 max_parallelism: None,
+                max_global_provider_concurrency: None,
             },
             phases: pice_core::workflow::schema::Phases::default(),
             layer_overrides: BTreeMap::new(),

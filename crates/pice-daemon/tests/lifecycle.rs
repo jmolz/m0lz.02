@@ -23,34 +23,42 @@ use pice_core::transport::SocketPath;
 use pice_daemon::lifecycle;
 use pice_daemon::server::auth;
 use pice_daemon::server::unix::UnixConnection;
+use pice_daemon::test_support::StateDirGuard;
 
 /// Spin up a daemon in a background task, returning the socket path, token
 /// path, and join handle. Waits for the socket to appear before returning.
 async fn start_daemon() -> (
     tempfile::TempDir,
+    StateDirGuard<'static>,
     SocketPath,
     PathBuf,
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    let project_root = dir.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("project root");
+    let guard = StateDirGuard::new(&state_dir);
     let sock_path = dir.path().join("daemon.sock");
     let token_path = dir.path().join("daemon.token");
     let socket_path = SocketPath::Unix(sock_path.clone());
 
     let sp = socket_path.clone();
     let tp = token_path.clone();
-    let handle = tokio::spawn(lifecycle::run_with_paths(sp, tp));
+    let handle = tokio::spawn(lifecycle::run_with_paths_for_project(sp, tp, project_root));
 
     // Wait for socket to appear.
     for _ in 0..200 {
-        if sock_path.exists() {
+        if sock_path.exists() && token_path.exists() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(sock_path.exists(), "socket should exist after startup");
+    assert!(token_path.exists(), "token should exist after startup");
 
-    (dir, socket_path, token_path, handle)
+    (dir, guard, socket_path, token_path, handle)
 }
 
 /// Connect a raw `UnixConnection` to the daemon, returning the connection
@@ -85,7 +93,7 @@ async fn rpc(conn: &mut UnixConnection, id: u64, method: &str, token: &str) -> D
 /// Proves that a single connection can issue multiple sequential RPCs.
 #[tokio::test]
 async fn full_lifecycle_multiple_rpcs_on_one_connection() {
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let (mut conn, token) = raw_connect(&socket_path, &token_path).await;
 
     // 1. Health check.
@@ -96,7 +104,10 @@ async fn full_lifecycle_multiple_rpcs_on_one_connection() {
     assert!(result["uptime_seconds"].as_u64().is_some());
 
     // 2. Dispatch a status command (no provider needed).
-    let status_req = CommandRequest::Status(StatusRequest { json: true });
+    let status_req = CommandRequest::Status(StatusRequest {
+        json: true,
+        ..Default::default()
+    });
     let params = serde_json::to_value(&status_req).expect("serialize");
     let dispatch_req = DaemonRequest::new(2, methods::CLI_DISPATCH, &token, params);
     conn.write_message(&dispatch_req).await.expect("write");
@@ -118,6 +129,7 @@ async fn full_lifecycle_multiple_rpcs_on_one_connection() {
     let eval_req = CommandRequest::Evaluate(pice_core::cli::EvaluateRequest {
         plan_path: "nonexistent.md".into(),
         json: false,
+        ..Default::default()
     });
     let params = serde_json::to_value(&eval_req).expect("serialize");
     let dispatch_req = DaemonRequest::new(3, methods::CLI_DISPATCH, &token, params);
@@ -140,7 +152,7 @@ async fn full_lifecycle_multiple_rpcs_on_one_connection() {
 /// Proves the per-connection handler loop (tokio::spawn per accept) works.
 #[tokio::test]
 async fn concurrent_clients_complete_independently() {
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
 
     // Open two independent connections.
     let (mut conn_a, token_a) = raw_connect(&socket_path, &token_path).await;
@@ -148,7 +160,10 @@ async fn concurrent_clients_complete_independently() {
 
     // Dispatch on both concurrently.
     let a = tokio::spawn(async move {
-        let req = CommandRequest::Status(StatusRequest { json: false });
+        let req = CommandRequest::Status(StatusRequest {
+            json: false,
+            ..Default::default()
+        });
         let params = serde_json::to_value(&req).unwrap();
         let daemon_req = DaemonRequest::new(1, methods::CLI_DISPATCH, &token_a, params);
         conn_a.write_message(&daemon_req).await.unwrap();
@@ -157,7 +172,10 @@ async fn concurrent_clients_complete_independently() {
         conn_a
     });
     let b = tokio::spawn(async move {
-        let req = CommandRequest::Status(StatusRequest { json: true });
+        let req = CommandRequest::Status(StatusRequest {
+            json: true,
+            ..Default::default()
+        });
         let params = serde_json::to_value(&req).unwrap();
         let daemon_req = DaemonRequest::new(2, methods::CLI_DISPATCH, &token_b, params);
         conn_b.write_message(&daemon_req).await.unwrap();
@@ -180,7 +198,7 @@ async fn concurrent_clients_complete_independently() {
 /// After orderly shutdown, the socket file should be removed.
 #[tokio::test]
 async fn shutdown_removes_socket_file() {
-    let (dir, socket_path, token_path, handle) = start_daemon().await;
+    let (dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let sock_path = dir.path().join("daemon.sock");
     assert!(sock_path.exists(), "socket should exist before shutdown");
 
@@ -212,7 +230,7 @@ async fn shutdown_removes_socket_file() {
 async fn all_command_types_dispatch_successfully() {
     use pice_core::cli::*;
 
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let (mut conn, token) = raw_connect(&socket_path, &token_path).await;
 
     // Commands that don't need a provider — should all return success responses.
@@ -230,6 +248,7 @@ async fn all_command_types_dispatch_successfully() {
             CommandRequest::Execute(ExecuteRequest {
                 plan_path: "nonexistent.md".into(),
                 json: false,
+                ..Default::default()
             }),
         ),
         (
@@ -237,6 +256,7 @@ async fn all_command_types_dispatch_successfully() {
             CommandRequest::Evaluate(EvaluateRequest {
                 plan_path: "nonexistent.md".into(),
                 json: false,
+                ..Default::default()
             }),
         ),
         (
@@ -249,7 +269,10 @@ async fn all_command_types_dispatch_successfully() {
         ),
         (
             "status",
-            CommandRequest::Status(StatusRequest { json: false }),
+            CommandRequest::Status(StatusRequest {
+                json: false,
+                ..Default::default()
+            }),
         ),
         (
             "metrics",

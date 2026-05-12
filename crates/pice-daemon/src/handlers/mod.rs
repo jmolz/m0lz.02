@@ -25,6 +25,7 @@
 //! layer). The `Daemon` subcommand (T24) is also CLI-only.
 
 pub mod audit;
+pub mod background;
 pub mod benchmark;
 pub mod commit;
 pub mod evaluate;
@@ -32,12 +33,14 @@ pub mod execute;
 pub mod handoff;
 pub mod init;
 pub mod layers;
+pub mod logs;
 pub mod metrics;
 pub mod plan;
 pub mod prime;
 pub mod review;
 pub mod review_gate;
 pub mod status;
+pub mod subscribe;
 pub mod validate;
 
 use std::sync::Arc;
@@ -109,6 +112,7 @@ pub async fn dispatch(
         CommandRequest::Validate(r) => validate::run(r, ctx, sink).await,
         CommandRequest::ReviewGate(r) => review_gate::run(r, ctx, sink).await,
         CommandRequest::Audit(r) => audit::run(r, ctx, sink).await,
+        CommandRequest::Logs(r) => logs::run(r, ctx, sink).await,
     }
 }
 
@@ -117,9 +121,39 @@ mod tests {
     use super::*;
     use crate::orchestrator::NullSink;
 
-    /// Helper: create a test DaemonContext.
-    fn test_ctx() -> DaemonContext {
-        DaemonContext::new_for_test("test-token")
+    fn provider_error_ctx() -> (tempfile::TempDir, DaemonContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let pice_dir = dir.path().join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        std::fs::write(
+            pice_dir.join("config.toml"),
+            r#"
+[provider]
+name = "nonexistent-provider"
+[evaluation]
+[evaluation.primary]
+provider = "nonexistent-provider"
+model = "fake"
+[evaluation.adversarial]
+provider = "nonexistent-provider"
+model = "fake"
+effort = "high"
+enabled = false
+[evaluation.tiers]
+tier1_models = ["fake"]
+tier2_models = ["fake"]
+tier3_models = ["fake"]
+tier3_agent_team = false
+[telemetry]
+enabled = false
+endpoint = "https://telemetry.pice.dev/v1/events"
+[metrics]
+db_path = ".pice/metrics.db"
+"#,
+        )
+        .unwrap();
+        let ctx = DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
+        (dir, ctx)
     }
 
     #[tokio::test]
@@ -152,7 +186,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_prime_errors_without_provider() {
-        let ctx = test_ctx();
+        let (_dir, ctx) = provider_error_ctx();
         let req = CommandRequest::Prime(pice_core::cli::PrimeRequest { json: false });
         // Provider startup will fail in the test environment — that's expected.
         let result = dispatch(req, &ctx, &NullSink).await;
@@ -161,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_plan_errors_without_provider() {
-        let ctx = test_ctx();
+        let (_dir, ctx) = provider_error_ctx();
         let req = CommandRequest::Plan(pice_core::cli::PlanRequest {
             description: "test feature".to_string(),
             json: false,
@@ -177,6 +211,7 @@ mod tests {
         let req = CommandRequest::Execute(pice_core::cli::ExecuteRequest {
             plan_path: std::path::PathBuf::from("nonexistent-plan.md"),
             json: false,
+            ..Default::default()
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
         match &resp {
@@ -198,6 +233,7 @@ mod tests {
         let req = CommandRequest::Evaluate(pice_core::cli::EvaluateRequest {
             plan_path: std::path::PathBuf::from("plan.md"),
             json: false,
+            ..Default::default()
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
         match &resp {
@@ -248,20 +284,20 @@ mod tests {
             pice_dir.join("config.toml"),
             r#"
 [provider]
-name = "claude-code"
+name = "nonexistent-provider"
 [evaluation]
 [evaluation.primary]
-provider = "claude-code"
-model = "claude-sonnet-4-20250514"
+provider = "nonexistent-provider"
+model = "fake"
 [evaluation.adversarial]
-provider = "codex"
-model = "o3-mini"
+provider = "nonexistent-provider"
+model = "fake"
 effort = "high"
 enabled = false
 [evaluation.tiers]
-tier1_models = ["claude-sonnet-4-20250514"]
-tier2_models = ["claude-sonnet-4-20250514"]
-tier3_models = ["claude-sonnet-4-20250514"]
+tier1_models = ["fake"]
+tier2_models = ["fake"]
+tier3_models = ["fake"]
 tier3_agent_team = false
 [telemetry]
 enabled = false
@@ -293,6 +329,7 @@ db_path = ".pice/metrics.db"
         let req = CommandRequest::Evaluate(pice_core::cli::EvaluateRequest {
             plan_path: std::path::PathBuf::from(".claude/plans/test-plan.md"),
             json: false,
+            ..Default::default()
         });
 
         // The handler will emit the v0.1 warning, then try to start a provider
@@ -315,7 +352,7 @@ db_path = ".pice/metrics.db"
 
     #[tokio::test]
     async fn dispatch_review_errors_without_provider() {
-        let ctx = test_ctx();
+        let (_dir, ctx) = provider_error_ctx();
         let req = CommandRequest::Review(pice_core::cli::ReviewRequest { json: false });
         let result = dispatch(req, &ctx, &NullSink).await;
         assert!(result.is_err(), "review should error without a provider");
@@ -450,7 +487,10 @@ db_path = ".pice/metrics.db"
     async fn dispatch_status() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
-        let req = CommandRequest::Status(pice_core::cli::StatusRequest { json: false });
+        let req = CommandRequest::Status(pice_core::cli::StatusRequest {
+            json: false,
+            ..Default::default()
+        });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
         match &resp {
             CommandResponse::Text { content } => {

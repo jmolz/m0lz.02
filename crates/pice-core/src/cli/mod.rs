@@ -43,6 +43,10 @@ pub enum CommandRequest {
     Benchmark(BenchmarkRequest),
     Layers(LayersRequest),
     Validate(ValidateRequest),
+    /// Phase 7: captured provider session logs for a background feature.
+    /// `--follow=false` route; follow-mode uses the dedicated
+    /// `logs/stream` router RPC (see `crates/pice-core/src/protocol/methods.rs`).
+    Logs(LogsRequest),
     /// Phase 6: list pending review gates or record a reviewer decision.
     /// Subcommand-dispatched so the CLI binds `pice review-gate --list`
     /// and `pice review-gate --gate-id … --decision …` to different
@@ -119,6 +123,11 @@ pub enum ExitJsonStatus {
     /// registry validator (unknown check id or applies_to mismatch in a
     /// boundary declared by layers.toml).
     MergedSeamValidationFailed,
+    /// `pice evaluate --background` — Stack Loops background evaluation
+    /// requires `.pice/layers.toml`; without it there are no layer cohorts
+    /// to dispatch and the daemon must fail closed instead of writing a
+    /// synthetic Passed manifest.
+    LayersTomlMissing,
     /// `pice evaluate <plan> --json` — evaluation ran to completion but at
     /// least one layer finished in `Failed` status (SPRT reject, ADTS
     /// exhaustion, or a failed seam check). Phase 4 contract criterion #11
@@ -170,6 +179,57 @@ pub enum ExitJsonStatus {
     /// neither `--list` nor `--gate-id` supplied; or `--gate-id` with
     /// no `--decision` and stdin is not a TTY). Exit 1.
     MissingDecision,
+
+    // ─── Phase 7: background execution + status/logs streaming ──────
+    /// `pice evaluate --background` / `pice execute --background`
+    /// returned immediately with `{feature_id, run_id}` — success case
+    /// on stdout, exit 0. Distinct from `Json` only because the `status`
+    /// discriminant is what CLI integration tests pin against.
+    BackgroundDispatched,
+
+    /// `pice status {feature_id}` / `pice logs {feature_id}` / `pice status --wait`
+    /// — no manifest file matches the requested `feature_id` (and no
+    /// live job in `FeatureJobManager`). Exit 1.
+    FeatureNotFound,
+
+    /// Duplicate `pice evaluate --background` / `pice execute --background`
+    /// dispatch while an earlier job for the same `feature_id` is still
+    /// live in `FeatureJobManager`. Exit 1 + the existing `run_id` is
+    /// included in the structured payload so the CLI can surface it.
+    FeatureAlreadyRunning,
+
+    /// `pice status --wait` / `pice evaluate --background --wait`
+    /// exceeded its configured `--timeout-secs` before the feature
+    /// reached a terminal state. Exit 4 (new code — distinct from
+    /// ReviewGatePending's exit 3). Background task continues.
+    WaitTimeout,
+
+    /// `pice status --follow` / `pice evaluate --background --wait`
+    /// had its subscribe connection closed by the daemon mid-wait
+    /// (daemon crash, SIGTERM, etc.). Exit 5 (new code — distinct from
+    /// WaitTimeout). The background task is terminated and the
+    /// manifest will be reconciled to `Failed(failed-interrupted)` on
+    /// daemon restart.
+    DaemonDisconnected,
+
+    /// `pice logs --follow` observed the terminal `LogChunk` frame and
+    /// exited cleanly. Exit 0. This is a structured success marker the
+    /// CLI emits in `--json` mode after the stream closes normally.
+    LogsStreamEnded,
+
+    /// Startup reconciliation rewrote an `InProgress` manifest to
+    /// `Failed` with `halted_by = FAILED_INTERRUPTED_HALT`. Observable
+    /// by `pice status {feature_id}` / `pice logs {feature_id}` after
+    /// a daemon crash + restart. Exit 2 (treated like contract failure
+    /// from the user's perspective — the feature didn't complete).
+    FailedInterrupted,
+
+    /// `pice evaluate --background` / `pice execute --background` /
+    /// `pice status --wait` invoked under `PICE_DAEMON_INLINE=1`.
+    /// Inline mode has no daemon process to own the background task —
+    /// supporting it would require the CLI to become long-lived, which
+    /// contradicts the inline-mode debug purpose. Exit 1.
+    InlineModeBackgroundUnsupported,
 }
 
 impl ExitJsonStatus {
@@ -223,6 +283,13 @@ impl ExitJsonStatus {
     /// [`Self::METRICS_PERSIST_FAILED_PREFIX`].
     pub const CANCELLED_PREFIX: &'static str = "cancelled:";
 
+    /// Phase 7 review-gate halt prefix — a layer halted because startup
+    /// reconciliation observed an `InProgress` manifest after a daemon
+    /// crash and rewrote it to `Failed`. Centralized as a const + helper
+    /// pair per the `.claude/rules/rust-core.md` "centralize cross-crate
+    /// string prefixes" rule.
+    pub const FAILED_INTERRUPTED_HALT: &'static str = "failed-interrupted";
+
     /// Returns the serialized wire string. Used by tests so the assertion
     /// runs against the same enum the handler emits — no risk of typo drift
     /// between handler call site and test fixture.
@@ -234,6 +301,7 @@ impl ExitJsonStatus {
             Self::WorkflowValidationFailed => "workflow-validation-failed",
             Self::SeamFloorViolation => "seam-floor-violation",
             Self::MergedSeamValidationFailed => "merged-seam-validation-failed",
+            Self::LayersTomlMissing => "layers-toml-missing",
             Self::EvaluationFailed => "evaluation-failed",
             Self::MetricsPersistFailed => "metrics-persist-failed",
             Self::ReviewGateRejected => "review-gate-rejected",
@@ -241,6 +309,15 @@ impl ExitJsonStatus {
             Self::ReviewGateConflict => "review-gate-conflict",
             Self::ReviewGatePending => "review-gate-pending",
             Self::MissingDecision => "missing-decision",
+            // Phase 7 additions.
+            Self::BackgroundDispatched => "background-dispatched",
+            Self::FeatureNotFound => "feature-not-found",
+            Self::FeatureAlreadyRunning => "feature-already-running",
+            Self::WaitTimeout => "wait-timeout",
+            Self::DaemonDisconnected => "daemon-disconnected",
+            Self::LogsStreamEnded => "logs-stream-ended",
+            Self::FailedInterrupted => "failed-interrupted",
+            Self::InlineModeBackgroundUnsupported => "inline-mode-background-unsupported",
         }
     }
 
@@ -248,9 +325,12 @@ impl ExitJsonStatus {
     ///
     /// | Family | Exit | Semantics |
     /// |--------|------|-----------|
-    /// | contract failure (reviewer reject, grading fail) | 2 | the change does not meet the bar |
-    /// | operational failure (parse, validation, persistence, conflict, missing decision) | 1 | tooling / config / race |
+    /// | success (background dispatch, logs stream closed cleanly) | 0 | structured success |
+    /// | contract failure (reviewer reject, grading fail, startup-reconciled interrupt) | 2 | the change does not meet the bar |
+    /// | operational failure (parse, validation, persistence, conflict, missing decision, dispatch-already-running, feature-not-found, inline-mode restriction) | 1 | tooling / config / race |
     /// | `ReviewGatePending` | 3 | work paused pending human decision (Phase 6) |
+    /// | `WaitTimeout` | 4 | `--wait --timeout-secs` elapsed (Phase 7) |
+    /// | `DaemonDisconnected` | 5 | subscribe connection closed mid-wait (Phase 7) |
     ///
     /// Centralizing the mapping here — instead of hardcoding `code: 1|2`
     /// at each `ExitJson` construction site — lets a future release retire
@@ -261,19 +341,41 @@ impl ExitJsonStatus {
             Self::EvaluationFailed
             | Self::NoContractSection
             | Self::ReviewGateRejected
-            | Self::ReviewGateTimeout => 2,
+            | Self::ReviewGateTimeout
+            | Self::FailedInterrupted => 2,
             // Work-paused-waiting-for-human-review family (Phase 6).
             Self::ReviewGatePending => 3,
+            // Wait-timeout family (Phase 7 — distinct from paused-for-review).
+            Self::WaitTimeout => 4,
+            // Daemon-disconnected family (Phase 7 — subscribe / wait RPC
+            // connection closed before terminal state observed).
+            Self::DaemonDisconnected => 5,
+            // Structured success markers (Phase 7).
+            Self::BackgroundDispatched | Self::LogsStreamEnded => 0,
             // Operational failure family (everything else).
             Self::PlanNotFound
             | Self::PlanParseFailed
             | Self::WorkflowValidationFailed
             | Self::SeamFloorViolation
             | Self::MergedSeamValidationFailed
+            | Self::LayersTomlMissing
             | Self::MetricsPersistFailed
             | Self::ReviewGateConflict
-            | Self::MissingDecision => 1,
+            | Self::MissingDecision
+            | Self::FeatureNotFound
+            | Self::FeatureAlreadyRunning
+            | Self::InlineModeBackgroundUnsupported => 1,
         }
+    }
+
+    /// True if `halted_by` represents a startup-reconciled interrupt
+    /// (daemon crash + restart rewrote the manifest from `InProgress`
+    /// to `Failed`). Phase 7's rule `.claude/rules/rust-core.md`
+    /// mandates centralizing this via const + helper so a future
+    /// rename updates ONE site and every consumer (orchestrator halt
+    /// router, CLI exit-code mapper) picks it up automatically.
+    pub fn is_failed_interrupted_halt(halted_by: &str) -> bool {
+        halted_by == Self::FAILED_INTERRUPTED_HALT
     }
 
     /// True if `halted_by` represents a mid-loop metrics persistence
@@ -351,16 +453,44 @@ pub struct PlanRequest {
     pub json: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExecuteRequest {
     pub plan_path: PathBuf,
     pub json: bool,
+    /// Phase 7: dispatch the execute orchestrator as a detached tokio
+    /// task and return `{feature_id, run_id, status: background-dispatched}`
+    /// within the p95 500ms SLO. When `false` (default), runs
+    /// synchronously — unchanged from v0.6.
+    #[serde(default)]
+    pub background: bool,
+    /// Phase 7: when `background && wait`, the CLI opens a second
+    /// subscribe connection to wait for terminal state. The DAEMON
+    /// handler never reads this flag — waiting is CLI-side.
+    #[serde(default)]
+    pub wait: bool,
+    /// Phase 7: max seconds to wait before returning `WaitTimeout`
+    /// (exit 4). Only applies when `background && wait`. `None` =
+    /// wait indefinitely (CLI signals SIGINT via Ctrl-C if needed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EvaluateRequest {
     pub plan_path: PathBuf,
     pub json: bool,
+    /// Phase 7: dispatch the evaluate orchestrator as a detached tokio
+    /// task. See [`ExecuteRequest::background`] for semantics.
+    #[serde(default)]
+    pub background: bool,
+    /// Phase 7: when `background && wait`, the CLI opens a second
+    /// subscribe connection to wait for terminal state. See
+    /// [`ExecuteRequest::wait`].
+    #[serde(default)]
+    pub wait: bool,
+    /// Phase 7: max seconds to wait. See [`ExecuteRequest::timeout_secs`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,9 +511,74 @@ pub struct HandoffRequest {
     pub json: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StatusRequest {
     pub json: bool,
+    /// Phase 7: CLI-computed mode discriminator. `List` scans all
+    /// manifests; `Detail` returns one manifest; `Follow` and `Wait`
+    /// bypass `cli/dispatch` entirely (router-level `manifest/subscribe`)
+    /// — the daemon handler only sees `List` / `Detail` on the wire.
+    #[serde(default)]
+    pub mode: StatusMode,
+    /// Phase 7: present for `Detail` / `Follow` / `Wait` modes. `None`
+    /// for `List`. Validated at the CLI before dispatch — the daemon
+    /// handler trusts the invariant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feature_id: Option<String>,
+    /// Phase 7: `--stream-json` flag. Enables heterogeneous
+    /// `StreamJsonFrame` NDJSON output in `Follow` mode. Mutually
+    /// exclusive with `json` (clap-enforced at CLI layer).
+    #[serde(default)]
+    pub stream_json: bool,
+    /// Phase 7: `Wait` mode only. `None` = wait indefinitely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+}
+
+/// Phase 7: CLI-computed `pice status` mode. Distinguishes the four
+/// invocation shapes (`pice status`, `pice status <id>`, `pice status
+/// --follow [<id>]`, `pice status --wait <id>`). Only `List` and
+/// `Detail` traverse `cli/dispatch`; `Follow` and `Wait` are directly
+/// routed to `manifest/subscribe` by the CLI (see Task 12).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StatusMode {
+    /// `pice status` — table of every manifest. No `feature_id` required.
+    #[default]
+    List,
+    /// `pice status <feature_id>` — full manifest detail.
+    Detail,
+    /// `pice status --follow [<feature_id>]` — live updates via
+    /// `manifest/subscribe`.
+    Follow,
+    /// `pice status --wait <feature_id>` — block until terminal state.
+    Wait,
+}
+
+/// Phase 7: `pice logs <feature_id> [--layer L] [--follow]` request.
+/// `--follow=false` dispatches through `cli/dispatch`; `--follow=true`
+/// dispatches through the dedicated `logs/stream` router RPC (see
+/// `protocol/methods.rs`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogsRequest {
+    pub feature_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<String>,
+    #[serde(default)]
+    pub follow: bool,
+    pub json: bool,
+    #[serde(default)]
+    pub stream_json: bool,
+    /// Include the buffered session history in the response. Default
+    /// `true`; the CLI may set `false` in `--follow` mode when the
+    /// caller only wants live chunks going forward.
+    #[serde(default = "default_include_history")]
+    pub include_history: bool,
+}
+
+fn default_include_history() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +809,7 @@ mod tests {
         let req = CommandRequest::Execute(ExecuteRequest {
             plan_path: PathBuf::from(".claude/plans/auth.md"),
             json: false,
+            ..Default::default()
         });
         let wire = serde_json::to_string(&req).unwrap();
         let parsed: CommandRequest = serde_json::from_str(&wire).unwrap();
@@ -776,7 +972,10 @@ mod tests {
                 "review",
             ),
             (
-                CommandRequest::Status(StatusRequest { json: false }),
+                CommandRequest::Status(StatusRequest {
+                    json: false,
+                    ..Default::default()
+                }),
                 "status",
             ),
             (
@@ -787,6 +986,7 @@ mod tests {
                 CommandRequest::Evaluate(EvaluateRequest {
                     plan_path: PathBuf::from("plan.md"),
                     json: false,
+                    ..Default::default()
                 }),
                 "evaluate",
             ),
@@ -967,6 +1167,7 @@ mod tests {
             ExitJsonStatus::WorkflowValidationFailed,
             ExitJsonStatus::SeamFloorViolation,
             ExitJsonStatus::MergedSeamValidationFailed,
+            ExitJsonStatus::LayersTomlMissing,
             ExitJsonStatus::EvaluationFailed,
             ExitJsonStatus::MetricsPersistFailed,
             ExitJsonStatus::ReviewGateRejected,
@@ -974,6 +1175,15 @@ mod tests {
             ExitJsonStatus::ReviewGateConflict,
             ExitJsonStatus::ReviewGatePending,
             ExitJsonStatus::MissingDecision,
+            // Phase 7 additions.
+            ExitJsonStatus::BackgroundDispatched,
+            ExitJsonStatus::FeatureNotFound,
+            ExitJsonStatus::FeatureAlreadyRunning,
+            ExitJsonStatus::WaitTimeout,
+            ExitJsonStatus::DaemonDisconnected,
+            ExitJsonStatus::LogsStreamEnded,
+            ExitJsonStatus::FailedInterrupted,
+            ExitJsonStatus::InlineModeBackgroundUnsupported,
         ];
         for variant in &all_variants {
             let serde_output = serde_json::to_string(variant).unwrap();
@@ -996,14 +1206,29 @@ mod tests {
         assert_eq!(ExitJsonStatus::NoContractSection.exit_code(), 2);
         assert_eq!(ExitJsonStatus::ReviewGateRejected.exit_code(), 2);
         assert_eq!(ExitJsonStatus::ReviewGateTimeout.exit_code(), 2);
+        assert_eq!(ExitJsonStatus::FailedInterrupted.exit_code(), 2);
         // Pause-for-review family → 3 (Phase 6 new exit code)
         assert_eq!(ExitJsonStatus::ReviewGatePending.exit_code(), 3);
+        // Wait-timeout family → 4 (Phase 7)
+        assert_eq!(ExitJsonStatus::WaitTimeout.exit_code(), 4);
+        // Daemon-disconnected family → 5 (Phase 7)
+        assert_eq!(ExitJsonStatus::DaemonDisconnected.exit_code(), 5);
+        // Structured-success family → 0 (Phase 7)
+        assert_eq!(ExitJsonStatus::BackgroundDispatched.exit_code(), 0);
+        assert_eq!(ExitJsonStatus::LogsStreamEnded.exit_code(), 0);
         // Operational family → 1
         assert_eq!(ExitJsonStatus::PlanNotFound.exit_code(), 1);
+        assert_eq!(ExitJsonStatus::LayersTomlMissing.exit_code(), 1);
         assert_eq!(ExitJsonStatus::ReviewGateConflict.exit_code(), 1);
         assert_eq!(ExitJsonStatus::MissingDecision.exit_code(), 1);
         assert_eq!(ExitJsonStatus::MetricsPersistFailed.exit_code(), 1);
-        // Exhaustive sweep: every variant's exit code is one of {1, 2, 3}.
+        assert_eq!(ExitJsonStatus::FeatureNotFound.exit_code(), 1);
+        assert_eq!(ExitJsonStatus::FeatureAlreadyRunning.exit_code(), 1);
+        assert_eq!(
+            ExitJsonStatus::InlineModeBackgroundUnsupported.exit_code(),
+            1
+        );
+        // Exhaustive sweep: every variant's exit code is one of {0, 1, 2, 3, 4, 5}.
         for v in [
             ExitJsonStatus::PlanNotFound,
             ExitJsonStatus::PlanParseFailed,
@@ -1011,6 +1236,7 @@ mod tests {
             ExitJsonStatus::WorkflowValidationFailed,
             ExitJsonStatus::SeamFloorViolation,
             ExitJsonStatus::MergedSeamValidationFailed,
+            ExitJsonStatus::LayersTomlMissing,
             ExitJsonStatus::EvaluationFailed,
             ExitJsonStatus::MetricsPersistFailed,
             ExitJsonStatus::ReviewGateRejected,
@@ -1018,14 +1244,43 @@ mod tests {
             ExitJsonStatus::ReviewGateConflict,
             ExitJsonStatus::ReviewGatePending,
             ExitJsonStatus::MissingDecision,
+            ExitJsonStatus::BackgroundDispatched,
+            ExitJsonStatus::FeatureNotFound,
+            ExitJsonStatus::FeatureAlreadyRunning,
+            ExitJsonStatus::WaitTimeout,
+            ExitJsonStatus::DaemonDisconnected,
+            ExitJsonStatus::LogsStreamEnded,
+            ExitJsonStatus::FailedInterrupted,
+            ExitJsonStatus::InlineModeBackgroundUnsupported,
         ] {
             let code = v.exit_code();
             assert!(
-                (1..=3).contains(&code),
-                "{v:?} returned exit code {code} outside {{1, 2, 3}} — \
+                (0..=5).contains(&code),
+                "{v:?} returned exit code {code} outside {{0..=5}} — \
                  extending the surface requires explicit CLI conventions update"
             );
         }
+    }
+
+    /// Phase 7 parity lock: the `FAILED_INTERRUPTED_HALT` const and the
+    /// `is_failed_interrupted_halt` helper must agree. Same silent-drift
+    /// pattern as `METRICS_PERSIST_FAILED_PREFIX`.
+    #[test]
+    fn failed_interrupted_halt_helper_agrees_with_constant() {
+        assert!(ExitJsonStatus::is_failed_interrupted_halt(
+            ExitJsonStatus::FAILED_INTERRUPTED_HALT
+        ));
+        assert!(ExitJsonStatus::is_failed_interrupted_halt(
+            ExitJsonStatus::FailedInterrupted.as_str()
+        ));
+        // Negative cases.
+        assert!(!ExitJsonStatus::is_failed_interrupted_halt(
+            ExitJsonStatus::CANCELLED_PREFIX
+        ));
+        assert!(!ExitJsonStatus::is_failed_interrupted_halt(""));
+        assert!(!ExitJsonStatus::is_failed_interrupted_halt(
+            "failed-interrupted:extra"
+        ));
     }
 
     // ── Phase 6: review-gate + audit RPC roundtrips ──────────────────

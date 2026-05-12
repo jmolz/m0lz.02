@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::layer::SubscriberExt;
@@ -64,6 +65,14 @@ struct ParallelStubGuard {
 
 impl ParallelStubGuard {
     fn new(per_layer_scores: &[(&str, &str)], latency_ms: Option<u64>) -> Self {
+        Self::new_with_adversarial(per_layer_scores, latency_ms, None)
+    }
+
+    fn new_with_adversarial(
+        per_layer_scores: &[(&str, &str)],
+        latency_ms: Option<u64>,
+        adversarial_scores: Option<&str>,
+    ) -> Self {
         let guard = stub_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let mut env_keys = Vec::new();
         for (layer, scores) in per_layer_scores {
@@ -79,6 +88,12 @@ impl ParallelStubGuard {
         // per-layer scores can't accidentally pick up a leftover shared
         // list from some earlier run.
         std::env::remove_var("PICE_STUB_SCORES");
+        if let Some(scores) = adversarial_scores {
+            std::env::set_var("PICE_STUB_ADVERSARIAL_SCORES", scores);
+            env_keys.push("PICE_STUB_ADVERSARIAL_SCORES".to_string());
+        } else {
+            std::env::remove_var("PICE_STUB_ADVERSARIAL_SCORES");
+        }
         Self {
             _guard: guard,
             env_keys,
@@ -324,6 +339,11 @@ fn setup_two_layer_repo(dir: &Path) -> std::path::PathBuf {
     plan_path
 }
 
+/// Phase 7: `'static` null saver so test helpers constructing a
+/// `StackLoopsConfig<'a>` can satisfy the `saver: &'a dyn ManifestSaver`
+/// field without threading an extra lifetime through each fixture.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
+
 fn make_cfg<'a>(
     layers: &'a LayersConfig,
     plan_path: &'a Path,
@@ -341,6 +361,15 @@ fn make_cfg<'a>(
         pice_config,
         workflow: wf,
         merged_seams: seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &NULL_SAVER,
     }
 }
 
@@ -747,6 +776,272 @@ async fn cancellation_aborts_in_flight_cohort() {
             .map(|l| (&l.name, &l.status, &l.halted_by))
             .collect::<Vec<_>>(),
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_provider_semaphore_bounds_parallel_layer_provider_sessions() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_two_layer_repo(dir.path());
+    let layers = two_layer_independent_config();
+    let pice_config = stub_pice_config();
+    let wf = workflow(true, Some(4), 1);
+    let seams = BTreeMap::new();
+    let provider_sem = Arc::new(Semaphore::new(1));
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: dir.path(),
+        primary_provider: "stub",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &wf,
+        merged_seams: &seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: Some(provider_sem),
+        global_provider_capacity: Some(1),
+        saver: &NULL_SAVER,
+    };
+
+    let alive_path = dir.path().join("stub-provider-sessions.log");
+    std::fs::write(&alive_path, "").unwrap();
+    let _stub = ParallelStubGuard::new(
+        &[("backend", "9.0,0.01"), ("frontend", "8.0,0.01")],
+        Some(500),
+    );
+    let _alive = StubAliveFileGuard::new(&alive_path);
+
+    let run = run_stack_loops_with_cancel(
+        &cfg,
+        &NullSink,
+        true,
+        null_sink_arc(),
+        CancellationToken::new(),
+    );
+    tokio::pin!(run);
+
+    wait_for_alive_count_at_least(&alive_path, 1, &mut run).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        active_stub_session_count(&alive_path),
+        1,
+        "global provider-session semaphore must bound real provider processes, \
+         not just feature futures or cohort tasks"
+    );
+
+    let manifest = run.await.expect("stack loops");
+    assert_eq!(manifest.layers.len(), 2);
+    assert_eq!(
+        active_stub_session_count(&alive_path),
+        0,
+        "all provider sessions should be shut down after evaluation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_provider_semaphore_acquires_adts_provider_pair_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_two_layer_repo(dir.path());
+    let layers = two_layer_independent_config();
+    let mut pice_config = stub_pice_config();
+    pice_config.evaluation.adversarial.enabled = true;
+    pice_config.evaluation.adversarial.model = "stub-adversarial".to_string();
+    let mut wf = workflow(true, Some(4), 1);
+    wf.phases.evaluate.adaptive_algorithm = AdaptiveAlgo::Adts;
+    let seams = BTreeMap::new();
+    let provider_sem = Arc::new(Semaphore::new(2));
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: dir.path(),
+        primary_provider: "stub",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &wf,
+        merged_seams: &seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: Some(provider_sem),
+        global_provider_capacity: Some(2),
+        saver: &NULL_SAVER,
+    };
+
+    let alive_path = dir.path().join("stub-adts-provider-sessions.log");
+    std::fs::write(&alive_path, "").unwrap();
+    let _stub = ParallelStubGuard::new_with_adversarial(
+        &[("backend", "9.0,0.01"), ("frontend", "9.0,0.01")],
+        Some(250),
+        Some("3.0,0.01"),
+    );
+    let _alive = StubAliveFileGuard::new(&alive_path);
+
+    let run = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_stack_loops_with_cancel(
+            &cfg,
+            &NullSink,
+            true,
+            null_sink_arc(),
+            CancellationToken::new(),
+        ),
+    );
+    tokio::pin!(run);
+
+    let mut peak_active = 0;
+    let manifest = loop {
+        tokio::select! {
+            result = run.as_mut() => {
+                let manifest = result
+                    .expect("ADTS run must not deadlock while waiting for adversarial permits")
+                    .expect("stack loops should complete");
+                break manifest;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {
+                peak_active = peak_active.max(active_stub_session_count(&alive_path));
+            }
+        }
+    };
+    peak_active = peak_active.max(active_stub_session_count(&alive_path));
+
+    assert_eq!(manifest.layers.len(), 2);
+    assert!(
+        peak_active <= 2,
+        "ADTS primary+adversarial provider sessions must respect the global cap; peak={peak_active}"
+    );
+    assert_eq!(
+        active_stub_session_count(&alive_path),
+        0,
+        "all ADTS provider sessions should be shut down after evaluation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adts_global_provider_capacity_below_pair_requirement_fails_fast() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_two_layer_repo(dir.path());
+    let layers = two_layer_independent_config();
+    let mut pice_config = stub_pice_config();
+    pice_config.evaluation.adversarial.enabled = true;
+    pice_config.evaluation.adversarial.model = "stub-adversarial".to_string();
+    let mut wf = workflow(true, Some(4), 1);
+    wf.phases.evaluate.adaptive_algorithm = AdaptiveAlgo::Adts;
+    let seams = BTreeMap::new();
+    let provider_sem = Arc::new(Semaphore::new(1));
+    let cfg = StackLoopsConfig {
+        layers: &layers,
+        plan_path: &plan_path,
+        project_root: dir.path(),
+        primary_provider: "stub",
+        primary_model: "stub-model",
+        pice_config: &pice_config,
+        workflow: &wf,
+        merged_seams: &seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: Some(provider_sem),
+        global_provider_capacity: Some(1),
+        saver: &NULL_SAVER,
+    };
+
+    let _stub = ParallelStubGuard::new_with_adversarial(
+        &[("backend", "9.0,0.01"), ("frontend", "9.0,0.01")],
+        Some(500),
+        Some("3.0,0.01"),
+    );
+
+    let started = Instant::now();
+    let manifest = tokio::time::timeout(
+        Duration::from_secs(1),
+        run_stack_loops_with_cancel(
+            &cfg,
+            &NullSink,
+            true,
+            null_sink_arc(),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("capacity mismatch must fail fast instead of deadlocking")
+    .expect("stack loops should return a failed manifest");
+
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "capacity mismatch should fail before waiting on provider permits"
+    );
+    assert_eq!(manifest.layers.len(), 2);
+    for layer in &manifest.layers {
+        assert_eq!(layer.status, LayerStatus::Failed);
+        let halted = layer.halted_by.as_deref().unwrap_or_default();
+        assert!(
+            halted.contains("requires 2 concurrent provider-session permits"),
+            "layer {} should explain impossible ADTS provider cap, got {halted:?}",
+            layer.name
+        );
+    }
+}
+
+fn active_stub_session_count(path: &Path) -> usize {
+    let contents = std::fs::read_to_string(path).unwrap_or_default();
+    let mut started: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    let mut finished: std::collections::HashSet<i32> = std::collections::HashSet::new();
+    for line in contents.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let Ok(pid) = parts[1].parse::<i32>() else {
+            continue;
+        };
+        match parts[0] {
+            "alive" => {
+                started.insert(pid);
+            }
+            "done" => {
+                finished.insert(pid);
+            }
+            _ => {}
+        }
+    }
+    started.difference(&finished).count()
+}
+
+async fn wait_for_alive_count_at_least<F>(
+    path: &Path,
+    expected: usize,
+    run: &mut std::pin::Pin<&mut F>,
+) where
+    F: std::future::Future<
+        Output = anyhow::Result<pice_core::layers::manifest::VerificationManifest>,
+    >,
+{
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if active_stub_session_count(path) >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} active stub provider session(s)"
+        );
+        tokio::select! {
+            result = run.as_mut() => {
+                panic!("stack loops finished before {expected} active provider session(s): {result:?}");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+    }
 }
 
 /// Parse the stub alive-file and return PIDs with "alive" but no

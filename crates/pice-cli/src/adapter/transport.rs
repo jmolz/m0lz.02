@@ -15,10 +15,12 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use pice_core::cli::{CommandRequest, CommandResponse};
-use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
+use pice_core::protocol::{methods, DaemonNotification, DaemonRequest, DaemonResponse};
 use pice_core::transport::SocketPath;
 use pice_daemon::server::auth;
 use serde::{de::DeserializeOwned, Serialize};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 /// Type alias for the Windows client-side framed connection.
 ///
@@ -188,6 +190,99 @@ impl DaemonClient {
         Ok(())
     }
 
+    /// Open a subscribe stream (`manifest/subscribe` or `logs/stream`).
+    ///
+    /// Consumes `self` because a subscribe connection can't multiplex
+    /// control RPCs — the daemon takes over the socket for the lifetime
+    /// of the subscription. Callers that need a concurrent control
+    /// channel (e.g., `ReviewGate::Decide` while streaming manifest
+    /// events) must open a second [`DaemonClient`] instance; the daemon
+    /// bearer-token auth allows concurrent connections.
+    ///
+    /// Flow:
+    /// 1. Send the RPC with `method` + serialized `params`.
+    /// 2. Await the single `DaemonResponse` carrying the snapshot.
+    /// 3. Deserialize the snapshot into `T`.
+    /// 4. Spawn a reader task owning `self` that forwards every
+    ///    subsequent [`DaemonNotification`] into an `mpsc` channel
+    ///    until EOF, read error, or the receiver is dropped.
+    ///
+    /// The returned [`SubscribeStream`] bundles the snapshot, the
+    /// `mpsc::Receiver`, and a close handle. See its docs for close
+    /// semantics.
+    pub async fn subscribe_stream<P, T>(
+        mut self,
+        method: &str,
+        params: P,
+    ) -> Result<SubscribeStream<T>>
+    where
+        P: Serialize,
+        T: DeserializeOwned,
+    {
+        let params_value =
+            serde_json::to_value(&params).context("failed to serialize subscribe params")?;
+        let req = DaemonRequest::new(0, method, &self.token, params_value);
+        self.write_msg(&req)
+            .await
+            .context("failed to send subscribe request")?;
+
+        let resp: DaemonResponse = self
+            .read_msg()
+            .await
+            .context("failed to read subscribe snapshot response")?
+            .ok_or_else(|| anyhow::anyhow!("daemon closed connection before subscribe snapshot"))?;
+
+        if let Some(err) = resp.error {
+            bail!("daemon subscribe error ({}): {}", err.code, err.message);
+        }
+
+        let result = resp
+            .result
+            .ok_or_else(|| anyhow::anyhow!("daemon returned success with no snapshot result"))?;
+        let snapshot: T = serde_json::from_value(result)
+            .context("failed to deserialize subscribe snapshot body")?;
+
+        // Buffered channel — the reader outpaces the consumer by a
+        // handful of frames at most before awaiting channel capacity,
+        // which backpressures the daemon-side broadcast (where we'd
+        // trip `RecvError::Lagged` and lose frames anyway). 64 is
+        // comfortable headroom vs. the worst observed burst (12 events
+        // in Phase 5 parallel cohort integration tests).
+        let (tx, rx) = mpsc::channel::<DaemonNotification>(64);
+
+        let task = tokio::spawn(async move {
+            loop {
+                match self.read_msg::<DaemonNotification>().await {
+                    Ok(Some(notif)) => {
+                        if tx.send(notif).await.is_err() {
+                            tracing::debug!("subscribe_stream reader: consumer dropped — closing");
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::debug!(
+                            "subscribe_stream reader: daemon closed connection (clean EOF)"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!("subscribe_stream reader: read error: {e}");
+                        break;
+                    }
+                }
+            }
+            // `self` drops here → the framed connection drops → the
+            // daemon observes EOF on the next scheduler tick and the
+            // router's subscribe handler exits its `tokio::select!`.
+        });
+
+        Ok(SubscribeStream {
+            snapshot,
+            rx,
+            handle: SubscribeStreamHandle { task },
+        })
+    }
+
     /// Platform-gated write.
     async fn write_msg<T: Serialize>(&mut self, msg: &T) -> Result<()> {
         #[cfg(unix)]
@@ -210,6 +305,58 @@ impl DaemonClient {
         {
             self.framed.read_message().await
         }
+    }
+}
+
+/// A live subscribe stream: snapshot + notification channel + close handle.
+///
+/// Returned by [`DaemonClient::subscribe_stream`]. The snapshot is the
+/// initial RPC response body (typed per-method: `SubscribeManifestResponse`
+/// for `manifest/subscribe`, `LogsStreamResponse` for `logs/stream`).
+/// Subsequent notifications arrive on `rx.recv().await`.
+///
+/// Dropping `SubscribeStream` detaches the reader task — it continues
+/// reading until the daemon closes the connection OR the reader fails to
+/// forward (which happens one frame after the consumer drops `rx`).
+/// Callers that need deterministic cleanup (e.g., to ensure the socket
+/// is closed before asserting "no subscribers" in a test) should call
+/// [`SubscribeStream::close`] explicitly.
+pub struct SubscribeStream<T> {
+    /// The initial snapshot body decoded from the RPC response. For
+    /// `manifest/subscribe` this is `SubscribeManifestResponse`; for
+    /// `logs/stream` this is `LogsStreamResponse`.
+    pub snapshot: T,
+    /// Receiver for subsequent daemon notifications on the same
+    /// connection. Returns `None` after the reader task exits (daemon
+    /// closed connection, read error, or [`SubscribeStreamHandle::close`]
+    /// was called).
+    pub rx: mpsc::Receiver<DaemonNotification>,
+    handle: SubscribeStreamHandle,
+}
+
+impl<T> SubscribeStream<T> {
+    /// Close the subscribe stream: abort the reader task and drop the
+    /// connection. Equivalent to `self.handle.close().await`.
+    pub async fn close(self) {
+        self.handle.close().await;
+    }
+}
+
+/// Close handle for the spawned reader task inside a [`SubscribeStream`].
+pub struct SubscribeStreamHandle {
+    task: JoinHandle<()>,
+}
+
+impl SubscribeStreamHandle {
+    /// Abort the reader task and drop the underlying connection.
+    ///
+    /// `JoinHandle::abort` fires a cancellation signal; awaiting the
+    /// handle after abort returns `Err(JoinError::Cancelled)`, which we
+    /// swallow — the point is to ensure the socket is closed before
+    /// this function returns, not to rethrow an abort into the caller.
+    pub async fn close(self) {
+        self.task.abort();
+        let _ = self.task.await;
     }
 }
 
@@ -252,7 +399,10 @@ mod tests {
         client.health_check().await.expect("health check");
 
         // Dispatch a status command.
-        let req = CommandRequest::Status(StatusRequest { json: false });
+        let req = CommandRequest::Status(StatusRequest {
+            json: false,
+            ..Default::default()
+        });
         let resp = client.dispatch(req).await.expect("dispatch");
         match resp {
             CommandResponse::Text { content } => {
@@ -313,5 +463,153 @@ mod tests {
             msg.contains("auth token"),
             "error should mention auth token, got: {msg}"
         );
+    }
+
+    /// Task 11 happy-path: `subscribe_stream` sends the request, receives
+    /// the snapshot, then forwards subsequent `manifest/event`
+    /// notifications on the mpsc channel. Closes cleanly on daemon
+    /// shutdown.
+    ///
+    /// Uses the daemon's socket so the full read/parse/dispatch path
+    /// runs (not just the reader task in isolation).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subscribe_stream_happy_path() {
+        use pice_core::protocol::subscribe::{SubscribeManifestRequest, SubscribeManifestResponse};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("daemon.sock");
+        let token_path = dir.path().join("daemon.token");
+        let socket_path = SocketPath::Unix(sock_path.clone());
+
+        let state_tmp = tempfile::tempdir().expect("state tempdir");
+        let _guard = pice_daemon::test_support::StateDirGuard::new(state_tmp.path());
+
+        // Spawn the daemon.
+        let sp = socket_path.clone();
+        let tp = token_path.clone();
+        let handle = tokio::spawn(pice_daemon::lifecycle::run_with_paths(sp, tp));
+
+        for _ in 0..100 {
+            if sock_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(sock_path.exists(), "daemon socket should be up");
+
+        // Open the subscribe stream on a fresh connection.
+        let client = DaemonClient::connect(&socket_path, &token_path)
+            .await
+            .expect("connect");
+        let params = SubscribeManifestRequest {
+            feature_id: Some("subscribe-test".to_string()),
+        };
+        let stream = client
+            .subscribe_stream::<_, SubscribeManifestResponse>(methods::MANIFEST_SUBSCRIBE, params)
+            .await
+            .expect("subscribe_stream");
+
+        // Initial snapshot is empty (no manifests on disk yet). This
+        // proves the request/response half of the handshake — the
+        // daemon parsed our SubscribeManifestRequest and returned a
+        // valid SubscribeManifestResponse body.
+        assert_eq!(
+            stream.snapshot.snapshots.len(),
+            0,
+            "no pre-existing manifests"
+        );
+        assert_eq!(
+            stream.snapshot.run_ids.len(),
+            0,
+            "no live runs at subscribe time"
+        );
+
+        // Caller-side close: aborts the reader task + drops the framed
+        // connection. The daemon observes socket EOF on the next
+        // scheduler tick and its `tokio::select!` in the subscribe
+        // handler exits. `close` MUST return in bounded time — if it
+        // hangs, the `JoinHandle::abort` path is broken or the reader
+        // is parked in a non-cancelable state.
+        //
+        // The daemon-side "daemon-shutdown closes active subscribes"
+        // behavior is covered separately in
+        // `pice-daemon::handlers::subscribe::tests`; this test owns the
+        // CLI-side close semantics only.
+        tokio::time::timeout(Duration::from_secs(2), stream.close())
+            .await
+            .expect("stream.close() should complete within 2s");
+
+        // Shutdown daemon + join.
+        let mut shutdown_client = DaemonClient::connect(&socket_path, &token_path)
+            .await
+            .expect("shutdown connect");
+        shutdown_client.shutdown().await.expect("shutdown RPC");
+
+        let daemon_result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("daemon should exit within 5s")
+            .expect("join handle");
+        daemon_result.expect("daemon should exit cleanly");
+    }
+
+    /// Verify that `subscribe_stream` propagates daemon-side parse errors
+    /// (invalid params) cleanly — the caller should see an `Err`, not a
+    /// silent empty stream.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn subscribe_stream_propagates_invalid_params_error() {
+        use pice_core::protocol::subscribe::SubscribeManifestResponse;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("daemon.sock");
+        let token_path = dir.path().join("daemon.token");
+        let socket_path = SocketPath::Unix(sock_path.clone());
+
+        let state_tmp = tempfile::tempdir().expect("state tempdir");
+        let _guard = pice_daemon::test_support::StateDirGuard::new(state_tmp.path());
+
+        let sp = socket_path.clone();
+        let tp = token_path.clone();
+        let handle = tokio::spawn(pice_daemon::lifecycle::run_with_paths(sp, tp));
+
+        for _ in 0..100 {
+            if sock_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let client = DaemonClient::connect(&socket_path, &token_path)
+            .await
+            .expect("connect");
+
+        // `bogus_field` fails the `deny_unknown_fields` contract on
+        // SubscribeManifestRequest, which should return a -32602 error.
+        let bad_params = json!({ "feature_id": "f", "bogus_field": 1 });
+        let result = client
+            .subscribe_stream::<_, SubscribeManifestResponse>(
+                methods::MANIFEST_SUBSCRIBE,
+                bad_params,
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "subscribe_stream should propagate daemon parse error"
+        );
+        let msg = format!("{:#}", result.err().unwrap());
+        assert!(
+            msg.contains("daemon subscribe error") || msg.contains("-32602"),
+            "error should name the daemon subscribe failure, got: {msg}"
+        );
+
+        // Clean up.
+        let mut shutdown_client = DaemonClient::connect(&socket_path, &token_path)
+            .await
+            .expect("shutdown connect");
+        shutdown_client.shutdown().await.expect("shutdown");
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
     }
 }

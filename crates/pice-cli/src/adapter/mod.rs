@@ -18,6 +18,7 @@
 //! socket for readiness.
 //!
 pub mod autostart;
+pub mod background_wait;
 pub mod inline;
 pub mod transport;
 
@@ -30,10 +31,22 @@ use pice_core::cli::{CommandRequest, CommandResponse};
 /// - Set: inline mode (in-process, no socket)
 /// - Unset: socket mode (connect to daemon, auto-start if needed)
 pub async fn dispatch(req: CommandRequest) -> Result<CommandResponse> {
-    if std::env::var("PICE_DAEMON_INLINE").is_ok() {
+    if is_inline_mode() {
         return inline::dispatch_inline(req).await;
     }
 
     let mut client = autostart::ensure_daemon_running().await?;
     client.dispatch(req).await
+}
+
+/// True if `PICE_DAEMON_INLINE` is set (any value).
+///
+/// Phase 7 Criterion 20: the `pice status --follow` / `pice status --wait` /
+/// `pice logs --follow` handlers all consult this BEFORE calling
+/// [`autostart::ensure_daemon_running`] so inline-mode users get a typed
+/// error (for background/wait) or a graceful single-shot fallback (for
+/// follow) instead of an auto-started socket daemon their debug session
+/// was trying to bypass.
+pub fn is_inline_mode() -> bool {
+    std::env::var("PICE_DAEMON_INLINE").is_ok()
 }

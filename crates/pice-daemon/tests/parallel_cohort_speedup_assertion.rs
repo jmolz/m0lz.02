@@ -30,6 +30,10 @@ use pice_core::workflow::schema::AdaptiveAlgo;
 use pice_core::workflow::WorkflowConfig;
 use pice_daemon::orchestrator::stack_loops::{run_stack_loops_with_cancel, StackLoopsConfig};
 use pice_daemon::orchestrator::{NullPassSink, NullSink, PassMetricsSink};
+
+/// Phase 7: `'static` null saver for fixtures that construct
+/// `StackLoopsConfig` directly.
+static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSaver;
 use tokio_util::sync::CancellationToken;
 
 const ITERATIONS: usize = 3;
@@ -210,6 +214,15 @@ async fn time_one_run(parallel: bool) -> Duration {
         pice_config: &pice_config,
         workflow: &wf,
         merged_seams: &seams,
+        contract_contents: None,
+        full_diff: None,
+        claude_md: None,
+        layer_paths: None,
+        seam_file_contents: None,
+        manifest_path: None,
+        global_provider_semaphore: None,
+        global_provider_capacity: None,
+        saver: &NULL_SAVER,
     };
 
     // Hold the env lock across set/run/tear-down. The `StubEnvGuard`

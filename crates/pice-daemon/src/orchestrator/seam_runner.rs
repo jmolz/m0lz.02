@@ -39,8 +39,7 @@ use std::time::Duration;
 /// deterministic and <100ms each.
 const CHECK_BUDGET: Duration = Duration::from_millis(100);
 
-/// Run every registered check applicable to `layer_name`'s boundaries and
-/// return the results in a deterministic order.
+/// Inputs for running registered seam checks for one layer.
 ///
 /// - `merged_seams`: the fully-merged `{boundary → [check_id]}` map as
 ///   resolved by the evaluate handler via `pice-core::workflow::merge::merge_seams`.
@@ -53,15 +52,30 @@ const CHECK_BUDGET: Duration = Duration::from_millis(100);
 ///   diff and `boundary_files` set — full file set, not just the changed
 ///   diff, so checks can compare one changed side against the other's
 ///   stable counterpart artifact.
-pub fn run_seams_for_layer(
-    layer_name: &str,
-    active_layers: &HashSet<String>,
-    merged_seams: &BTreeMap<String, Vec<String>>,
-    registry: &Registry,
-    repo_root: &Path,
-    full_diff: &str,
-    layer_paths: &BTreeMap<String, Vec<PathBuf>>,
-) -> Vec<SeamCheckResult> {
+pub struct SeamRunRequest<'a> {
+    pub layer_name: &'a str,
+    pub active_layers: &'a HashSet<String>,
+    pub merged_seams: &'a BTreeMap<String, Vec<String>>,
+    pub registry: &'a Registry,
+    pub repo_root: &'a Path,
+    pub full_diff: &'a str,
+    pub layer_paths: &'a BTreeMap<String, Vec<PathBuf>>,
+    pub file_contents: Option<&'a BTreeMap<PathBuf, String>>,
+}
+
+/// Run every registered check applicable to `layer_name`'s boundaries and
+/// return the results in a deterministic order.
+pub fn run_seams_for_layer(req: SeamRunRequest<'_>) -> Vec<SeamCheckResult> {
+    let SeamRunRequest {
+        layer_name,
+        active_layers,
+        merged_seams,
+        registry,
+        repo_root,
+        full_diff,
+        layer_paths,
+        file_contents,
+    } = req;
     let mut out: Vec<SeamCheckResult> = Vec::new();
 
     for (raw_boundary, check_ids) in merged_seams {
@@ -113,8 +127,14 @@ pub fn run_seams_for_layer(
                 continue;
             }
 
-            let result =
-                run_with_timeout(check, &boundary, &filtered_diff, repo_root, &boundary_files);
+            let result = run_with_timeout(
+                check,
+                &boundary,
+                &filtered_diff,
+                repo_root,
+                &boundary_files,
+                file_contents,
+            );
             out.push(seam_result_to_record(check, &boundary, result));
         }
     }
@@ -144,11 +164,13 @@ fn run_with_timeout(
     filtered_diff: &str,
     repo_root: &Path,
     boundary_files: &[PathBuf],
+    file_contents: Option<&BTreeMap<PathBuf, String>>,
 ) -> SeamResult {
     let ctx = SeamContext {
         boundary,
         filtered_diff,
         repo_root,
+        file_contents,
         boundary_files,
         args: None,
     };
@@ -277,6 +299,28 @@ mod tests {
         BTreeMap::new()
     }
 
+    fn run_test_seams_for_layer(
+        layer_name: &str,
+        active_layers: &HashSet<String>,
+        merged_seams: &BTreeMap<String, Vec<String>>,
+        repo_root: &Path,
+        full_diff: &str,
+        layer_paths: &BTreeMap<String, Vec<PathBuf>>,
+        file_contents: Option<&BTreeMap<PathBuf, String>>,
+    ) -> Vec<SeamCheckResult> {
+        let registry = default_registry();
+        run_seams_for_layer(SeamRunRequest {
+            layer_name,
+            active_layers,
+            merged_seams,
+            registry: &registry,
+            repo_root,
+            full_diff,
+            layer_paths,
+            file_contents,
+        })
+    }
+
     #[test]
     fn runs_check_for_layer_touching_boundary() {
         let dir = tempfile::tempdir().unwrap();
@@ -297,15 +341,8 @@ mod tests {
             vec![PathBuf::from("Dockerfile")],
         );
 
-        let results = run_seams_for_layer(
-            "backend",
-            &active,
-            &seams,
-            &default_registry(),
-            dir.path(),
-            "",
-            &paths,
-        );
+        let results =
+            run_test_seams_for_layer("backend", &active, &seams, dir.path(), "", &paths, None);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "config_mismatch");
         assert_eq!(results[0].boundary, "backend↔infrastructure");
@@ -322,14 +359,14 @@ mod tests {
         );
         let active = make_active(&["backend", "infrastructure", "frontend"]);
         let dir = tempfile::tempdir().unwrap();
-        let results = run_seams_for_layer(
+        let results = run_test_seams_for_layer(
             "frontend",
             &active,
             &seams,
-            &default_registry(),
             dir.path(),
             "",
             &empty_paths(),
+            None,
         );
         assert!(
             results.is_empty(),
@@ -363,15 +400,8 @@ mod tests {
             "infrastructure".to_string(),
             vec![PathBuf::from("Dockerfile")],
         );
-        let results = run_seams_for_layer(
-            "backend",
-            &active,
-            &seams,
-            &default_registry(),
-            dir.path(),
-            "",
-            &paths,
-        );
+        let results =
+            run_test_seams_for_layer("backend", &active, &seams, dir.path(), "", &paths, None);
         assert_eq!(results.len(), 1);
         assert_eq!(
             results[0].status,
@@ -393,14 +423,14 @@ mod tests {
         // Only frontend is active — neither backend nor infrastructure.
         let active = make_active(&["frontend"]);
         let dir = tempfile::tempdir().unwrap();
-        let results = run_seams_for_layer(
+        let results = run_test_seams_for_layer(
             "backend",
             &active,
             &seams,
-            &default_registry(),
             dir.path(),
             "",
             &empty_paths(),
+            None,
         );
         assert!(
             results.is_empty(),
@@ -414,14 +444,14 @@ mod tests {
         seams.insert("backend↔infrastructure".into(), vec!["ghost_check".into()]);
         let active = make_active(&["backend", "infrastructure"]);
         let dir = tempfile::tempdir().unwrap();
-        let results = run_seams_for_layer(
+        let results = run_test_seams_for_layer(
             "backend",
             &active,
             &seams,
-            &default_registry(),
             dir.path(),
             "",
             &empty_paths(),
+            None,
         );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, CheckStatus::Failed);
@@ -441,14 +471,14 @@ mod tests {
         seams.insert("malformed".into(), vec!["config_mismatch".into()]);
         let active = make_active(&["backend", "infrastructure"]);
         let dir = tempfile::tempdir().unwrap();
-        let results = run_seams_for_layer(
+        let results = run_test_seams_for_layer(
             "backend",
             &active,
             &seams,
-            &default_registry(),
             dir.path(),
             "",
             &empty_paths(),
+            None,
         );
         assert!(results.is_empty());
     }
@@ -497,14 +527,14 @@ diff --git a/Dockerfile b/Dockerfile
 diff --git a/src/app.rs b/src/app.rs
 +fn main() {}
 ";
-        let results = run_seams_for_layer(
+        let results = run_test_seams_for_layer(
             "backend",
             &active,
             &seams,
-            &default_registry(),
             dir.path(),
             full_diff,
             &paths,
+            None,
         );
         // Result should succeed (DATABASE_URL declared + consumed).
         assert_eq!(results.len(), 1);
@@ -544,27 +574,63 @@ diff --git a/src/app.rs b/src/app.rs
             vec![PathBuf::from("Dockerfile")],
         );
 
-        let r1 = run_seams_for_layer(
-            "backend",
-            &active,
-            &seams,
-            &default_registry(),
-            dir.path(),
-            "",
-            &paths,
-        );
-        let r2 = run_seams_for_layer(
-            "backend",
-            &active,
-            &seams,
-            &default_registry(),
-            dir.path(),
-            "",
-            &paths,
-        );
+        let r1 = run_test_seams_for_layer("backend", &active, &seams, dir.path(), "", &paths, None);
+        let r2 = run_test_seams_for_layer("backend", &active, &seams, dir.path(), "", &paths, None);
         let ids_1: Vec<&str> = r1.iter().map(|r| r.name.as_str()).collect();
         let ids_2: Vec<&str> = r2.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(ids_1, ids_2);
+    }
+
+    #[test]
+    fn seam_checks_use_dispatch_file_snapshot_when_supplied() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("Dockerfile"), "ENV DATABASE_URL=postgres\n").unwrap();
+        std::fs::write(
+            dir.path().join("src/app.ts"),
+            "export const db = process.env.DATABASE_URL;\n",
+        )
+        .unwrap();
+
+        let mut seams = BTreeMap::new();
+        seams.insert(
+            "backend↔infrastructure".into(),
+            vec!["config_mismatch".into()],
+        );
+        let active = make_active(&["backend", "infrastructure"]);
+        let mut paths = BTreeMap::new();
+        paths.insert("backend".to_string(), vec![PathBuf::from("src/app.ts")]);
+        paths.insert(
+            "infrastructure".to_string(),
+            vec![PathBuf::from("Dockerfile")],
+        );
+        let file_contents = BTreeMap::from([
+            (
+                PathBuf::from("Dockerfile"),
+                "ENV DATABASE_URL=postgres\n".to_string(),
+            ),
+            (
+                PathBuf::from("src/app.ts"),
+                "export const db = process.env.DATABASE_URL;\n".to_string(),
+            ),
+        ]);
+
+        std::fs::write(dir.path().join("src/app.ts"), "export const db = null;\n").unwrap();
+
+        let snapshot_results = run_test_seams_for_layer(
+            "backend",
+            &active,
+            &seams,
+            dir.path(),
+            "",
+            &paths,
+            Some(&file_contents),
+        );
+        assert_eq!(snapshot_results[0].status, CheckStatus::Passed);
+
+        let live_results =
+            run_test_seams_for_layer("backend", &active, &seams, dir.path(), "", &paths, None);
+        assert_eq!(live_results[0].status, CheckStatus::Failed);
     }
 
     // ─── Budget-enforcement tests ────────────────────────────────────────
@@ -613,7 +679,7 @@ diff --git a/src/app.rs b/src/app.rs
             outcome: || SeamResult::Failed(single_finding("underlying failure")),
         };
         let dir = tempfile::tempdir().unwrap();
-        let result = run_with_timeout(&check, &boundary, "", dir.path(), &[]);
+        let result = run_with_timeout(&check, &boundary, "", dir.path(), &[], None);
         match result {
             SeamResult::Failed(findings) => {
                 assert!(
@@ -643,7 +709,7 @@ diff --git a/src/app.rs b/src/app.rs
             outcome: || SeamResult::Passed,
         };
         let dir = tempfile::tempdir().unwrap();
-        let result = run_with_timeout(&check, &boundary, "", dir.path(), &[]);
+        let result = run_with_timeout(&check, &boundary, "", dir.path(), &[], None);
         match result {
             SeamResult::Warning(findings) => {
                 assert_eq!(findings.len(), 1);
@@ -666,7 +732,7 @@ diff --git a/src/app.rs b/src/app.rs
             outcome: || SeamResult::Warning(single_finding("advisory note")),
         };
         let dir = tempfile::tempdir().unwrap();
-        let result = run_with_timeout(&check, &boundary, "", dir.path(), &[]);
+        let result = run_with_timeout(&check, &boundary, "", dir.path(), &[], None);
         match result {
             SeamResult::Warning(findings) => {
                 assert_eq!(findings.len(), 2);
@@ -689,7 +755,7 @@ diff --git a/src/app.rs b/src/app.rs
             outcome: || SeamResult::Failed(single_finding("fast failure")),
         };
         let dir = tempfile::tempdir().unwrap();
-        let result = run_with_timeout(&check, &boundary, "", dir.path(), &[]);
+        let result = run_with_timeout(&check, &boundary, "", dir.path(), &[], None);
         match result {
             SeamResult::Failed(findings) => {
                 assert_eq!(findings.len(), 1);
@@ -769,6 +835,7 @@ diff --git a/src/app.rs b/src/app.rs
                 boundary,
                 filtered_diff: "",
                 repo_root: dir.path(),
+                file_contents: None,
                 boundary_files: &boundary_files,
                 args: None,
             };

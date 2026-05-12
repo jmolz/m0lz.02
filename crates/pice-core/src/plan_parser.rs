@@ -50,7 +50,10 @@ impl ParsedPlan {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read plan file: {}", path.display()))?;
+        Self::parse(path, content)
+    }
 
+    pub fn parse(path: &Path, content: String) -> Result<Self> {
         let title = content
             .lines()
             .find(|line| line.starts_with("# "))

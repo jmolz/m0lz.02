@@ -13,16 +13,21 @@ use pice_core::transport::SocketPath;
 use pice_daemon::lifecycle;
 use pice_daemon::server::auth;
 use pice_daemon::server::unix::UnixConnection;
+use pice_daemon::test_support::StateDirGuard;
 
 /// Spin up a daemon in a background task. Returns socket path, token path,
 /// and join handle.
 async fn start_daemon() -> (
     tempfile::TempDir,
+    StateDirGuard<'static>,
     SocketPath,
     PathBuf,
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    let guard = StateDirGuard::new(&state_dir);
     let sock_path = dir.path().join("daemon.sock");
     let token_path = dir.path().join("daemon.token");
     let socket_path = SocketPath::Unix(sock_path.clone());
@@ -32,14 +37,15 @@ async fn start_daemon() -> (
     let handle = tokio::spawn(lifecycle::run_with_paths(sp, tp));
 
     for _ in 0..200 {
-        if sock_path.exists() {
+        if sock_path.exists() && token_path.exists() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(sock_path.exists());
+    assert!(token_path.exists());
 
-    (dir, socket_path, token_path, handle)
+    (dir, guard, socket_path, token_path, handle)
 }
 
 /// Connect a raw `UnixConnection`.
@@ -59,7 +65,7 @@ async fn connect(socket_path: &SocketPath) -> UnixConnection {
 /// A request with the wrong token is rejected with error code -32002.
 #[tokio::test]
 async fn wrong_token_rejected_with_auth_error() {
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let mut conn = connect(&socket_path).await;
 
     let req = DaemonRequest::new(
@@ -93,7 +99,7 @@ async fn wrong_token_rejected_with_auth_error() {
 /// An empty token is rejected.
 #[tokio::test]
 async fn empty_token_rejected() {
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let mut conn = connect(&socket_path).await;
 
     let req = DaemonRequest::new(1, methods::DAEMON_HEALTH, "", serde_json::json!({}));
@@ -117,7 +123,7 @@ async fn empty_token_rejected() {
 /// After auth rejection, the same connection can retry with the correct token.
 #[tokio::test]
 async fn connection_survives_auth_rejection() {
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let mut conn = connect(&socket_path).await;
     let token = auth::read_token_file(&token_path).expect("read token");
 
