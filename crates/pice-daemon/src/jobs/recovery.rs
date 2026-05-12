@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use pice_core::cli::ExitJsonStatus;
 use pice_core::layers::manifest::{LayerResult, LayerStatus, ManifestStatus, VerificationManifest};
 
@@ -37,9 +37,9 @@ pub struct ReconciliationReport {
     /// Feature ids whose `InProgress` manifests were rewritten to
     /// `Failed` with `halted_by = "failed-interrupted"`.
     pub reconciled_interrupted: Vec<String>,
-    /// Paths that could not be read/parsed. Logged at `warn` but do not
-    /// block startup — a corrupt manifest is surfaced to the user via
-    /// subsequent `pice status` which will show it as unloadable.
+    /// Paths that could not be read/parsed. Startup reconciliation now fails
+    /// closed on these errors so the daemon cannot accept RPCs while
+    /// interrupted manifests may still be unreconciled.
     pub unreadable: Vec<PathBuf>,
 }
 
@@ -60,36 +60,24 @@ pub fn reconcile_on_startup(state_dir: &Path) -> Result<ReconciliationReport> {
         return Ok(report);
     }
 
-    let namespaces = match std::fs::read_dir(state_dir) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(
-                dir = %state_dir.display(),
-                error = %e,
-                "reconcile_on_startup: unable to list state dir"
-            );
-            return Ok(report);
-        }
-    };
+    let namespaces = std::fs::read_dir(state_dir)
+        .with_context(|| format!("unable to list state dir {}", state_dir.display()))?;
 
-    for ns_entry in namespaces.flatten() {
+    for ns_entry in namespaces {
+        let ns_entry = ns_entry.with_context(|| {
+            format!("unable to read state dir entry in {}", state_dir.display())
+        })?;
         let ns_path = ns_entry.path();
         if !ns_path.is_dir() {
             continue;
         }
-        let manifests = match std::fs::read_dir(&ns_path) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    dir = %ns_path.display(),
-                    error = %e,
-                    "reconcile_on_startup: unable to list namespace dir"
-                );
-                continue;
-            }
-        };
+        let manifests = std::fs::read_dir(&ns_path)
+            .with_context(|| format!("unable to list namespace dir {}", ns_path.display()))?;
 
-        for entry in manifests.flatten() {
+        for entry in manifests {
+            let entry = entry.with_context(|| {
+                format!("unable to read manifest entry in {}", ns_path.display())
+            })?;
             let path = entry.path();
             let file_name = match path.file_name().and_then(|s| s.to_str()) {
                 Some(s) if s.ends_with(".manifest.json") => s.to_string(),
@@ -97,7 +85,7 @@ pub fn reconcile_on_startup(state_dir: &Path) -> Result<ReconciliationReport> {
             };
             let feature_id = file_name.trim_end_matches(".manifest.json").to_string();
 
-            reconcile_one(&path, &feature_id, &mut report);
+            reconcile_one(&path, &feature_id, &mut report)?;
         }
 
         // If we deleted every manifest in this namespace dir, remove
@@ -122,52 +110,28 @@ pub fn reconcile_on_startup(state_dir: &Path) -> Result<ReconciliationReport> {
     Ok(report)
 }
 
-fn reconcile_one(path: &Path, feature_id: &str, report: &mut ReconciliationReport) {
-    let manifest = match VerificationManifest::load(path) {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "reconcile_on_startup: skipping unreadable manifest"
-            );
-            report.unreadable.push(path.to_path_buf());
-            return;
-        }
-    };
+fn reconcile_one(path: &Path, feature_id: &str, report: &mut ReconciliationReport) -> Result<()> {
+    let manifest = VerificationManifest::load(path)
+        .with_context(|| format!("unable to load manifest {}", path.display()))?;
 
     match manifest.overall_status {
         ManifestStatus::Queued => {
-            if let Err(e) = std::fs::remove_file(path) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "reconcile_on_startup: failed to delete Queued manifest"
-                );
-                report.unreadable.push(path.to_path_buf());
-                return;
-            }
+            std::fs::remove_file(path)
+                .with_context(|| format!("failed to delete Queued manifest {}", path.display()))?;
             report.discarded_queued.push(feature_id.to_string());
         }
         ManifestStatus::InProgress => {
-            let rewritten = rewrite_interrupted(manifest);
+            let rewritten = rewrite_interrupted(manifest, feature_id);
             let saver = crate::events::NullSaver;
-            if let Err(e) = crate::events::ManifestSaver::save_and_emit(
+            crate::events::ManifestSaver::save_and_emit(
                 &saver,
                 &rewritten,
                 path,
                 crate::events::SaveIntent::Cancelled {
                     reason: FAILED_INTERRUPTED.to_string(),
                 },
-            ) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "reconcile_on_startup: failed to save rewritten manifest"
-                );
-                report.unreadable.push(path.to_path_buf());
-                return;
-            }
+            )
+            .with_context(|| format!("failed to save rewritten manifest {}", path.display()))?;
             report.reconciled_interrupted.push(feature_id.to_string());
         }
         // Terminal states: untouched.
@@ -184,15 +148,35 @@ fn reconcile_one(path: &Path, feature_id: &str, report: &mut ReconciliationRepor
             // reviewer's decision still applies post-restart.
         }
     }
+    Ok(())
 }
 
 /// Rewrite an `InProgress` manifest to `Failed` with `halted_by =
 /// "failed-interrupted"` on every non-terminal layer. Preserves
 /// completed layer results (Passed / Failed / Skipped) and any gate
 /// history for audit.
-fn rewrite_interrupted(mut manifest: VerificationManifest) -> VerificationManifest {
+fn rewrite_interrupted(
+    mut manifest: VerificationManifest,
+    feature_id: &str,
+) -> VerificationManifest {
     for layer in manifest.layers.iter_mut() {
         rewrite_layer_if_open(layer);
+    }
+    if !manifest
+        .layers
+        .iter()
+        .any(|layer| layer.halted_by.as_deref() == Some(FAILED_INTERRUPTED))
+    {
+        manifest.layers.push(LayerResult {
+            name: feature_id.to_string(),
+            status: LayerStatus::Failed,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: Some(FAILED_INTERRUPTED.to_string()),
+            final_confidence: None,
+            total_cost_usd: None,
+            escalation_events: None,
+        });
     }
     manifest.overall_status = ManifestStatus::Failed;
     manifest
@@ -379,15 +363,16 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_manifest_is_logged_and_skipped() {
+    fn unreadable_manifest_fails_reconciliation() {
         let dir = tempfile::tempdir().unwrap();
         let ns = dir.path().join("ns-12hex");
         std::fs::create_dir_all(&ns).unwrap();
         let path = ns.join("corrupt.manifest.json");
         std::fs::write(&path, b"not valid json {{{ }}}}").unwrap();
 
-        let report = reconcile_on_startup(dir.path()).unwrap();
-        assert_eq!(report.unreadable.len(), 1);
+        let err = reconcile_on_startup(dir.path()).unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("unable to load manifest"));
         assert!(
             path.exists(),
             "corrupt file not deleted — preserved for manual inspection"
@@ -423,13 +408,27 @@ mod tests {
             findings: vec![],
         }];
         m.layers = vec![l];
-        let out = rewrite_interrupted(m);
+        let out = rewrite_interrupted(m, "feat");
         assert_eq!(out.layers[0].status, LayerStatus::Failed);
         assert_eq!(
             out.layers[0].passes.len(),
             1,
             "prior passes preserved for audit"
         );
+    }
+
+    #[test]
+    fn empty_in_progress_manifest_gets_failed_interrupted_marker() {
+        let out = rewrite_interrupted(
+            make_manifest("feat-empty", ManifestStatus::InProgress),
+            "feat-empty",
+        );
+
+        assert_eq!(out.overall_status, ManifestStatus::Failed);
+        assert_eq!(out.layers.len(), 1);
+        assert_eq!(out.layers[0].name, "feat-empty");
+        assert_eq!(out.layers[0].status, LayerStatus::Failed);
+        assert_eq!(out.layers[0].halted_by.as_deref(), Some(FAILED_INTERRUPTED));
     }
 
     #[test]

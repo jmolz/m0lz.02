@@ -100,6 +100,32 @@ fn evaluate_background_under_inline_mode_rejects_with_typed_error() {
 }
 
 #[test]
+fn execute_background_under_inline_mode_rejects_before_workflow_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    git_init(dir.path());
+    let plan = write_plan(dir.path(), "inline-exec-bg");
+    fs::create_dir_all(dir.path().join(".pice")).unwrap();
+    fs::write(dir.path().join(".pice/workflow.yaml"), "schema_version: [").unwrap();
+
+    let assert = pice_cmd()
+        .current_dir(dir.path())
+        .arg("execute")
+        .arg(&plan)
+        .arg("--background")
+        .arg("--json")
+        .assert()
+        .failure()
+        .code(ExitJsonStatus::InlineModeBackgroundUnsupported.exit_code());
+
+    let out = assert.get_output();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(ExitJsonStatus::InlineModeBackgroundUnsupported.as_str()),
+        "stdout must carry typed inline-mode status before workflow validation — got: {stdout}"
+    );
+}
+
+#[test]
 fn status_wait_under_inline_mode_rejects_with_typed_error() {
     let dir = tempfile::tempdir().unwrap();
     git_init(dir.path());

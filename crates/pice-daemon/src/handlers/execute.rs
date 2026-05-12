@@ -174,6 +174,9 @@ async fn run_background(
     plan_path: &std::path::Path,
 ) -> Result<CommandResponse> {
     let feature_id = feature_id_from_plan_path(plan_path);
+    if let Some(resp) = super::background::reject_inline_background_if_active(plan_path, req.json) {
+        return Ok(resp);
+    }
 
     // Resolve the workflow snapshot for the JobEnv. `execute` does not
     // consult workflow directly, but the snapshot is part of the

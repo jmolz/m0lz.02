@@ -71,8 +71,20 @@ async fn reconciliation_runs_before_first_rpc() {
 
     wait_for_socket(&sock_path).await;
 
-    // At this point the daemon is accepting RPCs, so reconciliation must
-    // have ALREADY run. Observe disk state:
+    // Sanity: daemon is responsive. A client may connect to the bound socket
+    // before startup reconciliation finishes, but no RPC may be processed until
+    // after reconciliation has completed.
+    let token = auth::read_token_file(&token_path).expect("read token");
+    let stream = UnixStream::connect(&sock_path).await.expect("connect");
+    let mut conn = UnixConnection::new(stream);
+    let health = DaemonRequest::new(1, methods::DAEMON_HEALTH, &token, serde_json::json!({}));
+    conn.write_message(&health).await.expect("write");
+    let resp: DaemonResponse = conn.read_message().await.expect("read").expect("not EOF");
+    assert!(resp.error.is_none());
+    drop(conn);
+
+    // At this point the daemon is accepting and processing RPCs, so
+    // reconciliation must have ALREADY run. Observe disk state:
     assert!(
         !queued_path.exists(),
         "Queued manifest should have been deleted before socket was accepting"
@@ -88,16 +100,6 @@ async fn reconciliation_runs_before_first_rpc() {
     let preserved = VerificationManifest::load(&passed_path).unwrap();
     assert_eq!(preserved.overall_status, ManifestStatus::Passed);
 
-    // Sanity: daemon is responsive.
-    let token = auth::read_token_file(&token_path).expect("read token");
-    let stream = UnixStream::connect(&sock_path).await.expect("connect");
-    let mut conn = UnixConnection::new(stream);
-    let health = DaemonRequest::new(1, methods::DAEMON_HEALTH, &token, serde_json::json!({}));
-    conn.write_message(&health).await.expect("write");
-    let resp: DaemonResponse = conn.read_message().await.expect("read").expect("not EOF");
-    assert!(resp.error.is_none());
-    drop(conn);
-
     // Shutdown.
     let stream = UnixStream::connect(&sock_path).await.expect("connect");
     let mut conn = UnixConnection::new(stream);
@@ -111,4 +113,36 @@ async fn reconciliation_runs_before_first_rpc() {
     // Cleanup the seeded manifests so re-runs are clean.
     let _ = std::fs::remove_file(&in_progress_path);
     let _ = std::fs::remove_file(&passed_path);
+}
+
+#[tokio::test]
+async fn reconciliation_failure_prevents_first_rpc() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    let ns = state_dir.join("ns-corrupt");
+    std::fs::create_dir_all(&ns).unwrap();
+    let _guard = StateDirGuard::new(&state_dir);
+
+    let corrupt_path = ns.join("corrupt.manifest.json");
+    std::fs::write(&corrupt_path, b"not valid json {{{ }}}}").unwrap();
+
+    let sock_path = dir.path().join("daemon.sock");
+    let token_path = dir.path().join("daemon.token");
+    let socket_path = SocketPath::Unix(sock_path.clone());
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        lifecycle::run_with_paths(socket_path, token_path),
+    )
+    .await
+    .expect("daemon startup should return promptly on reconciliation failure")
+    .expect_err("daemon startup should fail closed");
+
+    let rendered = format!("{err:#}");
+    assert!(rendered.contains("startup reconciliation failed"));
+    assert!(rendered.contains("unable to load manifest"));
+    assert!(
+        !sock_path.exists(),
+        "daemon must not bind the socket when startup reconciliation fails"
+    );
 }

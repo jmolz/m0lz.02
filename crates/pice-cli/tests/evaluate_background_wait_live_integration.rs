@@ -144,6 +144,7 @@ fn evaluate_background_wait_real_daemon_kill_then_restart_reconciles_failed_inte
 
     let mut daemon = spawn_real_daemon(home.path(), project.path(), &socket_path, &state_dir);
     wait_for_real_socket(&socket_path, &mut daemon);
+    wait_for_real_health(home.path(), &socket_path, &mut daemon);
 
     let mut cli = std::process::Command::cargo_bin("pice")
         .unwrap()
@@ -198,6 +199,7 @@ fn evaluate_background_wait_real_daemon_kill_then_restart_reconciles_failed_inte
 
     let mut restarted = spawn_real_daemon(home.path(), project.path(), &socket_path, &state_dir);
     wait_for_real_socket(&socket_path, &mut restarted);
+    wait_for_real_health(home.path(), &socket_path, &mut restarted);
 
     let reconciled = VerificationManifest::load(&manifest_path).expect("load reconciled manifest");
     assert_eq!(reconciled.overall_status, ManifestStatus::Failed);
@@ -394,6 +396,44 @@ fn wait_for_real_socket(socket_path: &std::path::Path, daemon: &mut Child) {
     }
     panic!(
         "daemon socket did not become ready at {}",
+        socket_path.display()
+    );
+}
+
+fn wait_for_real_health(home: &std::path::Path, socket_path: &std::path::Path, daemon: &mut Child) {
+    let token_path = home.join(".pice/daemon.token");
+    for _ in 0..300 {
+        if let Ok(token) = std::fs::read_to_string(&token_path) {
+            if let Ok(mut stream) = UnixStream::connect(socket_path) {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+                let request =
+                    DaemonRequest::new(1, DAEMON_HEALTH, token.trim(), serde_json::json!({}));
+                if writeln!(stream, "{}", serde_json::to_string(&request).unwrap()).is_ok() {
+                    let mut reader =
+                        BufReader::new(stream.try_clone().expect("clone health stream"));
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_ok() && !line.is_empty() {
+                        if let Ok(response) = serde_json::from_str::<DaemonResponse>(&line) {
+                            if response.error.is_none() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(status) = daemon.try_wait().expect("poll daemon") {
+            let mut stderr = String::new();
+            if let Some(mut err) = daemon.stderr.take() {
+                err.read_to_string(&mut stderr).expect("read daemon stderr");
+            }
+            panic!("daemon exited before health response: {status}; stderr:\n{stderr}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "daemon did not become health-responsive at {}",
         socket_path.display()
     );
 }

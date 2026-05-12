@@ -54,9 +54,34 @@ pub async fn run_with_paths(socket_path: SocketPath, token_path: std::path::Path
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
+    // Bind first: the socket/pipe is the single-daemon ownership lock. A
+    // second daemon must fail here before it can rotate the active token file
+    // or reconcile manifests owned by the running daemon.
+    match socket_path {
+        #[cfg(unix)]
+        SocketPath::Unix(ref path) => {
+            let listener = crate::server::unix::UnixSocketListener::bind(path).await?;
+            let ctx = initialize_bound_daemon(&token_path)?;
+            run_unix_bound(listener, ctx).await
+        }
+
+        #[cfg(windows)]
+        SocketPath::Windows(ref name) => {
+            let listener = crate::server::windows::WindowsPipeListener::bind(name).await?;
+            let ctx = initialize_bound_daemon(&token_path)?;
+            run_windows_bound(listener, ctx).await
+        }
+
+        // Unreachable on the matching platform, but the enum is not cfg-gated.
+        #[allow(unreachable_patterns)]
+        _ => anyhow::bail!("unsupported socket path variant on this platform"),
+    }
+}
+
+fn initialize_bound_daemon(token_path: &std::path::Path) -> Result<Arc<DaemonContext>> {
     // Generate auth token and write to disk.
     let token = auth::generate_token().context("failed to generate auth token")?;
-    auth::write_token_file(&token_path, &token)?;
+    auth::write_token_file(token_path, &token)?;
     info!(token_path = %token_path.display(), "auth token written");
 
     // Phase 7 Task 8: reconcile any interrupted-dispatch manifests BEFORE
@@ -66,26 +91,12 @@ pub async fn run_with_paths(socket_path: SocketPath, token_path: std::path::Path
     // preserved untouched.
     let state_dir = pice_core::layers::manifest::VerificationManifest::state_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("~/.pice/state"));
-    if let Err(e) = crate::jobs::reconcile_on_startup(&state_dir) {
-        tracing::warn!(error = %e, "startup reconciliation failed");
-    }
+    crate::jobs::reconcile_on_startup(&state_dir)
+        .with_context(|| format!("startup reconciliation failed for {}", state_dir.display()))?;
 
     // Build shared context.
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let ctx = Arc::new(DaemonContext::new(token, project_root));
-
-    // Platform-specific bind + accept loop.
-    match socket_path {
-        #[cfg(unix)]
-        SocketPath::Unix(ref path) => run_unix(path, ctx).await,
-
-        #[cfg(windows)]
-        SocketPath::Windows(ref name) => run_windows(name, ctx).await,
-
-        // Unreachable on the matching platform, but the enum is not cfg-gated.
-        #[allow(unreachable_patterns)]
-        _ => anyhow::bail!("unsupported socket path variant on this platform"),
-    }
+    Ok(Arc::new(DaemonContext::new(token, project_root)))
 }
 
 /// Ensure the parent directory of the socket path exists.
@@ -135,12 +146,20 @@ async fn drain_connection_tasks(tasks: &mut JoinSet<()>, timeout: Duration) -> u
 
 // ─── Unix accept loop ──────────────────────────────────────────────────────
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 async fn run_unix(path: &std::path::Path, ctx: Arc<DaemonContext>) -> Result<()> {
     use crate::server::unix::UnixSocketListener;
 
     let listener = UnixSocketListener::bind(path).await?;
-    info!(path = %path.display(), "daemon listening");
+    run_unix_bound(listener, ctx).await
+}
+
+#[cfg(unix)]
+async fn run_unix_bound(
+    listener: crate::server::unix::UnixSocketListener,
+    ctx: Arc<DaemonContext>,
+) -> Result<()> {
+    info!(path = %listener.path().display(), "daemon listening");
     let mut connection_tasks = JoinSet::new();
 
     loop {
@@ -284,12 +303,20 @@ async fn handle_connection_unix(
 
 // ─── Windows accept loop ───────────────────────────────────────────────────
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
     use crate::server::windows::WindowsPipeListener;
 
     let listener = WindowsPipeListener::bind(name).await?;
-    info!(pipe = %name, "daemon listening");
+    run_windows_bound(listener, ctx).await
+}
+
+#[cfg(windows)]
+async fn run_windows_bound(
+    listener: crate::server::windows::WindowsPipeListener,
+    ctx: Arc<DaemonContext>,
+) -> Result<()> {
+    info!("daemon listening");
     let mut connection_tasks = JoinSet::new();
 
     loop {
@@ -476,11 +503,16 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn lifecycle_startup_health_and_shutdown() {
         use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
         use tokio::net::UnixStream;
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let _guard = crate::test_support::StateDirGuard::new(&state_dir);
+
         let sock_path = dir.path().join("daemon.sock");
         let token_path = dir.path().join("daemon.token");
         let socket_path = SocketPath::Unix(sock_path.clone());
@@ -540,6 +572,85 @@ mod tests {
             .expect("daemon should exit within 5s")
             .expect("join handle");
         daemon_result.expect("daemon should exit cleanly");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn second_daemon_start_fails_before_token_write_or_reconciliation() {
+        use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
+        use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
+        use tokio::net::UnixStream;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let _guard = crate::test_support::StateDirGuard::new(&state_dir);
+
+        let sock_path = dir.path().join("daemon.sock");
+        let token_path = dir.path().join("daemon.token");
+        let socket_path = SocketPath::Unix(sock_path.clone());
+        let daemon = tokio::spawn(run_with_paths(socket_path.clone(), token_path.clone()));
+
+        for _ in 0..100 {
+            if sock_path.exists() && UnixStream::connect(&sock_path).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(sock_path.exists(), "socket should exist after startup");
+
+        let token_before = auth::read_token_file(&token_path).expect("read token");
+        let project_root =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let mut queued = VerificationManifest::new("second-start-queued", &project_root);
+        queued.overall_status = ManifestStatus::Queued;
+        let queued_path =
+            VerificationManifest::manifest_path_for("second-start-queued", &project_root)
+                .expect("manifest path");
+        std::fs::create_dir_all(queued_path.parent().expect("manifest parent"))
+            .expect("manifest dir");
+        queued.save(&queued_path).expect("save queued");
+
+        let err = run_with_paths(socket_path, token_path.clone())
+            .await
+            .expect_err("second daemon should fail before startup side effects");
+        let rendered = format!("{err:#}");
+        assert!(
+            rendered.contains("already listening"),
+            "second daemon should fail on socket ownership, got: {rendered}"
+        );
+
+        let token_after =
+            auth::read_token_file(&token_path).expect("read token after second start");
+        assert_eq!(
+            token_after, token_before,
+            "second daemon must not rotate the active token before proving socket ownership"
+        );
+        assert!(
+            queued_path.exists(),
+            "second daemon must not reconcile/delete manifests owned by the active daemon"
+        );
+
+        let stream = UnixStream::connect(&sock_path).await.expect("connect");
+        let mut conn = crate::server::unix::UnixConnection::new(stream);
+        let shutdown_req = DaemonRequest::new(
+            1,
+            methods::DAEMON_SHUTDOWN,
+            &token_before,
+            serde_json::json!({}),
+        );
+        conn.write_message(&shutdown_req)
+            .await
+            .expect("write shutdown");
+        let resp: DaemonResponse = conn.read_message().await.expect("read").expect("not EOF");
+        assert!(resp.error.is_none(), "shutdown should succeed");
+        drop(conn);
+
+        tokio::time::timeout(Duration::from_secs(5), daemon)
+            .await
+            .expect("daemon should exit")
+            .expect("join handle")
+            .expect("daemon should exit cleanly");
     }
 
     #[cfg(unix)]
@@ -666,12 +777,17 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[allow(clippy::await_holding_lock)]
     async fn shutdown_waits_for_in_flight_subscribe_connection_before_exit() {
         use pice_core::protocol::subscribe::{SubscribeManifestRequest, SubscribeManifestResponse};
         use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
         use tokio::net::UnixStream;
 
         let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let _guard = crate::test_support::StateDirGuard::new(&state_dir);
+
         let sock_path = dir.path().join("daemon.sock");
         let token_path = dir.path().join("daemon.token");
         let socket_path = SocketPath::Unix(sock_path.clone());
@@ -686,7 +802,29 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(sock_path.exists(), "socket should exist after startup");
-        let token = auth::read_token_file(&token_path).expect("read token");
+        let mut token = None;
+        for _ in 0..200 {
+            if let Ok(candidate) = auth::read_token_file(&token_path) {
+                if let Ok(stream) = UnixStream::connect(&sock_path).await {
+                    let mut conn = crate::server::unix::UnixConnection::new(stream);
+                    let health = DaemonRequest::new(
+                        1,
+                        methods::DAEMON_HEALTH,
+                        &candidate,
+                        serde_json::json!({}),
+                    );
+                    conn.write_message(&health).await.expect("write health");
+                    if let Ok(Some(resp)) = conn.read_message::<DaemonResponse>().await {
+                        if resp.error.is_none() {
+                            token = Some(candidate);
+                            break;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let token = token.expect("daemon should become health-responsive before subscribe");
 
         let stream = UnixStream::connect(&sock_path)
             .await
@@ -749,11 +887,16 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn lifecycle_rejects_bad_auth() {
         use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
         use tokio::net::UnixStream;
 
         let dir = tempfile::tempdir().expect("tempdir");
+        let state_dir = dir.path().join("state");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let _guard = crate::test_support::StateDirGuard::new(&state_dir);
+
         let sock_path = dir.path().join("daemon.sock");
         let token_path = dir.path().join("daemon.token");
         let socket_path = SocketPath::Unix(sock_path.clone());

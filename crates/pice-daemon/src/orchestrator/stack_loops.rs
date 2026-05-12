@@ -2292,6 +2292,7 @@ mod tests {
         let pice_config = PiceConfig::default();
         let workflow = test_workflow();
         let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let manifest_path = dir.path().join("manifest-state/plan.manifest.json");
         let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers_config,
@@ -2307,7 +2308,7 @@ mod tests {
             claude_md: None,
             layer_paths: None,
             seam_file_contents: None,
-            manifest_path: None,
+            manifest_path: Some(&manifest_path),
             global_provider_semaphore: None,
             global_provider_capacity: None,
             saver: &saver,
@@ -2470,6 +2471,7 @@ mod tests {
         let pice_config = PiceConfig::default();
         let workflow = test_workflow();
         let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let manifest_path = dir.path().join("manifest-state/plan.manifest.json");
         let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers_config,
@@ -2485,7 +2487,7 @@ mod tests {
             claude_md: None,
             layer_paths: None,
             seam_file_contents: None,
-            manifest_path: None,
+            manifest_path: Some(&manifest_path),
             global_provider_semaphore: None,
             global_provider_capacity: None,
             saver: &saver,
@@ -2671,6 +2673,7 @@ mod tests {
         let plan_path = dir.path().join("plan.md");
         std::fs::write(&plan_path, "# Plan").unwrap();
         let pice_config = PiceConfig::default();
+        let manifest_path = dir.path().join("manifest-state/plan.manifest.json");
         let saver = crate::events::NullSaver;
         let cfg = StackLoopsConfig {
             layers: &layers,
@@ -2686,7 +2689,7 @@ mod tests {
             claude_md: None,
             layer_paths: None,
             seam_file_contents: None,
-            manifest_path: None,
+            manifest_path: Some(&manifest_path),
             global_provider_semaphore: None,
             global_provider_capacity: None,
             saver: &saver,
