@@ -231,11 +231,21 @@ async fn run_unix_bound(
     // drain on the signal path. Idempotent when the shutdown handler
     // already drained — `drain_on_shutdown` returns 0 immediately if
     // no jobs are live.
-    let remaining = ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT).await;
-    if remaining > 0 {
+    let drain_report = ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT).await;
+    if drain_report.remaining > 0 {
         tracing::warn!(
-            remaining,
-            "daemon shutdown: {remaining} background jobs did not finish within the {SHUTDOWN_TIMEOUT:?} drain budget"
+            remaining = drain_report.remaining,
+            "daemon shutdown: {} background jobs did not finish within the {:?} drain budget",
+            drain_report.remaining,
+            SHUTDOWN_TIMEOUT,
+        );
+    }
+    for failure in &drain_report.terminalization_failures {
+        tracing::error!(
+            feature_id = %failure.feature_id,
+            run_id = %failure.run_id,
+            error = %failure.error,
+            "daemon shutdown: background job terminalization failed"
         );
     }
 
@@ -383,11 +393,21 @@ async fn run_windows_bound(
     // Phase 7 Criterion 17: drain background jobs BEFORE exit. See
     // the Unix branch above for rationale — Windows pipe path needs
     // the same symmetric drain.
-    let remaining = ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT).await;
-    if remaining > 0 {
+    let drain_report = ctx.jobs().drain_on_shutdown(SHUTDOWN_TIMEOUT).await;
+    if drain_report.remaining > 0 {
         tracing::warn!(
-            remaining,
-            "daemon shutdown: {remaining} background jobs did not finish within the {SHUTDOWN_TIMEOUT:?} drain budget"
+            remaining = drain_report.remaining,
+            "daemon shutdown: {} background jobs did not finish within the {:?} drain budget",
+            drain_report.remaining,
+            SHUTDOWN_TIMEOUT,
+        );
+    }
+    for failure in &drain_report.terminalization_failures {
+        tracing::error!(
+            feature_id = %failure.feature_id,
+            run_id = %failure.run_id,
+            error = %failure.error,
+            "daemon shutdown: background job terminalization failed"
         );
     }
     info!("daemon shutdown complete");

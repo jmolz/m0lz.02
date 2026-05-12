@@ -28,6 +28,25 @@ use crate::events::{EventBus, EventEmittingSaver, ManifestSaver, SaveIntent};
 /// within a single millisecond tick).
 pub type RunId = String;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShutdownTerminalizationFailure {
+    pub feature_id: String,
+    pub run_id: RunId,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShutdownDrainReport {
+    pub remaining: usize,
+    pub terminalization_failures: Vec<ShutdownTerminalizationFailure>,
+}
+
+impl ShutdownDrainReport {
+    pub fn is_clean(&self) -> bool {
+        self.terminalization_failures.is_empty()
+    }
+}
+
 /// Error returned by [`FeatureJobManager::spawn`] when a feature is already
 /// running. The CLI handler surfaces this as
 /// `ExitJsonStatus::FeatureAlreadyRunning` with the existing run id so the
@@ -62,12 +81,25 @@ fn terminalize_cancelled_manifest(
         &env.project_root,
         &env.state_dir,
     );
-    let mut manifest = VerificationManifest::load(&manifest_path).map_err(|err| {
-        anyhow::anyhow!(
-            "background job cancellation could not terminalize because the manifest could not be loaded from {}: {err:#}",
-            manifest_path.display()
-        )
-    })?;
+    let mut manifest = match VerificationManifest::load(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(err) if !manifest_path.exists() => {
+            tracing::warn!(
+                feature_id = %feature_id,
+                run_id = %run_id,
+                path = %manifest_path.display(),
+                error = %err,
+                "background job cancellation is synthesizing a missing terminal manifest",
+            );
+            VerificationManifest::new(feature_id, &env.project_root)
+        }
+        Err(err) => {
+            return Err(anyhow::anyhow!(
+                "background job cancellation could not terminalize because the manifest could not be loaded from {}: {err:#}",
+                manifest_path.display()
+            ));
+        }
+    };
     manifest.run_id = Some(run_id.clone());
     for layer in &mut manifest.layers {
         if matches!(
@@ -520,14 +552,15 @@ impl FeatureJobManager {
     }
 
     /// Fire cancellation on every live feature, then wait up to `timeout`
-    /// for all supervised tasks to exit. Returns the count of features
-    /// that were STILL running when the timeout elapsed.
+    /// for all supervised tasks to exit. Returns a drain report with the
+    /// count of features that were STILL running when the timeout elapsed
+    /// and any forced-terminalization failures.
     ///
     /// Wired into the daemon's SIGTERM / `daemon/shutdown` path by
     /// Task 21's `lifecycle::shutdown_sequence()`. The 10s budget per
     /// `.claude/rules/daemon.md` → "Graceful shutdown" lives at the call
     /// site; this method only enforces the timeout the caller hands it.
-    pub async fn drain_on_shutdown(&self, timeout: Duration) -> usize {
+    pub async fn drain_on_shutdown(&self, timeout: Duration) -> ShutdownDrainReport {
         // Fire all tokens.
         for entry in self.jobs.iter() {
             entry.cancel.cancel();
@@ -538,7 +571,7 @@ impl FeatureJobManager {
         loop {
             let remaining = self.jobs.len();
             if remaining == 0 {
-                return 0;
+                return ShutdownDrainReport::default();
             }
             if tokio::time::Instant::now() >= deadline {
                 let timed_out: Vec<_> = self
@@ -555,6 +588,10 @@ impl FeatureJobManager {
                 for entry in self.jobs.iter() {
                     entry.join_handle.abort();
                 }
+                let mut report = ShutdownDrainReport {
+                    remaining,
+                    terminalization_failures: Vec::new(),
+                };
                 for (feature_id, run_id, env) in timed_out {
                     if let Err(err) = terminalize_shutdown_timeout(
                         &feature_id,
@@ -568,13 +605,20 @@ impl FeatureJobManager {
                             error = %err,
                             "FeatureJobManager: failed to terminalize task aborted during shutdown timeout",
                         );
+                        report
+                            .terminalization_failures
+                            .push(ShutdownTerminalizationFailure {
+                                feature_id,
+                                run_id,
+                                error: format!("{err:#}"),
+                            });
                     }
                 }
                 let abort_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
                 while !self.jobs.is_empty() && tokio::time::Instant::now() < abort_deadline {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                return remaining;
+                return report;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -1015,8 +1059,9 @@ mod tests {
         // Give the worker time to register the cancel handle.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let remaining = manager.drain_on_shutdown(Duration::from_secs(3)).await;
-        assert_eq!(remaining, 0, "drain should bring count to zero");
+        let report = manager.drain_on_shutdown(Duration::from_secs(3)).await;
+        assert_eq!(report.remaining, 0, "drain should bring count to zero");
+        assert!(report.is_clean());
     }
 
     #[tokio::test]
@@ -1086,8 +1131,12 @@ mod tests {
             "waiting job must remain behind the global semaphore before shutdown"
         );
 
-        let remaining = manager.drain_on_shutdown(Duration::from_secs(3)).await;
-        assert_eq!(remaining, 0, "drain should finish after terminal save");
+        let report = manager.drain_on_shutdown(Duration::from_secs(3)).await;
+        assert_eq!(
+            report.remaining, 0,
+            "drain should finish after terminal save"
+        );
+        assert!(report.is_clean());
         assert!(
             tokio::time::timeout(Duration::from_millis(100), waiting_started.notified())
                 .await
@@ -1166,8 +1215,9 @@ mod tests {
         // Give it time to reach the sleep.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let remaining = manager.drain_on_shutdown(Duration::from_millis(300)).await;
-        assert_eq!(remaining, 1, "stuck feature should still be counted");
+        let report = manager.drain_on_shutdown(Duration::from_millis(300)).await;
+        assert_eq!(report.remaining, 1, "stuck feature should still be counted");
+        assert!(report.is_clean());
         for _ in 0..50 {
             if manager.active_count() == 0 {
                 break;

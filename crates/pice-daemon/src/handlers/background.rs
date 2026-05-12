@@ -9,12 +9,13 @@
 //!    short-circuits with `ExitJsonStatus::FeatureAlreadyRunning`.
 //! 4. Allocate a fresh `run_id` via [`FeatureJobManager::next_run_id`].
 //! 5. Build a [`JobEnv`] snapshot from [`DaemonContext`] state.
-//! 6. Hand an owned closure to [`FeatureJobManager::spawn_after_signal`],
-//!    using the manager's DashMap entry as the single atomic admission point.
-//! 7. After admission succeeds, acquire the same per-manifest process +
-//!    fs2 locks as foreground evaluation, write `ManifestStatus::Queued`
-//!    via [`NullSaver`], then transfer those locks into the spawned
-//!    future before releasing its start gate. Queued
+//! 6. Acquire a short per-feature admission lock, then re-check for an
+//!    existing live run.
+//! 7. Acquire the same per-manifest process + fs2 locks as foreground
+//!    evaluation, write `ManifestStatus::Queued` via [`NullSaver`], then
+//!    hand an owned closure to [`FeatureJobManager::spawn_after_signal`].
+//!    The worker is visible to the manager only after Queued is durable.
+//!    Queued
 //!    is a pre-work state and MUST NOT emit a `LayerStarted` event
 //!    (Stack Loops emits `LayerStarted` only after it computes the active
 //!    DAG for the spawned future).
@@ -407,7 +408,25 @@ where
         return Ok(inline_unsupported_response(plan_path, json_mode));
     }
 
-    // Step 2/3: look up any existing live run for this feature.
+    // Step 2/3: fast-path lookup for any existing live run.
+    if let Some(existing_run) = ctx.jobs().run_id_for(&feature_id) {
+        return Ok(feature_already_running_response(
+            &feature_id,
+            &existing_run,
+            json_mode,
+        ));
+    }
+
+    // Serialize the brief admission window separately from the long-held
+    // manifest lock. Without this, a job can become visible in the manager
+    // before its Queued manifest exists on disk.
+    let project_namespace =
+        pice_core::layers::manifest::manifest_project_namespace(ctx.project_root().as_path());
+    let admission_lock = ctx.background_admission_lock_for(&project_namespace, &feature_id);
+    let _admission_guard = admission_lock.lock_owned().await;
+
+    // Re-check under the admission lock so a duplicate caller that arrived
+    // during the first caller's Queued write returns the existing run_id.
     if let Some(existing_run) = ctx.jobs().run_id_for(&feature_id) {
         return Ok(feature_already_running_response(
             &feature_id,
@@ -446,16 +465,21 @@ where
         contract_paths,
     )?);
 
-    // Step 6: derive the manifest path. The actual Queued write happens
-    // only after `spawn` admits this feature as the single live run.
+    // Step 6: derive the manifest path and durably write Queued before
+    // inserting the job into the manager's observable live-run map.
     let manifest_path = VerificationManifest::manifest_path_in_state_dir(
         &feature_id,
         ctx.project_root(),
         &env.state_dir,
     );
+    ctx.logs().reset_feature(&feature_id).await;
+    let manifest_locks =
+        acquire_background_manifest_locks(ctx, &feature_id, &manifest_path).await?;
+    write_queued_manifest(&feature_id, &run_id, ctx.project_root(), &manifest_path)?;
+
     let (start_tx, start_rx) = oneshot::channel::<()>();
     let manifest_locks_slot: Arc<StdMutex<Option<BackgroundManifestLocks>>> =
-        Arc::new(StdMutex::new(None));
+        Arc::new(StdMutex::new(Some(manifest_locks)));
 
     // Step 7: hand the owned builder to the job manager.
     let spawn_args = OrchestratorSpawnArgs {
@@ -510,29 +534,6 @@ where
     );
     match spawn_result {
         Ok(_actual_run_id) => {
-            ctx.logs().reset_feature(&feature_id).await;
-            let manifest_locks =
-                match acquire_background_manifest_locks(ctx, &feature_id, &manifest_path).await {
-                    Ok(locks) => locks,
-                    Err(e) => {
-                        ctx.jobs().cancel(&feature_id);
-                        drop(start_tx);
-                        return Err(e);
-                    }
-                };
-            if let Err(e) =
-                write_queued_manifest(&feature_id, &run_id, ctx.project_root(), &manifest_path)
-            {
-                ctx.jobs().cancel(&feature_id);
-                drop(start_tx);
-                return Err(e);
-            }
-            {
-                let mut slot = manifest_locks_slot
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                *slot = Some(manifest_locks);
-            }
             ctx.defer_background_start(&feature_id, &run_id, start_tx);
             Ok(background_dispatched_response(&feature_id, &run_id))
         }
@@ -540,8 +541,11 @@ where
             feature_id: _,
             run_id: existing,
         }) => {
-            // Someone else dispatched between our `run_id_for` check
-            // and the spawn — return the racing run's id.
+            // This should be unreachable for production dispatches because
+            // the admission lock serializes the re-check and spawn. If a
+            // test or future caller bypasses that lock, do not leave this
+            // abandoned Queued manifest behind.
+            let _ = std::fs::remove_file(&manifest_path);
             Ok(feature_already_running_response(
                 &feature_id,
                 &existing,
@@ -1188,6 +1192,11 @@ paths = ["src/**"]
             !dispatch_task.is_finished(),
             "dispatch should wait for the same manifest lock used by foreground evaluate"
         );
+        assert_eq!(
+            ctx.jobs().active_count(),
+            0,
+            "job must not become observable before Queued is durable"
+        );
 
         drop(held_lock);
         let resp = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch_task)
@@ -1201,6 +1210,125 @@ paths = ["src/**"]
             manifest_path.exists(),
             "Queued manifest should be written after the lock is released"
         );
+        assert!(ctx.release_background_start(&feature_id, &run_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_dispatch_during_admission_returns_existing_run_after_queued_write() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::new(state_tmp.path());
+        let project_tmp = tempfile::tempdir().unwrap();
+        let project_root = project_tmp.path();
+        let pice_dir = project_root.join(".pice");
+        std::fs::create_dir_all(&pice_dir).unwrap();
+        let plan_path = project_root.join("locked.md");
+        std::fs::write(&plan_path, "# Plan\n").unwrap();
+        std::fs::write(
+            pice_dir.join("layers.toml"),
+            r#"
+[layers]
+order = ["backend"]
+
+[layers.backend]
+paths = ["src/**"]
+"#,
+        )
+        .unwrap();
+        let layers_snapshot = pice_core::layers::LayersConfig::load(&pice_dir.join("layers.toml"))
+            .expect("layers load");
+        let ctx = Arc::new(DaemonContext::new(
+            "tok".to_string(),
+            project_root.to_path_buf(),
+        ));
+        let feature_id = "locked-feature".to_string();
+        let namespace = pice_core::layers::manifest::manifest_project_namespace(project_root);
+        let held_lock = ctx
+            .manifest_lock_for(&namespace, &feature_id)
+            .lock_owned()
+            .await;
+        let manifest_path = VerificationManifest::manifest_path_in_state_dir(
+            &feature_id,
+            project_root,
+            state_tmp.path(),
+        );
+
+        let spawn_dispatch =
+            |ctx: Arc<DaemonContext>,
+             plan_path: PathBuf,
+             feature_id: String,
+             layers_snapshot: pice_core::layers::LayersConfig| {
+                tokio::spawn(async move {
+                    dispatch_background(
+                        feature_id,
+                        true,
+                        &plan_path,
+                        ctx.as_ref(),
+                        pice_core::workflow::loader::embedded_defaults(),
+                        Some(layers_snapshot),
+                        move |args, _permit, _cancel| async move {
+                            Ok(VerificationManifest::new(
+                                &args.feature_id,
+                                &args.env.project_root,
+                            ))
+                        },
+                    )
+                    .await
+                })
+            };
+
+        let first = spawn_dispatch(
+            Arc::clone(&ctx),
+            plan_path.clone(),
+            feature_id.clone(),
+            layers_snapshot.clone(),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            ctx.jobs().active_count(),
+            0,
+            "first dispatch must not be visible while queued write is blocked"
+        );
+        assert!(!manifest_path.exists());
+
+        let second = spawn_dispatch(
+            Arc::clone(&ctx),
+            plan_path.clone(),
+            feature_id.clone(),
+            layers_snapshot,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !second.is_finished(),
+            "duplicate dispatch should wait for short admission lock, not create a second job"
+        );
+
+        drop(held_lock);
+
+        let first_resp = tokio::time::timeout(std::time::Duration::from_secs(2), first)
+            .await
+            .expect("first dispatch unblocked")
+            .expect("first joined")
+            .expect("first succeeded");
+        let run_id = json_response_run_id(&first_resp);
+        assert!(manifest_path.exists());
+
+        let second_resp = tokio::time::timeout(std::time::Duration::from_secs(2), second)
+            .await
+            .expect("second dispatch completed after admission")
+            .expect("second joined")
+            .expect("second returned response");
+        match second_resp {
+            CommandResponse::ExitJson { code, value } => {
+                assert_eq!(code, ExitJsonStatus::FeatureAlreadyRunning.exit_code());
+                assert_eq!(
+                    value["status"].as_str(),
+                    Some(ExitJsonStatus::FeatureAlreadyRunning.as_str())
+                );
+                assert_eq!(value["run_id"].as_str(), Some(run_id.as_str()));
+            }
+            other => panic!("expected duplicate ExitJson, got {other:?}"),
+        }
+
         assert!(ctx.release_background_start(&feature_id, &run_id));
     }
 

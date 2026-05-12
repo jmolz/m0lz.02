@@ -53,6 +53,7 @@ use crate::orchestrator::NullSink;
 /// of the Arc can live in both the map (for future acquirers) and the
 /// current holder (so it stays alive for the evaluation's lifetime).
 pub type ManifestLockMap = Arc<StdMutex<HashMap<(String, String), Arc<TokioMutex<()>>>>>;
+type BackgroundAdmissionLockMap = Arc<StdMutex<HashMap<(String, String), Arc<TokioMutex<()>>>>>;
 type DeferredBackgroundStartMap = Arc<StdMutex<HashMap<(String, String), oneshot::Sender<()>>>>;
 
 /// JSON-RPC error code for "method not found" (standard JSON-RPC 2.0).
@@ -118,6 +119,15 @@ pub struct DaemonContext {
     /// `VerificationManifest::save()` + `~/.pice/state/.../manifest.json`.
     manifest_locks: ManifestLockMap,
 
+    /// Short-lived background admission locks keyed by `(project_hash,
+    /// feature_id)`.
+    ///
+    /// This lock is deliberately separate from [`manifest_locks`]:
+    /// background workers hold the manifest lock until completion, while
+    /// admission only needs to serialize the brief check → Queued write →
+    /// `FeatureJobManager` insertion window.
+    background_admission_locks: BackgroundAdmissionLockMap,
+
     /// Background dispatch start gates keyed by `(feature_id, run_id)`.
     ///
     /// `dispatch_background` registers a spawned worker here after it writes
@@ -172,6 +182,7 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            background_admission_locks: Arc::new(StdMutex::new(HashMap::new())),
             deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
             events,
             logs: LogStore::new(),
@@ -203,6 +214,7 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            background_admission_locks: Arc::new(StdMutex::new(HashMap::new())),
             deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
             events,
             logs: LogStore::new(),
@@ -314,6 +326,7 @@ impl DaemonContext {
             project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             config: PiceConfig::default(),
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            background_admission_locks: Arc::new(StdMutex::new(HashMap::new())),
             deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
             events,
             logs: LogStore::new(),
@@ -340,6 +353,7 @@ impl DaemonContext {
             project_root,
             config,
             manifest_locks: Arc::new(StdMutex::new(HashMap::new())),
+            background_admission_locks: Arc::new(StdMutex::new(HashMap::new())),
             deferred_background_starts: Arc::new(StdMutex::new(HashMap::new())),
             events,
             logs: LogStore::new(),
@@ -364,6 +378,28 @@ impl DaemonContext {
     pub fn manifest_lock_for(&self, project_hash: &str, feature_id: &str) -> Arc<TokioMutex<()>> {
         let mut map = self
             .manifest_locks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let key = (project_hash.to_string(), feature_id.to_string());
+        map.entry(key)
+            .or_insert_with(|| Arc::new(TokioMutex::new(())))
+            .clone()
+    }
+
+    /// Acquire the short-lived admission mutex for a background feature.
+    ///
+    /// Callers hold this only until a Queued manifest has been persisted and
+    /// the corresponding `FeatureJobManager` entry has been inserted. It
+    /// prevents a duplicate caller from observing the pre-Queued admission
+    /// gap without forcing the duplicate to wait for the entire background
+    /// run's long-held manifest lock.
+    pub fn background_admission_lock_for(
+        &self,
+        project_hash: &str,
+        feature_id: &str,
+    ) -> Arc<TokioMutex<()>> {
+        let mut map = self
+            .background_admission_locks
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let key = (project_hash.to_string(), feature_id.to_string());
@@ -543,11 +579,21 @@ async fn handle_shutdown(id: u64, ctx: &DaemonContext) -> DaemonResponse {
         .jobs()
         .drain_on_shutdown(crate::lifecycle::SHUTDOWN_TIMEOUT)
         .await;
+    if !remaining.is_clean() {
+        return DaemonResponse::error(
+            id,
+            INTERNAL_ERROR_CODE,
+            format!(
+                "shutdown failed to terminalize {} background job(s)",
+                remaining.terminalization_failures.len()
+            ),
+        );
+    }
     DaemonResponse::success(
         id,
         json!({
             "shutting_down": true,
-            "drained_remaining": remaining,
+            "drained_remaining": remaining.remaining,
         }),
     )
 }
@@ -787,6 +833,8 @@ mod tests {
 
         let job_exited = StdArc::new(AtomicBool::new(false));
         let job_exited_c = job_exited.clone();
+        let job_started = StdArc::new(tokio::sync::Notify::new());
+        let job_started_c = job_started.clone();
 
         ctx.jobs()
             .spawn(
@@ -795,6 +843,7 @@ mod tests {
                 env,
                 move |_env, permit, cancel| async move {
                     let _hold = permit;
+                    job_started_c.notify_one();
                     cancel.cancelled().await;
                     // Simulate a manifest-save flush after the cancel.
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -808,6 +857,9 @@ mod tests {
             .expect("spawn should succeed");
 
         assert_eq!(ctx.jobs().active_count(), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(1), job_started.notified())
+            .await
+            .expect("job should enter closure before shutdown");
 
         // Issue daemon/shutdown. It must block until the job exits.
         let req = test_req(99, methods::DAEMON_SHUTDOWN, "valid-token");
