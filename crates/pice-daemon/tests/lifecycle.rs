@@ -23,16 +23,21 @@ use pice_core::transport::SocketPath;
 use pice_daemon::lifecycle;
 use pice_daemon::server::auth;
 use pice_daemon::server::unix::UnixConnection;
+use pice_daemon::test_support::StateDirGuard;
 
 /// Spin up a daemon in a background task, returning the socket path, token
 /// path, and join handle. Waits for the socket to appear before returning.
 async fn start_daemon() -> (
     tempfile::TempDir,
+    StateDirGuard<'static>,
     SocketPath,
     PathBuf,
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
     let dir = tempfile::tempdir().expect("tempdir");
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    let guard = StateDirGuard::new(&state_dir);
     let sock_path = dir.path().join("daemon.sock");
     let token_path = dir.path().join("daemon.token");
     let socket_path = SocketPath::Unix(sock_path.clone());
@@ -43,14 +48,15 @@ async fn start_daemon() -> (
 
     // Wait for socket to appear.
     for _ in 0..200 {
-        if sock_path.exists() {
+        if sock_path.exists() && token_path.exists() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(sock_path.exists(), "socket should exist after startup");
+    assert!(token_path.exists(), "token should exist after startup");
 
-    (dir, socket_path, token_path, handle)
+    (dir, guard, socket_path, token_path, handle)
 }
 
 /// Connect a raw `UnixConnection` to the daemon, returning the connection
@@ -85,7 +91,7 @@ async fn rpc(conn: &mut UnixConnection, id: u64, method: &str, token: &str) -> D
 /// Proves that a single connection can issue multiple sequential RPCs.
 #[tokio::test]
 async fn full_lifecycle_multiple_rpcs_on_one_connection() {
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let (mut conn, token) = raw_connect(&socket_path, &token_path).await;
 
     // 1. Health check.
@@ -144,7 +150,7 @@ async fn full_lifecycle_multiple_rpcs_on_one_connection() {
 /// Proves the per-connection handler loop (tokio::spawn per accept) works.
 #[tokio::test]
 async fn concurrent_clients_complete_independently() {
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
 
     // Open two independent connections.
     let (mut conn_a, token_a) = raw_connect(&socket_path, &token_path).await;
@@ -190,7 +196,7 @@ async fn concurrent_clients_complete_independently() {
 /// After orderly shutdown, the socket file should be removed.
 #[tokio::test]
 async fn shutdown_removes_socket_file() {
-    let (dir, socket_path, token_path, handle) = start_daemon().await;
+    let (dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let sock_path = dir.path().join("daemon.sock");
     assert!(sock_path.exists(), "socket should exist before shutdown");
 
@@ -222,7 +228,7 @@ async fn shutdown_removes_socket_file() {
 async fn all_command_types_dispatch_successfully() {
     use pice_core::cli::*;
 
-    let (_dir, socket_path, token_path, handle) = start_daemon().await;
+    let (_dir, _guard, socket_path, token_path, handle) = start_daemon().await;
     let (mut conn, token) = raw_connect(&socket_path, &token_path).await;
 
     // Commands that don't need a provider — should all return success responses.
