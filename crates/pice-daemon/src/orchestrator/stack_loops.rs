@@ -266,25 +266,22 @@ pub async fn run_stack_loops_with_cancel(
     let manifest_path = match cfg.manifest_path {
         Some(path) => {
             if let Some(parent) = path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    warn!("failed to create manifest state dir: {e}");
-                }
+                std::fs::create_dir_all(parent).with_context(|| {
+                    format!("failed to create manifest state dir {}", parent.display())
+                })?;
             }
             Some(path.to_path_buf())
         }
         None => match VerificationManifest::manifest_path_for(&feature_id, project_root) {
             Ok(path) => {
                 if let Some(parent) = path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        warn!("failed to create manifest state dir: {e}");
-                    }
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create manifest state dir {}", parent.display())
+                    })?;
                 }
                 Some(path)
             }
-            Err(e) => {
-                warn!("failed to compute manifest path: {e}");
-                None
-            }
+            Err(e) => return Err(e).context("failed to compute manifest path"),
         },
     };
 
@@ -298,20 +295,16 @@ pub async fn run_stack_loops_with_cancel(
     // retry-after-reject, or a crash-interrupted run) and get re-evaluated
     // in this invocation — their stale entries are dropped in the per-
     // cohort layer loop below.
-    let mut manifest = manifest_path
-        .as_ref()
-        .filter(|p| p.exists())
-        .and_then(|p| match VerificationManifest::load(p) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                warn!(
-                    path = %p.display(),
-                    error = %e,
-                    "failed to load existing manifest; starting fresh"
-                );
-                None
-            }
-        })
+    let loaded_manifest = match manifest_path.as_ref().filter(|p| p.exists()) {
+        Some(path) => Some(VerificationManifest::load(path).with_context(|| {
+            format!(
+                "failed to load existing manifest {}; refusing to replace source of truth",
+                path.display()
+            )
+        })?),
+        None => None,
+    };
+    let mut manifest = loaded_manifest
         .inspect(|loaded| {
             info!(
                 feature_id = %feature_id,
@@ -2723,6 +2716,73 @@ mod tests {
                 .any(|c| c.name == "config_mismatch" && c.status == CheckStatus::Failed),
             "seam_checks should include the Failed config_mismatch entry"
         );
+    }
+
+    #[tokio::test]
+    async fn unreadable_existing_manifest_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+            ])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        std::fs::create_dir_all(dir.path().join("src/server")).unwrap();
+        std::fs::write(dir.path().join("src/server/main.rs"), "fn main() {}\n").unwrap();
+
+        let layers_config = test_layers_config();
+        let plan_path = dir.path().join("plan.md");
+        std::fs::write(&plan_path, "# Test Plan").unwrap();
+        let manifest_path = dir.path().join("manifest-state/plan.manifest.json");
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, b"not valid json {{{ }}}}").unwrap();
+
+        let pice_config = PiceConfig::default();
+        let workflow = test_workflow();
+        let empty_seams: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let saver = crate::events::NullSaver;
+        let cfg = StackLoopsConfig {
+            layers: &layers_config,
+            plan_path: &plan_path,
+            project_root: dir.path(),
+            primary_provider: "test-provider",
+            primary_model: "test-model",
+            pice_config: &pice_config,
+            workflow: &workflow,
+            merged_seams: &empty_seams,
+            contract_contents: None,
+            full_diff: None,
+            claude_md: None,
+            layer_paths: None,
+            seam_file_contents: None,
+            manifest_path: Some(&manifest_path),
+            global_provider_semaphore: None,
+            global_provider_capacity: None,
+            saver: &saver,
+        };
+
+        let pass_sink: std::sync::Arc<dyn super::super::adaptive_loop::PassMetricsSink> =
+            std::sync::Arc::new(super::super::adaptive_loop::NullPassSink);
+        let err = run_stack_loops(&cfg, &NullSink, false, pass_sink)
+            .await
+            .expect_err("unreadable existing manifest must fail closed");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("failed to load existing manifest"));
+        assert!(rendered.contains("refusing to replace source of truth"));
     }
 
     // ─── Effective-resolution helper tests ──────────────────────────────

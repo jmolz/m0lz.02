@@ -4,11 +4,12 @@
 //!
 //! 1. Resolve socket path (from `PICE_DAEMON_SOCKET` or platform default)
 //! 2. Ensure `~/.pice/` directory exists
-//! 3. Generate auth token, write to `~/.pice/daemon.token`
-//! 4. Bind socket (with stale-cleanup retry on Unix)
-//! 5. Accept loop — one `tokio::spawn` per connection
-//! 6. `tokio::select!` between accept and shutdown signal (SIGTERM/SIGINT/CTRL-C)
-//! 7. On shutdown: stop accepting, drain in-flight RPCs (10s budget), cleanup
+//! 3. Bind socket (with stale-cleanup retry on Unix) to prove single-daemon ownership
+//! 4. Reconcile startup state before accepting RPCs
+//! 5. Generate auth token, write to `~/.pice/daemon.token`
+//! 6. Accept loop — one tracked task per connection
+//! 7. `tokio::select!` between accept and shutdown signal (SIGTERM/SIGINT/CTRL-C)
+//! 8. On shutdown: stop accepting, drain in-flight RPCs (10s budget), cleanup
 //!
 //! See `.claude/rules/daemon.md` "Graceful shutdown" for the 10s budget rule.
 
@@ -79,20 +80,22 @@ pub async fn run_with_paths(socket_path: SocketPath, token_path: std::path::Path
 }
 
 fn initialize_bound_daemon(token_path: &std::path::Path) -> Result<Arc<DaemonContext>> {
-    // Generate auth token and write to disk.
-    let token = auth::generate_token().context("failed to generate auth token")?;
-    auth::write_token_file(token_path, &token)?;
-    info!(token_path = %token_path.display(), "auth token written");
-
     // Phase 7 Task 8: reconcile any interrupted-dispatch manifests BEFORE
     // accepting the first RPC. `Queued` manifests (dispatch that never
     // ran) are deleted; `InProgress` manifests are rewritten to Failed
     // with `halted_by = "failed-interrupted"`. Terminal states are
     // preserved untouched.
     let state_dir = pice_core::layers::manifest::VerificationManifest::state_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("~/.pice/state"));
+        .context("failed to resolve verification manifest state dir")?;
     crate::jobs::reconcile_on_startup(&state_dir)
         .with_context(|| format!("startup reconciliation failed for {}", state_dir.display()))?;
+
+    // Generate auth token and write to disk only after reconciliation succeeds.
+    // Otherwise a failed startup could leave behind a fresh token for no live
+    // daemon and obscure the real recovery failure.
+    let token = auth::generate_token().context("failed to generate auth token")?;
+    auth::write_token_file(token_path, &token)?;
+    info!(token_path = %token_path.display(), "auth token written");
 
     // Build shared context.
     let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -651,6 +654,53 @@ mod tests {
             .expect("daemon should exit")
             .expect("join handle")
             .expect("daemon should exit cleanly");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn state_dir_resolution_failure_prevents_token_write_and_rpc() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sock_path = dir.path().join("daemon.sock");
+        let token_path = dir.path().join("daemon.token");
+        let socket_path = SocketPath::Unix(sock_path.clone());
+
+        let _guard = crate::test_support::state_dir_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let prev_state = std::env::var("PICE_STATE_DIR").ok();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_userprofile = std::env::var("USERPROFILE").ok();
+        std::env::remove_var("PICE_STATE_DIR");
+        std::env::remove_var("HOME");
+        std::env::remove_var("USERPROFILE");
+
+        let result = run_with_paths(socket_path, token_path.clone()).await;
+
+        match prev_state {
+            Some(v) => std::env::set_var("PICE_STATE_DIR", v),
+            None => std::env::remove_var("PICE_STATE_DIR"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+
+        let err = result.expect_err("daemon startup should fail without a resolvable state dir");
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("failed to resolve verification manifest state dir"));
+        assert!(
+            !token_path.exists(),
+            "failed startup must not write a daemon token"
+        );
+        assert!(
+            !sock_path.exists(),
+            "failed startup must drop the bound socket before returning"
+        );
     }
 
     #[cfg(unix)]
