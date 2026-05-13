@@ -112,7 +112,7 @@ function collectFiles(dir, exts) {
 }
 
 const firstPartyMediaSources = [
-  ...collectFiles(path.join(repoRoot, 'docs/images'), new Set(['.svg', '.tape', '.sh'])),
+  ...collectFiles(path.join(repoRoot, 'docs/images'), new Set(['.svg', '.tape', '.sh', '.mjs'])),
   ...collectFiles(path.join(repoRoot, 'docs/diagrams'), new Set(['.excalidraw', '.svg'])),
 ];
 const sourceTextChecks = [];

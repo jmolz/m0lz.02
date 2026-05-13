@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-13T16:40:59.926Z",
+  "generated_at": "2026-05-13T17:02:15.783Z",
   "readme": "README.md",
   "checked": [
     {
@@ -25,7 +25,7 @@
       "kind": "html-img",
       "alt": "Animated terminal demo showing m0lz.02 install, initialization, Stack Loops layer detection, background evaluation, and a passing status result",
       "src": "docs/images/pice-evaluate-demo.gif",
-      "size_bytes": 674018,
+      "size_bytes": 56581,
       "status": "ok"
     },
     {
@@ -62,15 +62,14 @@
     "docs/images/architecture-light.svg",
     "docs/images/evaluation-tiers-dark.svg",
     "docs/images/evaluation-tiers-light.svg",
-    "docs/images/pice-evaluate-demo.sh",
-    "docs/images/pice-evaluate-demo.tape",
+    "docs/images/generate-pice-evaluate-demo.mjs",
     "docs/diagrams/architecture.excalidraw",
     "docs/diagrams/evaluation-tiers.excalidraw"
   ],
   "first_party_gifs_checked": [
     {
       "src": "docs/images/pice-evaluate-demo.gif",
-      "size_bytes": 674018,
+      "size_bytes": 56581,
       "status": "ok"
     }
   ],
