@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
@@ -50,13 +58,21 @@ function run(cmd, args, options = {}) {
   return { stdout: result.stdout, stderr: result.stderr, status: result.status };
 }
 
-function removeTree(target) {
-  rmSync(target, {
-    recursive: true,
-    force: true,
-    maxRetries: process.platform === 'win32' ? 10 : 2,
-    retryDelay: 250,
-  });
+function removeTree(target, options = {}) {
+  try {
+    rmSync(target, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === 'win32' ? 10 : 2,
+      retryDelay: 250,
+    });
+  } catch (err) {
+    if (options.bestEffort) {
+      console.error(`warning: unable to remove ${target}: ${err.code ?? 'ERROR'} ${err.message}`);
+      return;
+    }
+    throw err;
+  }
 }
 
 function ensureBuiltBinaries() {
@@ -692,9 +708,7 @@ function assertBackgroundWaitCoverage(results, commands) {
 
 ensureProviderStubBuilt();
 const binaries = ensureBuiltBinaries();
-const workRoot = path.join(tmpdir(), `pice-phase8-reference-${process.pid}`);
-removeTree(workRoot);
-mkdirSync(workRoot, { recursive: true });
+const workRoot = mkdtempSync(path.join(tmpdir(), 'pice-phase8-reference-'));
 
 try {
   const results = fixtures.map((fixture) => runFixture(fixture, binaries, workRoot));
@@ -713,6 +727,6 @@ try {
   if (process.env.PICE_PHASE8_KEEP_WORK === '1') {
     console.error(`kept Phase 8 acceptance workdir at ${workRoot}`);
   } else {
-    removeTree(workRoot);
+    removeTree(workRoot, { bestEffort: true });
   }
 }

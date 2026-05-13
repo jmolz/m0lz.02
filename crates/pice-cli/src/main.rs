@@ -85,8 +85,39 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        run_main_with_expanded_stack()
+    }
+
+    #[cfg(not(windows))]
+    {
+        run_main()
+    }
+}
+
+#[cfg(windows)]
+fn run_main_with_expanded_stack() -> anyhow::Result<()> {
+    let handle = std::thread::Builder::new()
+        .name("pice-main".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run_main)?;
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn run_main() -> anyhow::Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Set up tracing

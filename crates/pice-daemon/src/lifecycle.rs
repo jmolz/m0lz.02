@@ -773,13 +773,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn socket_tempdir() -> tempfile::TempDir {
+        if std::path::Path::new("/private/tmp").is_dir() {
+            tempfile::tempdir_in("/private/tmp").expect("tempdir")
+        } else {
+            tempfile::tempdir().expect("tempdir")
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn shutdown_rpc_response_is_written_before_lifecycle_returns() {
         use pice_core::layers::manifest::VerificationManifest;
         use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
         use tokio::net::UnixStream;
 
-        let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+        let dir = socket_tempdir();
         let sock_path = dir.path().join("daemon.sock");
         let state_dir = dir.path().join("state");
         std::fs::create_dir_all(&state_dir).expect("state dir");
@@ -869,7 +878,7 @@ mod tests {
         use pice_core::protocol::{methods, DaemonRequest, DaemonResponse};
         use tokio::net::UnixStream;
 
-        let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+        let dir = socket_tempdir();
         let state_dir = dir.path().join("state");
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let _guard = crate::test_support::StateDirGuard::new(&state_dir);

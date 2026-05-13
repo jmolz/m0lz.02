@@ -62,6 +62,14 @@ use tokio::sync::Notify;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+fn socket_tempdir() -> tempfile::TempDir {
+    if std::path::Path::new("/private/tmp").is_dir() {
+        tempfile::tempdir_in("/private/tmp").expect("tempdir")
+    } else {
+        tempfile::tempdir().expect("tempdir")
+    }
+}
+
 async fn wait_for_socket(path: &std::path::Path) {
     for _ in 0..200 {
         if path.exists() && UnixStream::connect(path).await.is_ok() {
@@ -482,7 +490,7 @@ async fn request_shutdown(sock_path: &std::path::Path, token: &str, id: u64) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn originating_cli_dispatch_drop_does_not_cancel_background_evaluate() {
     let _stub_guard = StubProviderEnv::new(800);
-    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let dir = socket_tempdir();
     let sock_path = dir.path().join("daemon.sock");
     let token_path = dir.path().join("daemon.token");
 
@@ -673,7 +681,7 @@ async fn originating_cli_dispatch_drop_does_not_cancel_background_evaluate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_evaluate_emits_layer_started_only_after_active_dag_selection() {
     let _stub_guard = StubProviderEnv::new(500);
-    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let dir = socket_tempdir();
     let sock_path = dir.path().join("daemon.sock");
     let token_path = dir.path().join("daemon.token");
 
@@ -754,7 +762,7 @@ async fn background_evaluate_emits_layer_started_only_after_active_dag_selection
 /// processes across feature jobs, not just manager futures.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_background_evaluates_share_global_provider_session_cap() {
-    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let dir = socket_tempdir();
     let alive_path = dir.path().join("stub-provider-alive.log");
     std::fs::write(&alive_path, "").unwrap();
     let _stub_guard = StubProviderEnv::with_alive_file(900, Some(&alive_path));
@@ -851,7 +859,7 @@ async fn three_background_evaluates_share_global_provider_session_cap() {
 /// second independent subscribe connection opened after the first was dropped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connection_drop_does_not_cancel_background_task() {
-    let dir = tempfile::tempdir_in("/private/tmp").expect("tempdir");
+    let dir = socket_tempdir();
     let sock_path = dir.path().join("daemon.sock");
     let token_path = dir.path().join("daemon.token");
 
