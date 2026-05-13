@@ -115,7 +115,14 @@ fn evaluate_json_mode_returns_review_gate_pending_exit_three() {
     // `project_root` must be the canonicalized path so the hash matches
     // what the daemon subprocess computes (macOS tmpdir is a symlink to
     // /private/var/folders/...).
+    #[cfg(windows)]
+    let home_dir = tmp.path().to_path_buf();
+    #[cfg(not(windows))]
     let home_dir = tmp.path().canonicalize().unwrap();
+
+    #[cfg(windows)]
+    let canonical_project_root = project_root.to_path_buf();
+    #[cfg(not(windows))]
     let canonical_project_root = project_root.canonicalize().unwrap();
     let project_namespace =
         pice_core::layers::manifest::manifest_project_namespace(&canonical_project_root);
@@ -165,6 +172,7 @@ fn evaluate_json_mode_returns_review_gate_pending_exit_three() {
     let output = pice_cmd()
         .current_dir(&canonical_project_root)
         .env("HOME", &home_dir)
+        .env("USERPROFILE", &home_dir)
         .args(["evaluate", plan_path.to_str().unwrap(), "--json"])
         .output()
         .unwrap();

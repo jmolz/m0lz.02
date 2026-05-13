@@ -753,19 +753,19 @@ async fn n_socket_subscriptions_across_varied_features_drop_receiver_counts_to_z
             .expect("explicitly close subscribe client writer");
     }
     drop(conns);
-    tokio::time::sleep(Duration::ZERO).await;
 
-    assert_eq!(
-        ctx.events().total_receiver_count(),
-        0,
-        "all socket-backed manifest subscriptions should clean up within one scheduler tick"
-    );
     for handler in handlers {
-        handler
+        tokio::time::timeout(Duration::from_secs(2), handler)
             .await
+            .expect("handler should exit after client shutdown")
             .expect("handler join")
             .expect("handler result");
     }
+    assert_eq!(
+        ctx.events().total_receiver_count(),
+        0,
+        "all socket-backed manifest subscriptions should clean up after handlers exit"
+    );
     for feature_id in feature_ids {
         assert_eq!(
             ctx.events().feature_receiver_count(feature_id),

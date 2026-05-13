@@ -43,7 +43,10 @@ pub enum DaemonAction {
 }
 
 /// Maximum time to wait for a freshly-spawned daemon during `start`.
-const START_TIMEOUT: Duration = Duration::from_secs(15);
+const START_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-probe health timeout during startup.
+const START_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Polling interval during `start` wait.
 const START_POLL: Duration = Duration::from_millis(50);
@@ -74,7 +77,7 @@ pub async fn run(args: &DaemonArgs) -> Result<()> {
 /// health check.
 async fn cmd_start(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
     // Check if already running.
-    if try_health(socket_path, token_path).await.is_ok() {
+    if try_health_bounded(socket_path, token_path).await.is_ok() {
         println!("daemon is already running");
         return Ok(());
     }
@@ -89,7 +92,7 @@ async fn cmd_start(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
         if tokio::time::Instant::now() >= deadline {
             bail!("daemon failed to start within {}s", START_TIMEOUT.as_secs());
         }
-        if try_health(socket_path, token_path).await.is_ok() {
+        if try_health_bounded(socket_path, token_path).await.is_ok() {
             println!("daemon started");
             return Ok(());
         }
@@ -182,6 +185,16 @@ fn cmd_logs(follow: bool) -> Result<()> {
 async fn try_health(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
     let mut client = DaemonClient::connect(socket_path, token_path).await?;
     client.health_check().await
+}
+
+async fn try_health_bounded(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
+    match tokio::time::timeout(START_HEALTH_TIMEOUT, try_health(socket_path, token_path)).await {
+        Ok(result) => result,
+        Err(_) => bail!(
+            "daemon health check timed out after {}ms",
+            START_HEALTH_TIMEOUT.as_millis()
+        ),
+    }
 }
 
 /// Resolve the default daemon log path: `~/.pice/logs/daemon.log`.

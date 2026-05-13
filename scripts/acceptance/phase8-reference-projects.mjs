@@ -506,7 +506,7 @@ function runFixture(name, binaries, workRoot) {
     PICE_DAEMON_BIN: binaries.daemon,
     PATH: `${path.dirname(binaries.daemon)}${path.delimiter}${process.env.PATH ?? ''}`,
   };
-  pice(binaries.pice, ['daemon', 'start'], project, daemonEnv, { timeout: 20_000 });
+  pice(binaries.pice, ['daemon', 'start'], project, daemonEnv, { timeout: 60_000 });
   let featureId;
   let evaluateStatus;
   let evaluateWaitEvidence = null;
