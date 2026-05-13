@@ -70,8 +70,14 @@ PICE's full test corpus runs through two commands. The Rust workspace runner pic
 
 ```bash
 # Full workspace regression — covers every test target
-cargo test --workspace --all-targets && pnpm test
+env RUST_TEST_THREADS=1 PATH="$PWD/target/debug:$PATH" cargo test --workspace --all-targets
+pnpm test
 ```
+
+The Rust command intentionally serializes tests and exposes `target/debug` on
+`PATH`. Phase 8 review caught that daemon-spawning CLI tests can fail
+spuriously when `pice-daemon` is not discoverable or socket tests race under the
+default parallel runner.
 
 For targeted re-runs of specific milestones during a review:
 

@@ -12,6 +12,21 @@ const outPath =
   process.env.PICE_PHASE8_REFERENCE_EVIDENCE ??
   path.join(repoRoot, 'docs/releases/phase8-reference-evidence.json');
 const fixtures = ['next-prisma', 'fastapi-postgres', 'rails', 'express-mongo', 'sveltekit-supabase'];
+const acceptanceCommands = [
+  'pice init --json',
+  'pice init --upgrade --json',
+  'pice layers detect/check/list --json',
+  'pice validate --json',
+  'pice daemon start',
+  'pice evaluate <plan> --background --wait --timeout-secs 30 --json',
+  'pice status <feature-id> --follow --stream-json',
+  'pice logs <feature-id> --follow --stream-json',
+  'pice status <feature-id> --wait --timeout-secs 30 --json',
+  'pice status <feature-id> --json',
+  'pice logs <feature-id> --json',
+  'pice review-gate --list --feature-id <feature-id> --json',
+  'pice review-gate --gate-id <gate-id> --decision approve --json',
+];
 
 function exe(name) {
   return process.platform === 'win32' ? `${name}.exe` : name;
@@ -38,10 +53,9 @@ function run(cmd, args, options = {}) {
 function ensureBuiltBinaries() {
   const pice = process.env.PICE_BIN ?? path.join(repoRoot, 'target/debug', exe('pice'));
   const daemon = process.env.PICE_DAEMON_BIN ?? path.join(repoRoot, 'target/debug', exe('pice-daemon'));
-  if (existsSync(pice) && existsSync(daemon)) {
-    return { pice, daemon };
+  if (!process.env.PICE_BIN || !process.env.PICE_DAEMON_BIN) {
+    run('cargo', ['build', '-p', 'pice-cli', '-p', 'pice-daemon'], { timeout: 180_000 });
   }
-  run('cargo', ['build', '-p', 'pice-cli', '-p', 'pice-daemon'], { timeout: 180_000 });
   if (!existsSync(pice) || !existsSync(daemon)) {
     throw new Error('expected debug pice and pice-daemon binaries after cargo build');
   }
@@ -465,6 +479,7 @@ function runFixture(name, binaries, workRoot) {
     ...commonEnv,
     PICE_DAEMON_SOCKET: socket,
     PICE_DAEMON_BIN: binaries.daemon,
+    PATH: `${path.dirname(binaries.daemon)}${path.delimiter}${process.env.PATH ?? ''}`,
   };
   pice(binaries.pice, ['daemon', 'start'], project, daemonEnv, { timeout: 20_000 });
   let featureId;
@@ -644,6 +659,28 @@ function runFocusedRegressionSelectors() {
   return { status: 'passed', selectors: selectors.map(([cmd, args]) => `${cmd} ${args.join(' ')}`) };
 }
 
+function assertBackgroundWaitCoverage(results, commands) {
+  if (!commands.includes('pice evaluate <plan> --background --wait --timeout-secs 30 --json')) {
+    throw new Error('Phase 8 acceptance command list must include background wait evaluate');
+  }
+  if (commands.some((command) => command.includes('--background --json'))) {
+    throw new Error('Phase 8 acceptance command list must not advertise non-wait background evaluate');
+  }
+  const missing = results.filter((result) => {
+    if (result.review_gate) {
+      return result.review_gate.resume_status !== 'passed' || result.review_gate.wait_status !== 'passed';
+    }
+    return result.evaluate_wait?.status !== 'passed' && result.evaluate_wait?.overall_status !== 'passed';
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `Phase 8 acceptance did not prove background wait evaluate for: ${missing
+        .map((result) => result.fixture)
+        .join(', ')}`
+    );
+  }
+}
+
 ensureProviderStubBuilt();
 const binaries = ensureBuiltBinaries();
 const workRoot = path.join(tmpdir(), `pice-phase8-reference-${process.pid}`);
@@ -652,26 +689,13 @@ mkdirSync(workRoot, { recursive: true });
 
 try {
   const results = fixtures.map((fixture) => runFixture(fixture, binaries, workRoot));
+  assertBackgroundWaitCoverage(results, acceptanceCommands);
   const focused = runFocusedRegressionSelectors();
   const evidence = {
     generated_at: new Date().toISOString(),
     fixtures: results,
     focused_regressions: focused,
-    commands: [
-      'pice init --json',
-      'pice init --upgrade --json',
-      'pice layers detect/check/list --json',
-      'pice validate --json',
-      'pice daemon start',
-      'pice evaluate <plan> --background --wait --timeout-secs 30 --json',
-      'pice status <feature-id> --follow --stream-json',
-      'pice logs <feature-id> --follow --stream-json',
-      'pice status <feature-id> --wait --timeout-secs 30 --json',
-      'pice status <feature-id> --json',
-      'pice logs <feature-id> --json',
-      'pice review-gate --list --feature-id <feature-id> --json',
-      'pice review-gate --gate-id <gate-id> --decision approve --json',
-    ],
+    commands: acceptanceCommands,
   };
   mkdirSync(path.dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(evidence, null, 2)}\n`);
