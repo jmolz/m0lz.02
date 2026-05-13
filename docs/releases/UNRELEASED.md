@@ -5,9 +5,9 @@ broader v0.2 complete gates. It is intentionally an approval gate, not final
 release notes.
 
 This document records the implemented release-readiness decisions for the branch.
-It does not approve creating a git tag, publishing a GitHub release, or
-publishing npm packages. Those externally visible release actions remain
-separate approval boundaries.
+It does not approve creating a git tag or publishing release artifacts by itself.
+Once tag creation is explicitly approved, the tag-triggered release is required
+to publish both GitHub release artifacts and npm packages after artifact smoke.
 
 ## Release Identity Approval Block
 
@@ -16,8 +16,8 @@ evaluation issues and continue until the contract passes.
 
 Approved policy: `v0.7.0` release tag, npm package version `0.7.0`, final notes
 path `docs/releases/v0.7.0.md`, keep `.claude` as the public scaffold while
-documenting `.codex` as repo-local maintainer context, and require separate npm
-publish approval after release dry-run evidence.
+documenting `.codex` as repo-local maintainer context, and treat explicit tag
+approval as approval to publish the matching GitHub release and npm packages.
 
 | Decision | Current evidence | Approval required |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ publish approval after release dry-run evidence.
 | npm package version | Cargo, `npm/*/package.json`, and `packages/*/package.json` use `0.7.0`. | Approved: npm packages match `0.7.0`. |
 | release notes path | Final draft exists at `docs/releases/v0.7.0.md`. | Approved for implementation: final path is `docs/releases/v0.7.0.md`. |
 | namespace policy | Current code scaffolds `.claude/`; this repo uses `.codex/` for local commands and rules. | Approved: keep `.claude` public scaffold; document `.codex` as repo-local maintainer context. |
-| publish approval | `release.yml` separates tag-triggered GitHub release from manual npm publish. | Approved for implementation: npm publish remains a separate approval. |
+| publish approval | `release.yml` requires tag-triggered releases to run npm publish before GitHub Release creation; manual dry-runs remain non-publishing. | Approved for implementation: tag approval includes npm publish for the same version. |
 
 ## Current Snapshot
 
@@ -35,7 +35,7 @@ publish approval after release dry-run evidence.
 | npm daemon packaging | Platform package `files` arrays include `pice-daemon`; the npm wrapper sets `PICE_DAEMON_BIN`; Rust auto-start honors that absolute path. | Archive-level smoke plus local npm pack/install passed from a packed install. |
 | fixtures | Five offline framework-shaped fixtures exist under `fixtures/reference-projects/`. | `node scripts/acceptance/phase8-reference-projects.mjs` passed with all fixtures detecting the seven canonical layers. |
 | CI | The CI workflow targets Phase 8 acceptance jobs for Linux x64/arm64, macOS x64/arm64, and Windows x64. macOS x64 uses the intended GitHub-hosted `macos-15-intel` label; macOS arm64 uses `macos-15`. | Remote GitHub Actions run evidence is still required before tagging; until then, the checkout proves the workflow matrix shape, not native runner execution. |
-| release workflow | Release workflow has manual dry-run inputs, platform artifact smoke, npm pack smoke, and fail-closed npm publish with already-published skips. | Tag and npm publish remain separate approval boundaries. |
+| release workflow | Release workflow has manual dry-run inputs, platform artifact smoke, npm pack smoke, and fail-closed npm publish with already-published skips. | Tag-triggered releases must publish npm before GitHub Release creation. |
 | metrics docs | Fresh temp-project schema evidence exists for v0.2 metrics surfaces; reference fixtures prove runtime row writes from background evaluation. | `docs/releases/metrics-schema-evidence.json` records schema evidence; `docs/releases/phase8-reference-evidence.json` records `evaluations`, `pass_events`, `seam_findings`, `layer_runs`, and review-gate `gate_decisions` row counts. |
 | README evidence | Test counts, benchmark output, and media audit evidence are tied to the Phase 8 validation pass. | `docs/releases/readme-media-evidence.json` records the README media audit result. |
 
@@ -121,7 +121,7 @@ publish approval after release dry-run evidence.
 | `pice init`, `pice init --upgrade`, `pice validate`, `pice layers`, `pice evaluate --background --wait`, `pice status --follow --stream-json`, `pice logs --follow --stream-json`, and `pice review-gate` need acceptance coverage. | Complete: `phase8-reference-evidence.json` records these command paths. |
 | Template drift between repo-local `.codex` and shipped `templates/claude` must be resolved or documented. | Complete: documented in `docs/releases/template-drift-inventory.md`. |
 | Public docs must distinguish local SQLite metrics from opt-in outbound telemetry and must not claim code, prompts, paths, secrets, or PII are sent. | Complete: README/release notes/provider docs distinguish local and outbound telemetry. |
-| Release dry-run and publish boundaries must be explicit before tag. | Complete: release workflow splits tag release from manual npm publish. |
+| Release dry-run and publish boundaries must be explicit before tag. | Complete: manual dry-run stays non-publishing; tag-triggered release publishes npm before GitHub Release creation. |
 | `.codex/rules/templates.md` currently says `templates/claude` scaffolds into `.codex`, while `pice init` scaffolds `.claude`. | Complete: `.codex/rules/templates.md` and template-drift inventory document the approved namespace policy. |
 
 ## Known Limitation And Signoff Register
