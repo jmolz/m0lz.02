@@ -17,21 +17,26 @@ function exe(name) {
 }
 
 function run(cmd, args, options = {}) {
+  const stdio = options.stdio ?? 'pipe';
   const result = spawnSync(cmd, args, {
     cwd: options.cwd ?? repoRoot,
     env: { ...process.env, ...options.env },
     encoding: 'utf8',
     timeout: options.timeout ?? 20_000,
+    stdio,
   });
+  const stdout = typeof result.stdout === 'string' ? result.stdout : '';
+  const stderr = typeof result.stderr === 'string' ? result.stderr : '';
   if (result.error) {
+    result.error.message = `${cmd} ${args.join(' ')} failed: ${result.error.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`;
     throw result.error;
   }
   if (result.status !== 0) {
     throw new Error(
-      `${cmd} ${args.join(' ')} exited ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+      `${cmd} ${args.join(' ')} exited ${result.status}\nstdout:\n${stdout}\nstderr:\n${stderr}`
     );
   }
-  return { stdout: result.stdout, stderr: result.stderr };
+  return { stdout, stderr };
 }
 
 function sleepMs(ms) {
@@ -106,6 +111,18 @@ function runNpmBin(cmd, args, options = {}) {
 
   const commandLine = [winCmdQuote(cmd), ...args.map(winCmdQuote)].join(' ');
   return run(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], options);
+}
+
+function runDaemonStart(runner, cmd, cwd, env) {
+  runner(cmd, ['daemon', 'start'], {
+    cwd,
+    env,
+    timeout: daemonCommandTimeout,
+    // Windows release smoke runs under spawnSync capture. The daemon is a
+    // long-lived grandchild, so avoid captured stdio handles on the start call
+    // and verify readiness with a separate status probe that exits normally.
+    stdio: process.platform === 'win32' ? 'ignore' : 'pipe',
+  });
 }
 
 function relativeOrAbsolute(p) {
@@ -255,7 +272,7 @@ function smokeBinaries(dir) {
     let daemonStatus;
     let explicitStatus;
     if (process.platform === 'win32') {
-      run(pice, ['daemon', 'start'], { cwd: work, env, timeout: daemonCommandTimeout });
+      runDaemonStart(run, pice, work, env);
       daemonStatus = run(pice, ['daemon', 'status'], { cwd: work, env, timeout: daemonCommandTimeout }).stdout.trim();
       stopDaemonAndWait(run, pice, work, env);
       explicitStatus = daemonStatus;
@@ -365,7 +382,7 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
     let daemonStatus;
     let explicitStatus;
     if (process.platform === 'win32') {
-      runNpmBin(piceBin, ['daemon', 'start'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout });
+      runDaemonStart(runNpmBin, piceBin, work, npmEnv);
       daemonStatus = runNpmBin(piceBin, ['daemon', 'status'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout }).stdout.trim();
       stopDaemonAndWait(runNpmBin, piceBin, work, npmEnv);
       explicitStatus = daemonStatus;
