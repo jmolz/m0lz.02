@@ -22,6 +22,14 @@ use std::time::{Duration, Instant};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+fn socket_tempdir() -> tempfile::TempDir {
+    if std::path::Path::new("/private/tmp").is_dir() {
+        tempfile::tempdir_in("/private/tmp").unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 fn read_request(stream: &UnixStream) -> DaemonRequest {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut line = String::new();
@@ -41,7 +49,7 @@ fn write_response(stream: &mut UnixStream, id: u64, result: serde_json::Value) {
 }
 
 fn prepare_home_and_socket() -> (tempfile::TempDir, std::path::PathBuf, UnixListener) {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();

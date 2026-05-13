@@ -19,6 +19,14 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+fn socket_tempdir() -> tempfile::TempDir {
+    if std::path::Path::new("/private/tmp").is_dir() {
+        tempfile::tempdir_in("/private/tmp").unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 fn read_request(stream: &UnixStream) -> DaemonRequest {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut line = String::new();
@@ -39,7 +47,7 @@ fn write_response(stream: &mut UnixStream, id: u64, result: serde_json::Value) {
 
 #[test]
 fn status_wait_json_exits_five_when_subscribe_connection_closes() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -109,7 +117,7 @@ fn status_wait_json_exits_five_when_subscribe_connection_closes() {
 
 #[test]
 fn status_wait_json_exits_feature_not_found_on_empty_snapshot() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();

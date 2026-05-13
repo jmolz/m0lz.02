@@ -24,6 +24,14 @@ use std::time::Duration;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+fn socket_tempdir() -> tempfile::TempDir {
+    if std::path::Path::new("/private/tmp").is_dir() {
+        tempfile::tempdir_in("/private/tmp").unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 fn read_request(stream: &UnixStream) -> DaemonRequest {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut line = String::new();
@@ -108,7 +116,7 @@ fn evaluate_background_wait_json_exits_five_on_subscribe_disconnect() {
 
 #[test]
 fn evaluate_background_wait_disconnect_then_restart_reconciles_failed_interrupted() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let state_dir = home.path().join("state");
     let manifest_path = seed_in_progress_wait_manifest(&state_dir, home.path());
 
@@ -135,9 +143,9 @@ fn evaluate_background_wait_disconnect_then_restart_reconciles_failed_interrupte
 
 #[test]
 fn evaluate_background_wait_real_daemon_kill_then_restart_reconciles_failed_interrupted() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let state_dir = home.path().join("state");
-    let project = tempfile::tempdir_in("/private/tmp").unwrap();
+    let project = socket_tempdir();
     init_real_wait_project(project.path());
     let plan_path = write_real_wait_plan(project.path(), "real-restart-wait");
     let socket_path = home.path().join("daemon.sock");
@@ -541,7 +549,7 @@ fn run_fake_evaluate_background_wait(
     timeout_secs: Option<&'static str>,
     close_after_snapshot: bool,
 ) -> std::process::Output {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     run_fake_evaluate_background_wait_in_home(
         home.path(),
         terminal_status,

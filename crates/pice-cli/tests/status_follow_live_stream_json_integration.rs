@@ -22,6 +22,14 @@ use std::time::Duration;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
+fn socket_tempdir() -> tempfile::TempDir {
+    if std::path::Path::new("/private/tmp").is_dir() {
+        tempfile::tempdir_in("/private/tmp").unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 fn read_request(stream: &UnixStream) -> DaemonRequest {
     let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
     let mut line = String::new();
@@ -56,7 +64,7 @@ fn write_notification(stream: &mut UnixStream, payload: ManifestEventPayload) {
 
 #[test]
 fn status_follow_stream_json_drains_live_burst_and_terminal_status_alias() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -200,7 +208,7 @@ fn status_follow_stream_json_drains_live_burst_and_terminal_status_alias() {
 
 #[test]
 fn status_follow_stream_json_terminal_frame_carries_metrics_persist_failed_status() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -309,7 +317,7 @@ fn status_follow_stream_json_terminal_frame_carries_metrics_persist_failed_statu
 
 #[test]
 fn status_follow_stream_json_exits_five_on_disconnect_before_terminal() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -383,7 +391,7 @@ fn status_follow_stream_json_exits_five_on_disconnect_before_terminal() {
 
 #[test]
 fn status_follow_stream_json_exits_feature_not_found_on_empty_scoped_snapshot() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -451,7 +459,7 @@ fn status_follow_stream_json_exits_feature_not_found_on_empty_scoped_snapshot() 
 
 #[test]
 fn wildcard_status_follow_stream_json_keeps_tailing_after_feature_terminal() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
@@ -572,7 +580,7 @@ fn wildcard_status_follow_stream_json_keeps_tailing_after_feature_terminal() {
 
 #[test]
 fn status_follow_stream_json_sigint_emits_terminal_130() {
-    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let home = socket_tempdir();
     let pice_dir = home.path().join(".pice");
     std::fs::create_dir_all(&pice_dir).unwrap();
     std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();

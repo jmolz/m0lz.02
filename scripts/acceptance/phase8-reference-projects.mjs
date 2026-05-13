@@ -50,6 +50,15 @@ function run(cmd, args, options = {}) {
   return { stdout: result.stdout, stderr: result.stderr, status: result.status };
 }
 
+function removeTree(target) {
+  rmSync(target, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === 'win32' ? 10 : 2,
+    retryDelay: 250,
+  });
+}
+
 function ensureBuiltBinaries() {
   const pice = process.env.PICE_BIN ?? path.join(repoRoot, 'target/debug', exe('pice'));
   const daemon = process.env.PICE_DAEMON_BIN ?? path.join(repoRoot, 'target/debug', exe('pice-daemon'));
@@ -684,7 +693,7 @@ function assertBackgroundWaitCoverage(results, commands) {
 ensureProviderStubBuilt();
 const binaries = ensureBuiltBinaries();
 const workRoot = path.join(tmpdir(), `pice-phase8-reference-${process.pid}`);
-rmSync(workRoot, { recursive: true, force: true });
+removeTree(workRoot);
 mkdirSync(workRoot, { recursive: true });
 
 try {
@@ -704,6 +713,6 @@ try {
   if (process.env.PICE_PHASE8_KEEP_WORK === '1') {
     console.error(`kept Phase 8 acceptance workdir at ${workRoot}`);
   } else {
-    rmSync(workRoot, { recursive: true, force: true });
+    removeTree(workRoot);
   }
 }
