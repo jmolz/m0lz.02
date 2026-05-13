@@ -37,7 +37,9 @@ static NULL_SAVER: pice_daemon::events::NullSaver = pice_daemon::events::NullSav
 use tokio_util::sync::CancellationToken;
 
 const ITERATIONS: usize = 3;
-const LATENCY_MS: u64 = 200;
+// Keep provider latency high enough that CI scheduler jitter and fixed
+// per-run setup overhead cannot dominate the 1.6x cohort speedup signal.
+const LATENCY_MS: u64 = 1000;
 /// Target speedup ≥ 1.6× → parallel mean ≤ (1/1.6) × sequential ≈ 0.625×.
 const MAX_PARALLEL_RATIO: f64 = 0.625;
 

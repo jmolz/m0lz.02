@@ -12,6 +12,8 @@
 //! with isolated paths.
 
 use std::path::Path;
+#[cfg(windows)]
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use pice_core::cli::{CommandRequest, CommandResponse};
@@ -74,8 +76,8 @@ impl DaemonClient {
                 SocketPath::Windows(n) => n,
                 _ => bail!("expected Windows named pipe path on this platform"),
             };
-            let client = tokio::net::windows::named_pipe::ClientOptions::new()
-                .open(name)
+            let client = open_windows_pipe_client(name)
+                .await
                 .with_context(|| format!("failed to connect to daemon at {name}"))?;
             let (rd, wr) = tokio::io::split(client);
             let framed = pice_daemon::server::framing::JsonLineFramed::new(rd, wr);
@@ -306,6 +308,60 @@ impl DaemonClient {
             self.framed.read_message().await
         }
     }
+}
+
+#[cfg(windows)]
+async fn open_windows_pipe_client(
+    name: &str,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use tokio::net::windows::named_pipe::ClientOptions;
+    use windows_sys::Win32::Foundation::{
+        ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT,
+    };
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+
+    const OPEN_TIMEOUT: Duration = Duration::from_millis(500);
+    const RETRY_INTERVAL: Duration = Duration::from_millis(25);
+
+    let wide_name: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
+    let deadline = tokio::time::Instant::now() + OPEN_TIMEOUT;
+
+    loop {
+        let available = unsafe { WaitNamedPipeW(wide_name.as_ptr(), 0) } != 0;
+        let last_error = if available {
+            match ClientOptions::new().open(name) {
+                Ok(client) => return Ok(client),
+                Err(err) if is_transient_windows_pipe_open_error(&err) => err,
+                Err(err) => return Err(err),
+            }
+        } else {
+            let err = std::io::Error::last_os_error();
+            match err.raw_os_error().map(|code| code as u32) {
+                Some(ERROR_FILE_NOT_FOUND | ERROR_PIPE_BUSY | ERROR_SEM_TIMEOUT) => err,
+                _ => return Err(err),
+            }
+        };
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(last_error);
+        }
+
+        tokio::time::sleep(RETRY_INTERVAL).await;
+    }
+}
+
+#[cfg(windows)]
+fn is_transient_windows_pipe_open_error(err: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{
+        ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT,
+    };
+
+    matches!(
+        err.raw_os_error().map(|code| code as u32),
+        Some(ERROR_FILE_NOT_FOUND | ERROR_PIPE_BUSY | ERROR_SEM_TIMEOUT)
+    )
 }
 
 /// A live subscribe stream: snapshot + notification channel + close handle.

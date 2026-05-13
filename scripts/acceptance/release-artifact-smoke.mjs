@@ -173,6 +173,7 @@ function smokeBinaries(dir) {
 
   const env = {
     HOME: work,
+    USERPROFILE: work,
     PICE_DAEMON_SOCKET:
       process.platform === 'win32'
         ? `\\\\.\\pipe\\pice-artifact-smoke-${process.pid}`
@@ -271,6 +272,7 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
       : path.join(work, 'node_modules/.bin/pice');
     const env = {
       HOME: path.join(work, 'home'),
+      USERPROFILE: path.join(work, 'home'),
       PICE_DAEMON_SOCKET:
         process.platform === 'win32'
           ? `\\\\.\\pipe\\pice-npm-smoke-${process.pid}`

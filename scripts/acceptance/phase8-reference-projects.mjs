@@ -465,6 +465,7 @@ function runFixture(name, binaries, workRoot) {
 
   const commonEnv = {
     HOME: path.join(workRoot, `${name}-home`),
+    USERPROFILE: path.join(workRoot, `${name}-home`),
     PICE_STATE_DIR: path.join(workRoot, `${name}-state`),
     PICE_STUB_SCORES: '9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001;9.5,0.001',
     PICE_STUB_LATENCY_MS: '100',
