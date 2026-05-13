@@ -100,17 +100,12 @@ function stopDaemonBestEffort(runner, cmd, cwd, env) {
   }
 }
 
-function winCmdQuote(value) {
-  return `"${String(value).replace(/"/g, '""')}"`;
-}
-
 function runNpmBin(cmd, args, options = {}) {
   if (process.platform !== 'win32' || !/\.(cmd|bat)$/i.test(cmd)) {
     return run(cmd, args, options);
   }
 
-  const commandLine = [winCmdQuote(cmd), ...args.map(winCmdQuote)].join(' ');
-  return run(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], options);
+  return run(process.env.ComSpec || 'cmd.exe', ['/d', '/c', cmd, ...args], options);
 }
 
 function runDaemonStart(runner, cmd, cwd, env) {
