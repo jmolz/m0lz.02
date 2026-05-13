@@ -55,6 +55,36 @@ function rmRetrySync(target, options = {}) {
   }
 }
 
+function cleanupRetrySync(target, options = {}) {
+  try {
+    rmRetrySync(target, options);
+  } catch (err) {
+    if (!isTransientWindowsRemoveError(err)) {
+      throw err;
+    }
+    console.warn(`warning: could not remove temporary path ${target}: ${err.code}`);
+  }
+}
+
+function stopDaemonAndWait(runner, cmd, cwd, env) {
+  runner(cmd, ['daemon', 'stop'], { cwd, env, timeout: 20_000 });
+
+  const deadline = Date.now() + 20_000;
+  let lastStatus = '';
+  while (Date.now() < deadline) {
+    lastStatus = runner(cmd, ['daemon', 'status'], { cwd, env, timeout: 10_000 }).stdout.trim();
+    if (/not running/i.test(lastStatus)) {
+      if (process.platform === 'win32') {
+        sleepMs(500);
+      }
+      return;
+    }
+    sleepMs(250);
+  }
+
+  throw new Error(`daemon did not stop within 20s; last status: ${lastStatus}`);
+}
+
 function winCmdQuote(value) {
   return `"${String(value).replace(/"/g, '""')}"`;
 }
@@ -118,7 +148,7 @@ function unpackArchive(archivePath) {
     throw new Error(`unsupported release archive extension: ${archive}`);
   }
 
-  return { dir: work, cleanup: () => rmRetrySync(work, { recursive: true, force: true }) };
+  return { dir: work, cleanup: () => cleanupRetrySync(work, { recursive: true, force: true }) };
 }
 
 function packLocalReleaseArchive() {
@@ -143,7 +173,7 @@ function packLocalReleaseArchive() {
   } else {
     run('tar', ['-czf', archive, '-C', releaseDir, exe('pice'), exe('pice-daemon')]);
   }
-  return { archive, cleanup: () => rmRetrySync(archive, { force: true }) };
+  return { archive, cleanup: () => cleanupRetrySync(archive, { force: true }) };
 }
 
 function artifactInput() {
@@ -191,7 +221,7 @@ function smokeBinaries(dir) {
   }
 
   const work = path.join(tmpdir(), `pice-artifact-smoke-${process.pid}`);
-  rmSync(work, { recursive: true, force: true });
+  rmRetrySync(work, { recursive: true, force: true });
   mkdirSync(work, { recursive: true });
 
   const env = {
@@ -212,14 +242,14 @@ function smokeBinaries(dir) {
     run(pice, ['validate', '--json'], { cwd: work, env: { ...env, PICE_DAEMON_INLINE: '1' } });
     JSON.parse(run(pice, ['status', '--json'], { cwd: work, env }).stdout);
     const status = run(pice, ['daemon', 'status'], { cwd: work, env }).stdout;
-    run(pice, ['daemon', 'stop'], { cwd: work, env });
+    stopDaemonAndWait(run, pice, work, env);
     const daemonStatus = status.trim();
     if (/not running/i.test(daemonStatus) || daemonStatus.length === 0) {
       throw new Error(`daemon status did not report a running daemon: ${daemonStatus}`);
     }
     run(pice, ['daemon', 'start'], { cwd: work, env });
     const explicitStatus = run(pice, ['daemon', 'status'], { cwd: work, env }).stdout.trim();
-    run(pice, ['daemon', 'stop'], { cwd: work, env });
+    stopDaemonAndWait(run, pice, work, env);
     if (/not running/i.test(explicitStatus) || explicitStatus.length === 0) {
       throw new Error(`explicit daemon start/status did not report a running daemon: ${explicitStatus}`);
     }
@@ -230,7 +260,7 @@ function smokeBinaries(dir) {
       explicit_start_status: explicitStatus,
     };
   } finally {
-    rmRetrySync(work, { recursive: true, force: true });
+    cleanupRetrySync(work, { recursive: true, force: true });
   }
 }
 
@@ -306,13 +336,13 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
     const version = runNpmBin(piceBin, ['--version'], { cwd: work, env }).stdout.trim();
     JSON.parse(runNpmBin(piceBin, ['status', '--json'], { cwd: work, env }).stdout);
     const status = runNpmBin(piceBin, ['daemon', 'status'], { cwd: work, env }).stdout.trim();
-    runNpmBin(piceBin, ['daemon', 'stop'], { cwd: work, env });
+    stopDaemonAndWait(runNpmBin, piceBin, work, env);
     if (/not running/i.test(status) || status.length === 0) {
       throw new Error(`npm-installed daemon status did not report running: ${status}`);
     }
     runNpmBin(piceBin, ['daemon', 'start'], { cwd: work, env });
     const explicitStatus = runNpmBin(piceBin, ['daemon', 'status'], { cwd: work, env }).stdout.trim();
-    runNpmBin(piceBin, ['daemon', 'stop'], { cwd: work, env });
+    stopDaemonAndWait(runNpmBin, piceBin, work, env);
     if (/not running/i.test(explicitStatus) || explicitStatus.length === 0) {
       throw new Error(`npm-installed explicit daemon start/status did not report running: ${explicitStatus}`);
     }
@@ -325,8 +355,8 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
       staged_from_artifact: stagedFromArtifact,
     };
   } finally {
-    rmRetrySync(work, { recursive: true, force: true });
-    rmRetrySync(stagingRoot, { recursive: true, force: true });
+    cleanupRetrySync(work, { recursive: true, force: true });
+    cleanupRetrySync(stagingRoot, { recursive: true, force: true });
   }
 }
 
