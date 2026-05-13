@@ -115,6 +115,22 @@ fn evaluate_background_wait_json_exits_five_on_subscribe_disconnect() {
 }
 
 #[test]
+fn evaluate_background_wait_json_polls_status_after_subscribe_disconnect() {
+    let output = run_fake_evaluate_background_wait_with_status_fallback();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["status"], "passed");
+    assert_eq!(json["feature_id"], "eval-wait-feat");
+    assert_eq!(json["run_id"], "r-eval-wait");
+}
+
+#[test]
 fn evaluate_background_wait_disconnect_then_restart_reconciles_failed_interrupted() {
     let home = socket_tempdir();
     let state_dir = home.path().join("state");
@@ -556,6 +572,138 @@ fn run_fake_evaluate_background_wait(
         timeout_secs,
         close_after_snapshot,
     )
+}
+
+fn run_fake_evaluate_background_wait_with_status_fallback() -> std::process::Output {
+    let home = socket_tempdir();
+    let pice_dir = home.path().join(".pice");
+    std::fs::create_dir_all(&pice_dir).unwrap();
+    std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
+    let plan_path = home.path().join("plan.md");
+    std::fs::write(&plan_path, "# Plan\n\n## Contract\n\n```json\n{}\n```\n").unwrap();
+
+    let socket_path = home.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut dispatch_stream, _) = listener.accept().expect("accept dispatch client");
+
+        let health = read_request(&dispatch_stream);
+        assert_eq!(health.auth, TOKEN);
+        assert_eq!(health.method, DAEMON_HEALTH);
+        write_response(
+            &mut dispatch_stream,
+            health.id,
+            serde_json::json!({
+                "status": "ok",
+                "version": "test",
+                "uptime_seconds": 0,
+            }),
+        );
+
+        let dispatch = read_request(&dispatch_stream);
+        assert_eq!(dispatch.auth, TOKEN);
+        assert_eq!(dispatch.method, CLI_DISPATCH);
+        assert_eq!(dispatch.params["command"], "evaluate");
+        let response = CommandResponse::Json {
+            value: serde_json::json!({
+                "status": ExitJsonStatus::BackgroundDispatched.as_str(),
+                "feature_id": "eval-wait-feat",
+                "run_id": "r-eval-wait",
+            }),
+        };
+        write_response(
+            &mut dispatch_stream,
+            dispatch.id,
+            serde_json::to_value(response).expect("serialize command response"),
+        );
+        drop(dispatch_stream);
+
+        let (mut subscribe_stream, _) = listener.accept().expect("accept subscribe client");
+        let health = read_request(&subscribe_stream);
+        assert_eq!(health.auth, TOKEN);
+        assert_eq!(health.method, DAEMON_HEALTH);
+        write_response(
+            &mut subscribe_stream,
+            health.id,
+            serde_json::json!({
+                "status": "ok",
+                "version": "test",
+                "uptime_seconds": 0,
+            }),
+        );
+
+        let subscribe = read_request(&subscribe_stream);
+        assert_eq!(subscribe.auth, TOKEN);
+        assert_eq!(subscribe.method, MANIFEST_SUBSCRIBE);
+        assert_eq!(subscribe.params["feature_id"], "eval-wait-feat");
+
+        let mut manifest =
+            VerificationManifest::new("eval-wait-feat", std::path::Path::new("/tmp/pice-test"));
+        manifest.overall_status = ManifestStatus::InProgress;
+        manifest.run_id = Some("r-eval-wait".to_string());
+        let snapshot = SubscribeManifestResponse {
+            snapshots: vec![manifest],
+            run_ids: BTreeMap::from([("eval-wait-feat".to_string(), "r-eval-wait".to_string())]),
+        };
+        write_response(
+            &mut subscribe_stream,
+            subscribe.id,
+            serde_json::to_value(snapshot).expect("serialize snapshot"),
+        );
+        drop(subscribe_stream);
+
+        let (mut status_stream, _) = listener.accept().expect("accept status fallback client");
+        let health = read_request(&status_stream);
+        assert_eq!(health.auth, TOKEN);
+        assert_eq!(health.method, DAEMON_HEALTH);
+        write_response(
+            &mut status_stream,
+            health.id,
+            serde_json::json!({
+                "status": "ok",
+                "version": "test",
+                "uptime_seconds": 0,
+            }),
+        );
+
+        let status = read_request(&status_stream);
+        assert_eq!(status.auth, TOKEN);
+        assert_eq!(status.method, CLI_DISPATCH);
+        assert_eq!(status.params["command"], "status");
+        assert_eq!(status.params["mode"], "detail");
+        assert_eq!(status.params["feature_id"], "eval-wait-feat");
+
+        let mut manifest =
+            VerificationManifest::new("eval-wait-feat", std::path::Path::new("/tmp/pice-test"));
+        manifest.overall_status = ManifestStatus::Passed;
+        manifest.run_id = Some("r-eval-wait".to_string());
+        let response = CommandResponse::Json {
+            value: serde_json::to_value(manifest).expect("serialize manifest"),
+        };
+        write_response(
+            &mut status_stream,
+            status.id,
+            serde_json::to_value(response).expect("serialize command response"),
+        );
+    });
+
+    let output = Command::cargo_bin("pice")
+        .unwrap()
+        .env("HOME", home.path())
+        .env("PICE_DAEMON_SOCKET", &socket_path)
+        .env_remove("PICE_DAEMON_INLINE")
+        .args([
+            "evaluate",
+            plan_path.to_str().unwrap(),
+            "--background",
+            "--wait",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    server.join().expect("fake daemon thread");
+    output
 }
 
 fn run_fake_evaluate_background_wait_in_home(

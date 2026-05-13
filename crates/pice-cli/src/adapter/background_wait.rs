@@ -30,7 +30,7 @@
 //!      3 (PendingReview) / 4 (WaitTimeout) / 5 (DaemonDisconnected).
 
 use anyhow::Result;
-use pice_core::cli::{CommandResponse, ExitJsonStatus};
+use pice_core::cli::{CommandRequest, CommandResponse, ExitJsonStatus, StatusMode, StatusRequest};
 use pice_core::events::{ManifestEvent, ManifestEventPayload};
 use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
 use pice_core::protocol::methods::MANIFEST_SUBSCRIBE;
@@ -69,6 +69,9 @@ pub enum BackgroundOutcome {
     #[allow(dead_code)]
     Waited,
 }
+
+const DISCONNECT_FALLBACK_GRACE: Duration = Duration::from_secs(2);
+const DISCONNECT_FALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Run the `--background` CLI path. Dispatches the request, branches on
 /// `--wait`, and either returns a passthrough/dispatched outcome OR calls
@@ -155,16 +158,40 @@ async fn wait_until_terminal(
 ) -> Result<i32> {
     let socket_path = SocketPath::default_from_env();
     let token_path = auth::default_token_path();
+    let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+    let notif_state = NotificationState::new();
+    let notif_cfg = NotificationsConfig::default();
+    let notif_dispatcher = NotifyRustDispatcher;
+    let notifications = NotificationRefs {
+        state: &notif_state,
+        cfg: &notif_cfg,
+        dispatcher: &notif_dispatcher,
+    };
+
     let mut client = match DaemonClient::connect(&socket_path, &token_path).await {
         Ok(client) => client,
         Err(_) => {
-            emit_daemon_disconnected(feature_id, run_id, json);
-            return Ok(ExitJsonStatus::DaemonDisconnected.exit_code());
+            return finish_after_subscribe_disconnect(
+                feature_id,
+                run_id,
+                deadline,
+                timeout_secs,
+                json,
+                notifications,
+            )
+            .await;
         }
     };
     if client.health_check().await.is_err() {
-        emit_daemon_disconnected(feature_id, run_id, json);
-        return Ok(ExitJsonStatus::DaemonDisconnected.exit_code());
+        return finish_after_subscribe_disconnect(
+            feature_id,
+            run_id,
+            deadline,
+            timeout_secs,
+            json,
+            notifications,
+        )
+        .await;
     }
     let params = SubscribeManifestRequest {
         feature_id: Some(feature_id.to_string()),
@@ -175,8 +202,15 @@ async fn wait_until_terminal(
     {
         Ok(stream) => stream,
         Err(_) => {
-            emit_daemon_disconnected(feature_id, run_id, json);
-            return Ok(ExitJsonStatus::DaemonDisconnected.exit_code());
+            return finish_after_subscribe_disconnect(
+                feature_id,
+                run_id,
+                deadline,
+                timeout_secs,
+                json,
+                notifications,
+            )
+            .await;
         }
     };
 
@@ -194,14 +228,12 @@ async fn wait_until_terminal(
         stream.close().await;
         // Task 14: snapshot short-circuit also emits a notification —
         // the user-facing outcome is the same as the rx-loop path.
-        let notif_state = NotificationState::new();
-        let notif_cfg = NotificationsConfig::default();
         notify_terminal_outcome(
             feature_id,
             &wire,
             &notif_state,
             &notif_cfg,
-            &NotifyRustDispatcher,
+            &notif_dispatcher,
         );
         emit_wait_outcome(feature_id, run_id, &wire, json);
         return Ok(code);
@@ -212,12 +244,6 @@ async fn wait_until_terminal(
     // to tracing::debug + terminal BEL fallback per
     // `notifications::notify`. Defaults-only config for now — a future
     // Task 19 pass reads `[notifications]` from the user's config.
-    let notif_state = NotificationState::new();
-    let notif_cfg = NotificationsConfig::default();
-    let notif_dispatcher = NotifyRustDispatcher;
-
-    let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
-
     loop {
         let timeout_fut = async {
             match deadline {
@@ -262,13 +288,128 @@ async fn wait_until_terminal(
                     }
                     None => {
                         stream.close().await;
-                        emit_daemon_disconnected(feature_id, run_id, json);
-                        return Ok(ExitJsonStatus::DaemonDisconnected.exit_code());
+                        return finish_after_subscribe_disconnect(
+                            feature_id,
+                            run_id,
+                            deadline,
+                            timeout_secs,
+                            json,
+                            notifications,
+                        )
+                        .await;
                     }
                 }
             }
         }
     }
+}
+
+enum DisconnectFallback {
+    Terminal { status_wire: String, code: i32 },
+    NonTerminal,
+    Unavailable,
+}
+
+#[derive(Clone, Copy)]
+struct NotificationRefs<'a> {
+    state: &'a NotificationState,
+    cfg: &'a NotificationsConfig,
+    dispatcher: &'a dyn Dispatcher,
+}
+
+async fn finish_after_subscribe_disconnect(
+    feature_id: &str,
+    run_id: &str,
+    deadline: Option<Instant>,
+    timeout_secs: Option<u64>,
+    json: bool,
+    notifications: NotificationRefs<'_>,
+) -> Result<i32> {
+    match poll_terminal_manifest_after_disconnect(feature_id, deadline).await? {
+        DisconnectFallback::Terminal { status_wire, code } => {
+            notify_terminal_outcome(
+                feature_id,
+                &status_wire,
+                notifications.state,
+                notifications.cfg,
+                notifications.dispatcher,
+            );
+            emit_wait_outcome(feature_id, run_id, &status_wire, json);
+            Ok(code)
+        }
+        DisconnectFallback::NonTerminal => {
+            if deadline.is_some() {
+                emit_wait_timeout(feature_id, run_id, timeout_secs, json);
+                Ok(ExitJsonStatus::WaitTimeout.exit_code())
+            } else {
+                emit_daemon_disconnected(feature_id, run_id, json);
+                Ok(ExitJsonStatus::DaemonDisconnected.exit_code())
+            }
+        }
+        DisconnectFallback::Unavailable => {
+            emit_daemon_disconnected(feature_id, run_id, json);
+            Ok(ExitJsonStatus::DaemonDisconnected.exit_code())
+        }
+    }
+}
+
+async fn poll_terminal_manifest_after_disconnect(
+    feature_id: &str,
+    deadline: Option<Instant>,
+) -> Result<DisconnectFallback> {
+    let fallback_deadline = deadline.unwrap_or_else(|| Instant::now() + DISCONNECT_FALLBACK_GRACE);
+
+    loop {
+        match poll_terminal_manifest_once(feature_id).await? {
+            DisconnectFallback::Terminal { status_wire, code } => {
+                return Ok(DisconnectFallback::Terminal { status_wire, code });
+            }
+            DisconnectFallback::Unavailable => return Ok(DisconnectFallback::Unavailable),
+            DisconnectFallback::NonTerminal => {
+                if Instant::now() >= fallback_deadline {
+                    return Ok(DisconnectFallback::NonTerminal);
+                }
+                tokio::time::sleep(DISCONNECT_FALLBACK_POLL_INTERVAL).await;
+            }
+        }
+    }
+}
+
+async fn poll_terminal_manifest_once(feature_id: &str) -> Result<DisconnectFallback> {
+    let socket_path = SocketPath::default_from_env();
+    let token_path = auth::default_token_path();
+    let mut client = match DaemonClient::connect(&socket_path, &token_path).await {
+        Ok(client) => client,
+        Err(_) => return Ok(DisconnectFallback::Unavailable),
+    };
+    if client.health_check().await.is_err() {
+        return Ok(DisconnectFallback::Unavailable);
+    }
+
+    let resp = match client
+        .dispatch(CommandRequest::Status(StatusRequest {
+            json: true,
+            mode: StatusMode::Detail,
+            feature_id: Some(feature_id.to_string()),
+            stream_json: false,
+            timeout_secs: None,
+        }))
+        .await
+    {
+        Ok(resp) => resp,
+        Err(_) => return Ok(DisconnectFallback::Unavailable),
+    };
+
+    let CommandResponse::Json { value } = resp else {
+        return Ok(DisconnectFallback::NonTerminal);
+    };
+    let Ok(manifest) = serde_json::from_value::<VerificationManifest>(value) else {
+        return Ok(DisconnectFallback::Unavailable);
+    };
+    if let Some((status_wire, code)) = terminal_outcome_for_manifest(&manifest) {
+        return Ok(DisconnectFallback::Terminal { status_wire, code });
+    }
+    Ok(DisconnectFallback::NonTerminal)
 }
 
 /// Map a [`ManifestStatus`] to a terminal-exit code, or `None` if the
