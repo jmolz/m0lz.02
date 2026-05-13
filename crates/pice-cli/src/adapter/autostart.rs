@@ -98,10 +98,27 @@ async fn try_connect_and_health(
 ///
 /// `pub(crate)` because `commands::daemon::cmd_start` also uses this.
 pub(crate) fn spawn_daemon() -> Result<()> {
-    std::process::Command::new(daemon_binary_path())
+    let mut command = std::process::Command::new(daemon_binary_path());
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+        };
+
+        // On Windows CI, callers frequently run `pice daemon start` with
+        // stdout/stderr captured. The daemon must be fully detached so the
+        // parent command can exit without waiting for inherited console/pipe
+        // handles held by the long-running child process.
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+
+    command
         .spawn()
         .context("failed to spawn pice-daemon — is it installed and in PATH?")?;
     Ok(())
