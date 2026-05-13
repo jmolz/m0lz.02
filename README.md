@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <p align="center">
-  <img src="docs/images/pice-evaluate-demo.gif" alt="m0lz.02 running a background Stack Loops evaluation with live status and review output" width="700">
+  <img src="docs/images/pice-evaluate-demo.gif" alt="Animated terminal demo showing m0lz.02 install, initialization, Stack Loops layer detection, background evaluation, and a passing status result" width="760">
 </p>
 
 ## What It Does
