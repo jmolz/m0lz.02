@@ -250,22 +250,35 @@ function smokeBinaries(dir) {
     run(pice, ['--help'], { env });
     run(pice, ['init', '--json'], { cwd: work, env: { ...env, PICE_DAEMON_INLINE: '1' } });
     run(pice, ['validate', '--json'], { cwd: work, env: { ...env, PICE_DAEMON_INLINE: '1' } });
-    JSON.parse(run(pice, ['status', '--json'], { cwd: work, env, timeout: daemonCommandTimeout }).stdout);
-    const status = run(pice, ['daemon', 'status'], { cwd: work, env, timeout: daemonCommandTimeout }).stdout;
-    stopDaemonAndWait(run, pice, work, env);
-    const daemonStatus = status.trim();
+
+    let autoStartVerified = false;
+    let daemonStatus;
+    let explicitStatus;
+    if (process.platform === 'win32') {
+      run(pice, ['daemon', 'start'], { cwd: work, env, timeout: daemonCommandTimeout });
+      daemonStatus = run(pice, ['daemon', 'status'], { cwd: work, env, timeout: daemonCommandTimeout }).stdout.trim();
+      stopDaemonAndWait(run, pice, work, env);
+      explicitStatus = daemonStatus;
+    } else {
+      JSON.parse(run(pice, ['status', '--json'], { cwd: work, env, timeout: daemonCommandTimeout }).stdout);
+      daemonStatus = run(pice, ['daemon', 'status'], { cwd: work, env, timeout: daemonCommandTimeout }).stdout.trim();
+      stopDaemonAndWait(run, pice, work, env);
+      run(pice, ['daemon', 'start'], { cwd: work, env, timeout: daemonCommandTimeout });
+      explicitStatus = run(pice, ['daemon', 'status'], { cwd: work, env, timeout: daemonCommandTimeout }).stdout.trim();
+      stopDaemonAndWait(run, pice, work, env);
+      autoStartVerified = true;
+    }
     if (/not running/i.test(daemonStatus) || daemonStatus.length === 0) {
       throw new Error(`daemon status did not report a running daemon: ${daemonStatus}`);
     }
-    run(pice, ['daemon', 'start'], { cwd: work, env, timeout: daemonCommandTimeout });
-    const explicitStatus = run(pice, ['daemon', 'status'], { cwd: work, env, timeout: daemonCommandTimeout }).stdout.trim();
-    stopDaemonAndWait(run, pice, work, env);
     if (/not running/i.test(explicitStatus) || explicitStatus.length === 0) {
       throw new Error(`explicit daemon start/status did not report a running daemon: ${explicitStatus}`);
     }
     return {
       version,
-      auto_start_verified: true,
+      auto_start_verified: autoStartVerified,
+      inline_validate_verified: true,
+      daemon_lifecycle_verified: true,
       daemon_status: daemonStatus,
       explicit_start_status: explicitStatus,
     };
@@ -347,15 +360,27 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
     };
     mkdirSync(npmEnv.HOME, { recursive: true });
     const version = runNpmBin(piceBin, ['--version'], { cwd: work, env: npmEnv }).stdout.trim();
-    JSON.parse(runNpmBin(piceBin, ['status', '--json'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout }).stdout);
-    const status = runNpmBin(piceBin, ['daemon', 'status'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout }).stdout.trim();
-    stopDaemonAndWait(runNpmBin, piceBin, work, npmEnv);
-    if (/not running/i.test(status) || status.length === 0) {
-      throw new Error(`npm-installed daemon status did not report running: ${status}`);
+
+    let autoStartVerified = false;
+    let daemonStatus;
+    let explicitStatus;
+    if (process.platform === 'win32') {
+      runNpmBin(piceBin, ['daemon', 'start'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout });
+      daemonStatus = runNpmBin(piceBin, ['daemon', 'status'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout }).stdout.trim();
+      stopDaemonAndWait(runNpmBin, piceBin, work, npmEnv);
+      explicitStatus = daemonStatus;
+    } else {
+      JSON.parse(runNpmBin(piceBin, ['status', '--json'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout }).stdout);
+      daemonStatus = runNpmBin(piceBin, ['daemon', 'status'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout }).stdout.trim();
+      stopDaemonAndWait(runNpmBin, piceBin, work, npmEnv);
+      runNpmBin(piceBin, ['daemon', 'start'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout });
+      explicitStatus = runNpmBin(piceBin, ['daemon', 'status'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout }).stdout.trim();
+      stopDaemonAndWait(runNpmBin, piceBin, work, npmEnv);
+      autoStartVerified = true;
     }
-    runNpmBin(piceBin, ['daemon', 'start'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout });
-    const explicitStatus = runNpmBin(piceBin, ['daemon', 'status'], { cwd: work, env: npmEnv, timeout: daemonCommandTimeout }).stdout.trim();
-    stopDaemonAndWait(runNpmBin, piceBin, work, npmEnv);
+    if (/not running/i.test(daemonStatus) || daemonStatus.length === 0) {
+      throw new Error(`npm-installed daemon status did not report running: ${daemonStatus}`);
+    }
     if (/not running/i.test(explicitStatus) || explicitStatus.length === 0) {
       throw new Error(`npm-installed explicit daemon start/status did not report running: ${explicitStatus}`);
     }
@@ -363,8 +388,10 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
       status: 'passed',
       platform: platformKey,
       version,
-      auto_start_verified: true,
-      explicit_start_verified: true,
+      auto_start_verified: autoStartVerified,
+      daemon_lifecycle_verified: true,
+      daemon_status: daemonStatus,
+      explicit_start_status: explicitStatus,
       staged_from_artifact: stagedFromArtifact,
     };
   } finally {

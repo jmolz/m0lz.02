@@ -1,20 +1,24 @@
 {
-  "generated_at": "2026-05-13T17:58:02.666Z",
+  "generated_at": "2026-05-13T18:20:21.787Z",
   "artifact_kind": "local-release-archive",
-  "artifact_archive": "/var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-release-smoke-local-13987.tar.gz",
-  "artifact_dir": "/var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-archive-smoke-13987",
+  "artifact_archive": "/var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-release-smoke-local-40985.tar.gz",
+  "artifact_dir": "/var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-archive-smoke-40985",
   "binaries": {
     "version": "pice 0.7.0",
     "auto_start_verified": true,
-    "daemon_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-artifact-smoke-13987/daemon.sock",
-    "explicit_start_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-artifact-smoke-13987/daemon.sock"
+    "inline_validate_verified": true,
+    "daemon_lifecycle_verified": true,
+    "daemon_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-artifact-smoke-40985/daemon.sock",
+    "explicit_start_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-artifact-smoke-40985/daemon.sock"
   },
   "npm_pack_local_install": {
     "status": "passed",
     "platform": "darwin-arm64",
     "version": "pice 0.7.0",
     "auto_start_verified": true,
-    "explicit_start_verified": true,
+    "daemon_lifecycle_verified": true,
+    "daemon_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-npm-smoke-40985/daemon.sock",
+    "explicit_start_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-npm-smoke-40985/daemon.sock",
     "staged_from_artifact": true
   }
 }
