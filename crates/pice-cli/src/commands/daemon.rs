@@ -46,6 +46,7 @@ pub enum DaemonAction {
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Per-probe health timeout during startup.
+#[cfg(not(windows))]
 const START_HEALTH_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Polling interval during `start` wait.
@@ -76,6 +77,19 @@ pub async fn run(args: &DaemonArgs) -> Result<()> {
 /// spawns `pice-daemon` as a detached child and polls until it responds to a
 /// health check.
 async fn cmd_start(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        return cmd_start_windows(socket_path, token_path).await;
+    }
+
+    #[cfg(not(windows))]
+    {
+        cmd_start_rpc_health(socket_path, token_path).await
+    }
+}
+
+#[cfg(not(windows))]
+async fn cmd_start_rpc_health(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
     // Check if already running.
     if try_health_bounded(socket_path, token_path).await.is_ok() {
         println!("daemon is already running");
@@ -95,6 +109,33 @@ async fn cmd_start(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
         if try_health_bounded(socket_path, token_path).await.is_ok() {
             println!("daemon started");
             return Ok(());
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn cmd_start_windows(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
+    // Windows named-pipe client open can block inside CreateFileW during the
+    // startup race window. For `daemon start`, avoid that client-side RPC
+    // probe and wait for the daemon-owned readiness markers instead. Normal
+    // daemon-backed commands still perform real authenticated RPC health.
+    if windows_daemon_endpoint_ready(socket_path, token_path) {
+        println!("daemon is already running");
+        return Ok(());
+    }
+
+    println!("starting daemon...");
+    autostart::spawn_daemon()?;
+
+    let deadline = tokio::time::Instant::now() + START_TIMEOUT;
+    loop {
+        tokio::time::sleep(START_POLL).await;
+        if windows_daemon_endpoint_ready(socket_path, token_path) {
+            println!("daemon started");
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("daemon failed to start within {}s", START_TIMEOUT.as_secs());
         }
     }
 }
@@ -182,11 +223,13 @@ fn cmd_logs(follow: bool) -> Result<()> {
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 /// Try a single connect + health check. Returns `Ok(())` on success.
+#[cfg(not(windows))]
 async fn try_health(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
     let mut client = DaemonClient::connect(socket_path, token_path).await?;
     client.health_check().await
 }
 
+#[cfg(not(windows))]
 async fn try_health_bounded(socket_path: &SocketPath, token_path: &Path) -> Result<()> {
     match tokio::time::timeout(START_HEALTH_TIMEOUT, try_health(socket_path, token_path)).await {
         Ok(result) => result,
@@ -208,6 +251,41 @@ fn default_log_path() -> std::path::PathBuf {
         .unwrap_or_else(|| Path::new("."))
         .join("logs")
         .join("daemon.log")
+}
+
+#[cfg(windows)]
+fn windows_daemon_endpoint_ready(socket_path: &SocketPath, token_path: &Path) -> bool {
+    token_path.exists() && windows_pipe_bound(socket_path)
+}
+
+#[cfg(windows)]
+fn windows_pipe_bound(socket_path: &SocketPath) -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{
+        ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT,
+    };
+    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+
+    let name = match socket_path {
+        SocketPath::Windows(name) => name,
+        _ => return false,
+    };
+    let wide_name: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
+    if unsafe { WaitNamedPipeW(wide_name.as_ptr(), 0) } != 0 {
+        return true;
+    }
+
+    match std::io::Error::last_os_error()
+        .raw_os_error()
+        .map(|code| code as u32)
+    {
+        // ERROR_PIPE_BUSY / ERROR_SEM_TIMEOUT still prove a live pipe name:
+        // no server instance is available right now, but the daemon owns one.
+        Some(ERROR_PIPE_BUSY | ERROR_SEM_TIMEOUT) => true,
+        Some(ERROR_FILE_NOT_FOUND) | None => false,
+        Some(_) => false,
+    }
 }
 
 #[cfg(test)]

@@ -48,6 +48,9 @@ function run(cmd, args, options = {}) {
     timeout: options.timeout ?? 60_000,
   });
   if (result.error) {
+    if (result.stdout || result.stderr) {
+      result.error.message = `${result.error.message}\nstdout:\n${result.stdout ?? ''}\nstderr:\n${result.stderr ?? ''}`;
+    }
     throw result.error;
   }
   if (result.status !== (options.status ?? 0)) {
