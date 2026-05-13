@@ -364,10 +364,9 @@ async fn poll_terminal_manifest_after_disconnect(
             DisconnectFallback::Terminal { status_wire, code } => {
                 return Ok(DisconnectFallback::Terminal { status_wire, code });
             }
-            DisconnectFallback::Unavailable => return Ok(DisconnectFallback::Unavailable),
-            DisconnectFallback::NonTerminal => {
+            other => {
                 if Instant::now() >= fallback_deadline {
-                    return Ok(DisconnectFallback::NonTerminal);
+                    return Ok(other);
                 }
                 tokio::time::sleep(DISCONNECT_FALLBACK_POLL_INTERVAL).await;
             }
@@ -376,6 +375,30 @@ async fn poll_terminal_manifest_after_disconnect(
 }
 
 async fn poll_terminal_manifest_once(feature_id: &str) -> Result<DisconnectFallback> {
+    let daemon = match poll_terminal_manifest_via_daemon_once(feature_id).await? {
+        DisconnectFallback::Terminal { status_wire, code } => {
+            return Ok(DisconnectFallback::Terminal { status_wire, code });
+        }
+        other => other,
+    };
+
+    let file = match poll_terminal_manifest_file_once(feature_id)? {
+        DisconnectFallback::Terminal { status_wire, code } => {
+            return Ok(DisconnectFallback::Terminal { status_wire, code });
+        }
+        other => other,
+    };
+
+    if matches!(daemon, DisconnectFallback::NonTerminal)
+        || matches!(file, DisconnectFallback::NonTerminal)
+    {
+        return Ok(DisconnectFallback::NonTerminal);
+    }
+
+    Ok(DisconnectFallback::Unavailable)
+}
+
+async fn poll_terminal_manifest_via_daemon_once(feature_id: &str) -> Result<DisconnectFallback> {
     let socket_path = SocketPath::default_from_env();
     let token_path = auth::default_token_path();
     let mut client = match DaemonClient::connect(&socket_path, &token_path).await {
@@ -404,6 +427,22 @@ async fn poll_terminal_manifest_once(feature_id: &str) -> Result<DisconnectFallb
         return Ok(DisconnectFallback::NonTerminal);
     };
     let Ok(manifest) = serde_json::from_value::<VerificationManifest>(value) else {
+        return Ok(DisconnectFallback::Unavailable);
+    };
+    if let Some((status_wire, code)) = terminal_outcome_for_manifest(&manifest) {
+        return Ok(DisconnectFallback::Terminal { status_wire, code });
+    }
+    Ok(DisconnectFallback::NonTerminal)
+}
+
+fn poll_terminal_manifest_file_once(feature_id: &str) -> Result<DisconnectFallback> {
+    let Ok(project_root) = std::env::current_dir() else {
+        return Ok(DisconnectFallback::Unavailable);
+    };
+    let Ok(path) = VerificationManifest::manifest_path_for(feature_id, &project_root) else {
+        return Ok(DisconnectFallback::Unavailable);
+    };
+    let Ok(manifest) = VerificationManifest::load(&path) else {
         return Ok(DisconnectFallback::Unavailable);
     };
     if let Some((status_wire, code)) = terminal_outcome_for_manifest(&manifest) {
