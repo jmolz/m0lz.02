@@ -11,6 +11,10 @@
 [![CI](https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml/badge.svg)](https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+<p align="center">
+  <img src="docs/images/pice-evaluate-demo.gif" alt="m0lz.02 running a background Stack Loops evaluation with live status and review output" width="700">
+</p>
+
 ## What It Does
 
 m0lz.02 implements PICE: Plan, Implement, Contract-Evaluate. The v0.7.0 release line adds Stack Loops, which split a feature across technology layers, evaluate each layer against its own contract, run seam checks at integration boundaries, and keep background evaluations observable through status, logs, review gates, and audit data.

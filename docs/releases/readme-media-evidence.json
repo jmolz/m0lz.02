@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-12T21:53:25.109Z",
+  "generated_at": "2026-05-13T13:41:21.000Z",
   "readme": "README.md",
   "checked": [
     {
@@ -19,6 +19,13 @@
       "alt": "m0lz.02 branch mark for the PICE CLI",
       "src": "branch-mark.svg",
       "size_bytes": 788,
+      "status": "ok"
+    },
+    {
+      "kind": "html-img",
+      "alt": "m0lz.02 running a background Stack Loops evaluation with live status and review output",
+      "src": "docs/images/pice-evaluate-demo.gif",
+      "size_bytes": 73763,
       "status": "ok"
     },
     {
