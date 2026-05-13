@@ -22,12 +22,12 @@
 //!   the pipe is not a listener that accepts many connections the way a
 //!   Unix socket does.
 //!
-//! - **Always-live invariant.** Between connections there must be at least
-//!   one unbound `NamedPipeServer` instance on the pipe name at all times,
-//!   or clients calling `ClientOptions::open` during the gap get
-//!   `io::ErrorKind::NotFound`. [`WindowsPipeListener::accept`] preserves
-//!   this invariant by creating the *next* server instance *before*
-//!   swapping out the current one.
+//! - **Single pending accept.** A named pipe instance must be committed to
+//!   `ConnectNamedPipe` before another instance is published. If two unbound
+//!   instances exist, Windows may attach a client to the later instance while
+//!   the server is still awaiting the earlier one, deadlocking request/response
+//!   traffic. [`WindowsPipeListener::accept`] therefore awaits the current
+//!   instance first, then creates the next pending instance.
 //!
 //! - **No filesystem corpse.** Named pipes are refcounted kernel objects,
 //!   not files on disk. When the last handle to a pipe closes — process
@@ -94,9 +94,9 @@ pub struct WindowsPipeListener {
     /// The pipe name, e.g., `\\.\pipe\pice-daemon`.
     name: String,
     /// The next server instance to be handed to the next `accept()` call.
-    /// Held under a mutex so `accept()` can take `&self`, even though its
-    /// body does an atomic swap. The mutex is never held across an await.
-    next_server: Mutex<NamedPipeServer>,
+    /// Temporarily `None` while that instance is inside `ConnectNamedPipe`.
+    /// The mutex is never held across an await.
+    next_server: Mutex<Option<NamedPipeServer>>,
 }
 
 impl WindowsPipeListener {
@@ -111,46 +111,43 @@ impl WindowsPipeListener {
         let first = create_first_instance_with_conflict_check(name)?;
         Ok(Self {
             name: name.to_string(),
-            next_server: Mutex::new(first),
+            next_server: Mutex::new(Some(first)),
         })
     }
 
     /// Accept the next incoming connection, wrapping it in a framed
     /// [`WindowsPipeConnection`].
     ///
-    /// This implementation preserves the "always-live server" invariant
-    /// described in the module docs: a fresh `NamedPipeServer` instance is
-    /// created and atomically swapped into the next-server slot *before*
-    /// the previous instance is used for `connect().await`. That guarantees
-    /// clients never observe a window where no server is listening on the
-    /// pipe name.
+    /// This implementation keeps exactly one pending server instance before
+    /// each `ConnectNamedPipe` call. Creating a second pending instance first
+    /// is unsafe for this request/response protocol because a client may bind
+    /// to that later instance while this accept call still awaits the earlier
+    /// one.
     pub async fn accept(&self) -> io::Result<WindowsPipeConnection> {
-        // Create the NEXT server instance FIRST. No `first_pipe_instance`
-        // flag on subsequent instances — that flag is a one-shot ownership
-        // assertion at bind time. Inside our own process we are free to
-        // create as many cooperating instances as we need for multi-client
-        // accept loops, and that is exactly what we are doing.
-        //
-        // If this create() fails, we return the error with the slot
-        // untouched. The listener stays in a valid state and a later
-        // accept() call can retry.
-        let next = ServerOptions::new().create(&self.name)?;
-
-        // Atomically swap the slot. The lock is held only long enough for
-        // a single `mem::replace` — no awaits inside — so concurrent
-        // accept() callers (if any) race on a single infallible operation.
         let current = {
             let mut slot = self
                 .next_server
                 .lock()
                 .expect("WindowsPipeListener mutex poisoned");
-            std::mem::replace(&mut *slot, next)
+            match slot.take() {
+                Some(server) => server,
+                None => ServerOptions::new().create(&self.name)?,
+            }
         };
 
         // Wait for a client to connect on the server instance we just took
         // out of the slot. This happens OUTSIDE the lock so a long connect
-        // wait does not block other accept() callers.
+        // wait does not block unrelated bookkeeping.
         current.connect().await?;
+
+        let next = ServerOptions::new().create(&self.name)?;
+        {
+            let mut slot = self
+                .next_server
+                .lock()
+                .expect("WindowsPipeListener mutex poisoned");
+            *slot = Some(next);
+        }
 
         Ok(WindowsPipeConnection::new(current))
     }

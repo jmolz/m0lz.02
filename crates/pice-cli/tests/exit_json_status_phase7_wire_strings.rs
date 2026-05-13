@@ -135,8 +135,14 @@ fn failed_interrupted_wire_string_is_pinned() {
     // project root when computing the manifest path. Use the same function
     // to derive the path so the namespace matches.
     //
-    // macOS tempdir returns symlinked paths (/var → /private/var); canonicalize
-    // so the hash here matches `std::env::current_dir()` inside the binary.
+    // macOS tempdir returns symlinked paths (/var -> /private/var), so
+    // canonicalize there to match `std::env::current_dir()` inside the child.
+    // Windows canonicalization yields a verbatim path (`\\?\...`) while the
+    // child current_dir resolves non-verbatim, so keep the original path on
+    // Windows to seed the same manifest namespace the child will read.
+    #[cfg(windows)]
+    let project_root = dir.path().to_path_buf();
+    #[cfg(not(windows))]
     let project_root = dir
         .path()
         .canonicalize()
@@ -175,7 +181,7 @@ fn failed_interrupted_wire_string_is_pinned() {
     manifest.save(&manifest_path).unwrap();
 
     let output = pice_cmd_inline()
-        .current_dir(dir.path())
+        .current_dir(&project_root)
         .env("PICE_STATE_DIR", state_dir.to_str().unwrap())
         .args(["status", feature_id, "--json"])
         .output()
