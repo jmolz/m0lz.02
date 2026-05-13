@@ -265,14 +265,16 @@ fn windows_pipe_bound(socket_path: &SocketPath) -> bool {
     use windows_sys::Win32::Foundation::{
         ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT,
     };
-    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+    use windows_sys::Win32::System::Pipes::{WaitNamedPipeW, NMPWAIT_NOWAIT};
 
     let name = match socket_path {
         SocketPath::Windows(name) => name,
         _ => return false,
     };
     let wide_name: Vec<u16> = OsStr::new(name).encode_wide().chain(Some(0)).collect();
-    if unsafe { WaitNamedPipeW(wide_name.as_ptr(), 0) } != 0 {
+    // 0 is NMPWAIT_USE_DEFAULT_WAIT, not nonblocking; use NOWAIT so the
+    // `daemon start` readiness loop remains bounded on Windows runners.
+    if unsafe { WaitNamedPipeW(wide_name.as_ptr(), NMPWAIT_NOWAIT) } != 0 {
         return true;
     }
 

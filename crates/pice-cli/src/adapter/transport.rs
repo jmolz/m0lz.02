@@ -320,7 +320,7 @@ async fn open_windows_pipe_client(
     use windows_sys::Win32::Foundation::{
         ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, ERROR_SEM_TIMEOUT,
     };
-    use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+    use windows_sys::Win32::System::Pipes::{WaitNamedPipeW, NMPWAIT_NOWAIT};
 
     const OPEN_TIMEOUT: Duration = Duration::from_millis(500);
     const RETRY_INTERVAL: Duration = Duration::from_millis(25);
@@ -329,7 +329,9 @@ async fn open_windows_pipe_client(
     let deadline = tokio::time::Instant::now() + OPEN_TIMEOUT;
 
     loop {
-        let available = unsafe { WaitNamedPipeW(wide_name.as_ptr(), 0) } != 0;
+        // 0 is NMPWAIT_USE_DEFAULT_WAIT, not nonblocking; use NOWAIT so
+        // Tokio timeouts can bound the retry loop on Windows runners.
+        let available = unsafe { WaitNamedPipeW(wide_name.as_ptr(), NMPWAIT_NOWAIT) } != 0;
         let last_error = if available {
             match ClientOptions::new().open(name) {
                 Ok(client) => return Ok(client),
