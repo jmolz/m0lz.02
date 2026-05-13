@@ -311,11 +311,16 @@ function commandExists(cmd) {
   return spawnSync(checker, args, { stdio: 'ignore', shell: process.platform !== 'win32' }).status === 0;
 }
 
+function npmCommand() {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
+}
+
 function smokeNpmPackedInstall(artifactDirForBinaries) {
   if (process.env.PICE_NPM_PACK_SMOKE !== '1') {
     return { status: 'not requested' };
   }
-  if (!commandExists('npm')) {
+  const npmCmd = npmCommand();
+  if (!commandExists(npmCmd)) {
     throw new Error('PICE_NPM_PACK_SMOKE=1 requires npm on PATH');
   }
 
@@ -359,10 +364,10 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
   let piceBin = null;
   let npmEnv = null;
   try {
-    const platformTar = run('npm', ['pack', platformDir, '--pack-destination', work], { cwd: repoRoot }).stdout.trim().split(/\r?\n/).pop();
-    const mainTar = run('npm', ['pack', mainDir, '--pack-destination', work], { cwd: repoRoot }).stdout.trim().split(/\r?\n/).pop();
-    run('npm', ['init', '-y'], { cwd: work });
-    run('npm', ['install', path.join(work, platformTar), path.join(work, mainTar)], { cwd: work, timeout: 60_000 });
+    const platformTar = runNpmBin(npmCmd, ['pack', platformDir, '--pack-destination', work], { cwd: repoRoot }).stdout.trim().split(/\r?\n/).pop();
+    const mainTar = runNpmBin(npmCmd, ['pack', mainDir, '--pack-destination', work], { cwd: repoRoot }).stdout.trim().split(/\r?\n/).pop();
+    runNpmBin(npmCmd, ['init', '-y'], { cwd: work });
+    runNpmBin(npmCmd, ['install', path.join(work, platformTar), path.join(work, mainTar)], { cwd: work, timeout: 60_000 });
     piceBin = process.platform === 'win32'
       ? path.join(work, 'node_modules/.bin/pice.cmd')
       : path.join(work, 'node_modules/.bin/pice');

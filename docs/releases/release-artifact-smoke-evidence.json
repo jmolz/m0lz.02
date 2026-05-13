@@ -1,15 +1,15 @@
 {
-  "generated_at": "2026-05-13T18:58:04.261Z",
+  "generated_at": "2026-05-13T19:11:18.438Z",
   "artifact_kind": "local-release-archive",
-  "artifact_archive": "/var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-release-smoke-local-91540.tar.gz",
-  "artifact_dir": "/var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-archive-smoke-91540",
+  "artifact_archive": "/var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-release-smoke-local-13615.tar.gz",
+  "artifact_dir": "/var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-archive-smoke-13615",
   "binaries": {
     "version": "pice 0.7.0",
     "auto_start_verified": true,
     "inline_validate_verified": true,
     "daemon_lifecycle_verified": true,
-    "daemon_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-artifact-smoke-91540/daemon.sock",
-    "explicit_start_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-artifact-smoke-91540/daemon.sock"
+    "daemon_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-artifact-smoke-13615/daemon.sock",
+    "explicit_start_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-artifact-smoke-13615/daemon.sock"
   },
   "npm_pack_local_install": {
     "status": "passed",
@@ -17,8 +17,8 @@
     "version": "pice 0.7.0",
     "auto_start_verified": true,
     "daemon_lifecycle_verified": true,
-    "daemon_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-npm-smoke-91540/daemon.sock",
-    "explicit_start_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-npm-smoke-91540/daemon.sock",
+    "daemon_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-npm-smoke-13615/daemon.sock",
+    "explicit_start_status": "daemon is running (v0.7.0)\n  uptime: 0s\n  socket: /var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-npm-smoke-13615/daemon.sock",
     "staged_from_artifact": true
   }
 }
