@@ -32,6 +32,29 @@ function run(cmd, args, options = {}) {
   return { stdout: result.stdout, stderr: result.stderr };
 }
 
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function isTransientWindowsRemoveError(err) {
+  return process.platform === 'win32' && ['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(err?.code);
+}
+
+function rmRetrySync(target, options = {}) {
+  const attempts = process.platform === 'win32' ? 8 : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      rmSync(target, options);
+      return;
+    } catch (err) {
+      if (!isTransientWindowsRemoveError(err) || attempt === attempts) {
+        throw err;
+      }
+      sleepMs(Math.min(100 * 2 ** (attempt - 1), 2_000));
+    }
+  }
+}
+
 function winCmdQuote(value) {
   return `"${String(value).replace(/"/g, '""')}"`;
 }
@@ -75,7 +98,7 @@ function unpackArchive(archivePath) {
   }
 
   const work = path.join(tmpdir(), `pice-archive-smoke-${process.pid}`);
-  rmSync(work, { recursive: true, force: true });
+  rmRetrySync(work, { recursive: true, force: true });
   mkdirSync(work, { recursive: true });
 
   if (archive.endsWith('.tar.gz')) {
@@ -91,11 +114,11 @@ function unpackArchive(archivePath) {
       run('unzip', ['-q', archive, '-d', work]);
     }
   } else {
-    rmSync(work, { recursive: true, force: true });
+    rmRetrySync(work, { recursive: true, force: true });
     throw new Error(`unsupported release archive extension: ${archive}`);
   }
 
-  return { dir: work, cleanup: () => rmSync(work, { recursive: true, force: true }) };
+  return { dir: work, cleanup: () => rmRetrySync(work, { recursive: true, force: true }) };
 }
 
 function packLocalReleaseArchive() {
@@ -110,7 +133,7 @@ function packLocalReleaseArchive() {
     process.platform === 'win32'
       ? path.join(tmpdir(), `pice-release-smoke-local-${process.pid}.zip`)
       : path.join(tmpdir(), `pice-release-smoke-local-${process.pid}.tar.gz`);
-  rmSync(archive, { force: true });
+  rmRetrySync(archive, { force: true });
   if (process.platform === 'win32') {
     run('powershell', [
       '-NoProfile',
@@ -120,7 +143,7 @@ function packLocalReleaseArchive() {
   } else {
     run('tar', ['-czf', archive, '-C', releaseDir, exe('pice'), exe('pice-daemon')]);
   }
-  return { archive, cleanup: () => rmSync(archive, { force: true }) };
+  return { archive, cleanup: () => rmRetrySync(archive, { force: true }) };
 }
 
 function artifactInput() {
@@ -207,7 +230,7 @@ function smokeBinaries(dir) {
       explicit_start_status: explicitStatus,
     };
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    rmRetrySync(work, { recursive: true, force: true });
   }
 }
 
@@ -249,7 +272,7 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
     if (!existsSync(artifactBin) || !existsSync(artifactDaemon)) {
       throw new Error(`npm smoke requires copied binaries in ${platformDir} or built binaries in ${artifactDirForBinaries}`);
     }
-    rmSync(stagingRoot, { recursive: true, force: true });
+    rmRetrySync(stagingRoot, { recursive: true, force: true });
     platformDir = path.join(stagingRoot, platformPkg);
     mainDir = path.join(stagingRoot, 'pice');
     cpSync(path.join(repoRoot, 'npm', platformPkg), platformDir, { recursive: true });
@@ -260,7 +283,7 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
   }
 
   const work = path.join(tmpdir(), `pice-npm-smoke-${process.pid}`);
-  rmSync(work, { recursive: true, force: true });
+  rmRetrySync(work, { recursive: true, force: true });
   mkdirSync(work, { recursive: true });
   try {
     const platformTar = run('npm', ['pack', platformDir, '--pack-destination', work], { cwd: repoRoot }).stdout.trim().split(/\r?\n/).pop();
@@ -302,8 +325,8 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
       staged_from_artifact: stagedFromArtifact,
     };
   } finally {
-    rmSync(work, { recursive: true, force: true });
-    rmSync(stagingRoot, { recursive: true, force: true });
+    rmRetrySync(work, { recursive: true, force: true });
+    rmRetrySync(stagingRoot, { recursive: true, force: true });
   }
 }
 
