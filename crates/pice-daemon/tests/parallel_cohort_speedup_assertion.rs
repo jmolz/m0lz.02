@@ -39,7 +39,10 @@ use tokio_util::sync::CancellationToken;
 const ITERATIONS: usize = 3;
 // Keep provider latency high enough that CI scheduler jitter and fixed
 // per-run setup overhead cannot dominate the 1.6x cohort speedup signal.
-const LATENCY_MS: u64 = 1000;
+// Windows GitHub runners have ~1s of fixed overhead in this fixture, so a
+// short stub delay can make the ratio mostly measure setup cost. The threshold
+// remains unchanged; this keeps the measured workload provider-bound.
+const LATENCY_MS: u64 = 3000;
 /// Target speedup ≥ 1.6× → parallel mean ≤ (1/1.6) × sequential ≈ 0.625×.
 const MAX_PARALLEL_RATIO: f64 = 0.625;
 
