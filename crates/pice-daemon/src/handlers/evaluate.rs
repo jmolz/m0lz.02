@@ -324,6 +324,312 @@ fn preflight_stack_loops_workflow(
     Ok(Ok((workflow, layers_config)))
 }
 
+fn effective_contract_tier_for_layer(
+    workflow: &pice_core::workflow::WorkflowConfig,
+    layer_name: &str,
+) -> u8 {
+    workflow
+        .layer_overrides
+        .get(layer_name)
+        .and_then(|o| o.tier)
+        .unwrap_or(workflow.defaults.tier)
+}
+
+struct StackLoopMetricsHandles {
+    db_arc: Option<std::sync::Arc<std::sync::Mutex<metrics::db::MetricsDb>>>,
+    eval_id: Option<i64>,
+    pass_sink: std::sync::Arc<dyn crate::orchestrator::PassMetricsSink>,
+}
+
+fn prepare_stack_loop_metrics(
+    project_root: &std::path::Path,
+    plan_path: &std::path::Path,
+    contract: &pice_core::plan_parser::PlanContract,
+    config: &pice_core::config::PiceConfig,
+) -> std::result::Result<StackLoopMetricsHandles, String> {
+    let normalized_path =
+        metrics::normalize_plan_path(&plan_path.display().to_string(), project_root);
+    let db_arc: Option<std::sync::Arc<std::sync::Mutex<metrics::db::MetricsDb>>> =
+        match metrics::open_metrics_db(project_root) {
+            Ok(Some(db)) => Some(std::sync::Arc::new(std::sync::Mutex::new(db))),
+            Ok(None) => None,
+            Err(e) => return Err(format!("open_metrics_db: {e}")),
+        };
+
+    let eval_id = match db_arc.as_ref() {
+        Some(db) => {
+            let guard = db.lock().unwrap_or_else(|p| p.into_inner());
+            match metrics::store::insert_evaluation_header(
+                &guard,
+                &normalized_path,
+                &contract.feature,
+                contract.tier,
+                &config.evaluation.primary.provider,
+                &config.evaluation.primary.model,
+                None,
+                None,
+            ) {
+                Ok(id) => Some(id),
+                Err(e) => return Err(format!("insert_evaluation_header: {e}")),
+            }
+        }
+        None => None,
+    };
+
+    let pass_sink: std::sync::Arc<dyn crate::orchestrator::PassMetricsSink> =
+        match (db_arc.as_ref(), eval_id) {
+            (Some(db), Some(eid)) => std::sync::Arc::new(metrics::store::DbBackedPassSink {
+                db: db.clone(),
+                evaluation_id: eid,
+            }),
+            _ => std::sync::Arc::new(crate::orchestrator::NullPassSink),
+        };
+
+    Ok(StackLoopMetricsHandles {
+        db_arc,
+        eval_id,
+        pass_sink,
+    })
+}
+
+fn persist_stack_loop_metrics(
+    db_arc: &Option<std::sync::Arc<std::sync::Mutex<metrics::db::MetricsDb>>>,
+    eval_id: Option<i64>,
+    manifest: &pice_core::layers::manifest::VerificationManifest,
+    workflow: &pice_core::workflow::WorkflowConfig,
+) -> Vec<String> {
+    use pice_core::layers::manifest::{CheckStatus, LayerStatus};
+
+    let Some(db_arc) = db_arc.as_ref() else {
+        return Vec::new();
+    };
+    let Some(eval_id) = eval_id else {
+        return Vec::new();
+    };
+
+    let db = db_arc.lock().unwrap_or_else(|p| p.into_inner());
+    let any_failed_layer = manifest
+        .layers
+        .iter()
+        .any(|l| l.status == LayerStatus::Failed);
+    let failed_seam_checks = manifest
+        .layers
+        .iter()
+        .flat_map(|l| l.seam_checks.iter())
+        .filter(|c| c.status == CheckStatus::Failed)
+        .count();
+    let all_layers_passed = manifest
+        .layers
+        .iter()
+        .all(|l| l.status == LayerStatus::Passed || l.status == LayerStatus::Skipped);
+    let stack_passed = all_layers_passed && !any_failed_layer && failed_seam_checks == 0;
+    let passes_used = manifest
+        .layers
+        .iter()
+        .flat_map(|l| l.passes.iter())
+        .filter(|p| p.index > 0)
+        .count() as u32;
+    let final_total_cost_usd = {
+        let any_reported = manifest.layers.iter().any(|l| l.total_cost_usd.is_some());
+        if any_reported {
+            Some(
+                manifest
+                    .layers
+                    .iter()
+                    .filter_map(|l| l.total_cost_usd)
+                    .sum(),
+            )
+        } else {
+            None
+        }
+    };
+    let halted_by_wire = manifest
+        .layers
+        .iter()
+        .find(|l| l.status == LayerStatus::Failed)
+        .and_then(|l| l.halted_by.clone())
+        .or_else(|| {
+            manifest
+                .layers
+                .iter()
+                .find(|l| l.status != LayerStatus::Pending && l.status != LayerStatus::Skipped)
+                .and_then(|l| l.halted_by.clone())
+        });
+    let final_confidence = manifest
+        .layers
+        .iter()
+        .filter_map(|l| l.final_confidence)
+        .fold(None, |acc, c| match acc {
+            Some(a) if a >= c => Some(a),
+            _ => Some(c),
+        });
+    let algo_wire = match workflow.phases.evaluate.adaptive_algorithm {
+        pice_core::workflow::schema::AdaptiveAlgo::BayesianSprt => "bayesian_sprt",
+        pice_core::workflow::schema::AdaptiveAlgo::Adts => "adts",
+        pice_core::workflow::schema::AdaptiveAlgo::Vec => "vec",
+        pice_core::workflow::schema::AdaptiveAlgo::None => "none",
+    };
+
+    let mut metrics_errors = Vec::new();
+    if let Err(e) = metrics::store::finalize_evaluation_with_adaptive_summary(
+        &db,
+        eval_id,
+        stack_passed,
+        Some("stack-loops — adaptive evaluation; see pass_events and seam_findings"),
+        passes_used,
+        halted_by_wire.as_deref(),
+        Some(algo_wire),
+        final_confidence,
+        final_total_cost_usd,
+    ) {
+        tracing::warn!("failed to finalize evaluation with adaptive summary: {e}");
+        metrics_errors.push(format!("finalize_evaluation: {e}"));
+    }
+
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for layer in &manifest.layers {
+        for sc in &layer.seam_checks {
+            let status_wire = match sc.status {
+                CheckStatus::Passed => "passed",
+                CheckStatus::Warning => "warning",
+                CheckStatus::Failed => "failed",
+                CheckStatus::Skipped => continue,
+            };
+            let Some(category) = sc.category else {
+                continue;
+            };
+            let key = (sc.boundary.clone(), sc.name.clone());
+            if !seen.insert(key) {
+                continue;
+            }
+            let row = metrics::store::SeamFindingRow {
+                layer: &layer.name,
+                boundary: &sc.boundary,
+                check_id: &sc.name,
+                category,
+                status: status_wire,
+                details: sc.details.as_deref(),
+            };
+            if let Err(e) = metrics::store::insert_seam_finding(&db, eval_id, &row) {
+                tracing::warn!(
+                    layer = %layer.name,
+                    check = %sc.name,
+                    "failed to insert seam finding: {e}"
+                );
+                metrics_errors.push(format!("seam_finding[{}/{}]: {e}", layer.name, sc.name));
+            }
+        }
+    }
+
+    let completed_at = chrono::Utc::now().to_rfc3339();
+    for layer in &manifest.layers {
+        let status_wire = match layer.status {
+            LayerStatus::Pending => "pending",
+            LayerStatus::InProgress => "in-progress",
+            LayerStatus::Passed => "passed",
+            LayerStatus::Failed => "failed",
+            LayerStatus::Skipped => "skipped",
+            LayerStatus::PendingReview => "pending-review",
+        };
+        let started_at = layer
+            .passes
+            .iter()
+            .find(|p| p.index > 0)
+            .map(|p| p.timestamp.as_str())
+            .unwrap_or(completed_at.as_str());
+        let completed_at_for_layer = match layer.status {
+            LayerStatus::Pending | LayerStatus::InProgress => None,
+            _ => Some(completed_at.as_str()),
+        };
+        let layer_row = metrics::store::LayerRunRow {
+            feature_id: &manifest.feature_id,
+            layer: &layer.name,
+            status: status_wire,
+            contract_tier: effective_contract_tier_for_layer(workflow, &layer.name),
+            passes: layer.passes.iter().filter(|p| p.index > 0).count() as u32,
+            final_confidence: layer.final_confidence,
+            total_cost_usd: layer.total_cost_usd,
+            halted_by: layer.halted_by.as_deref(),
+            started_at,
+            completed_at: completed_at_for_layer,
+        };
+        if let Err(e) = metrics::store::insert_layer_run(&db, Some(eval_id), &layer_row) {
+            tracing::warn!(
+                layer = %layer.name,
+                "failed to insert layer run: {e}"
+            );
+            metrics_errors.push(format!("layer_run[{}]: {e}", layer.name));
+        }
+    }
+
+    metrics_errors
+}
+
+fn metrics_persist_halt(errors: &[String]) -> String {
+    format!(
+        "{}{}",
+        ExitJsonStatus::METRICS_PERSIST_FAILED_PREFIX,
+        errors.join("; ")
+    )
+}
+
+fn is_metrics_persist_error(err: &anyhow::Error) -> bool {
+    ExitJsonStatus::is_metrics_persist_failed(&err.to_string())
+}
+
+fn background_error_manifest(
+    mut manifest: pice_core::layers::manifest::VerificationManifest,
+    feature_id: &str,
+    err: &anyhow::Error,
+) -> pice_core::layers::manifest::VerificationManifest {
+    let metrics_persist_failed = is_metrics_persist_error(err);
+    manifest.overall_status = if metrics_persist_failed {
+        ManifestStatus::Pending
+    } else {
+        ManifestStatus::Failed
+    };
+    manifest
+        .layers
+        .push(pice_core::layers::manifest::LayerResult {
+            name: feature_id.to_string(),
+            status: if metrics_persist_failed {
+                pice_core::layers::manifest::LayerStatus::Pending
+            } else {
+                pice_core::layers::manifest::LayerStatus::Failed
+            },
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: Some(if metrics_persist_failed {
+                err.to_string()
+            } else {
+                format!("runtime_error:{err}")
+            }),
+            final_confidence: None,
+            total_cost_usd: None,
+            escalation_events: None,
+        });
+    manifest
+}
+
+fn background_terminal_reason(
+    manifest: &pice_core::layers::manifest::VerificationManifest,
+) -> &'static str {
+    if manifest
+        .layers
+        .iter()
+        .filter_map(|layer| layer.halted_by.as_deref())
+        .any(ExitJsonStatus::is_metrics_persist_failed)
+    {
+        return ExitJsonStatus::MetricsPersistFailed.as_str();
+    }
+    match manifest.overall_status {
+        ManifestStatus::Passed => "passed",
+        ManifestStatus::Failed => "failed",
+        ManifestStatus::PendingReview => "pending-review",
+        _ => "complete",
+    }
+}
+
 /// Reconcile expired review gates against the current clock. For each
 /// Pending gate whose `timeout_at` has passed, apply the pinned
 /// `on_timeout_action`: mutate the gate status, update the owning
@@ -1220,6 +1526,47 @@ pub async fn run(
                 }
             }
 
+            let completed_at = chrono::Utc::now().to_rfc3339();
+            for layer in &manifest.layers {
+                let status_wire = match layer.status {
+                    LayerStatus::Pending => "pending",
+                    LayerStatus::InProgress => "in-progress",
+                    LayerStatus::Passed => "passed",
+                    LayerStatus::Failed => "failed",
+                    LayerStatus::Skipped => "skipped",
+                    LayerStatus::PendingReview => "pending-review",
+                };
+                let started_at = layer
+                    .passes
+                    .iter()
+                    .find(|p| p.index > 0)
+                    .map(|p| p.timestamp.as_str())
+                    .unwrap_or(completed_at.as_str());
+                let completed_at_for_layer = match layer.status {
+                    LayerStatus::Pending | LayerStatus::InProgress => None,
+                    _ => Some(completed_at.as_str()),
+                };
+                let layer_row = metrics::store::LayerRunRow {
+                    feature_id: &manifest.feature_id,
+                    layer: &layer.name,
+                    status: status_wire,
+                    contract_tier: effective_contract_tier_for_layer(&workflow, &layer.name),
+                    passes: layer.passes.iter().filter(|p| p.index > 0).count() as u32,
+                    final_confidence: layer.final_confidence,
+                    total_cost_usd: layer.total_cost_usd,
+                    halted_by: layer.halted_by.as_deref(),
+                    started_at,
+                    completed_at: completed_at_for_layer,
+                };
+                if let Err(e) = metrics::store::insert_layer_run(&db, Some(eval_id), &layer_row) {
+                    tracing::warn!(
+                        layer = %layer.name,
+                        "failed to insert layer run: {e}"
+                    );
+                    metrics_errors.push(format!("layer_run[{}]: {e}", layer.name));
+                }
+            }
+
             // Phase 4.1 Pass-6 Codex High #4 fail-close: any metrics-persist
             // error becomes an observable failure. The evaluation's contract
             // result is still computed from the manifest (returned above),
@@ -1711,20 +2058,8 @@ async fn run_background(
                         error = %e,
                         "background evaluate orchestrator returned Err"
                     );
-                    let mut err_manifest = manifest.clone();
-                    err_manifest.overall_status = ManifestStatus::Failed;
-                    err_manifest
-                        .layers
-                        .push(pice_core::layers::manifest::LayerResult {
-                            name: args.feature_id.clone(),
-                            status: pice_core::layers::manifest::LayerStatus::Failed,
-                            passes: Vec::new(),
-                            seam_checks: Vec::new(),
-                            halted_by: Some(format!("runtime_error:{e}")),
-                            final_confidence: None,
-                            total_cost_usd: None,
-                            escalation_events: None,
-                        });
+                    let err_manifest =
+                        background_error_manifest(manifest.clone(), &args.feature_id, &e);
                     finalize_terminal_manifest(
                         &err_manifest,
                         &args.manifest_path,
@@ -1733,12 +2068,7 @@ async fn run_background(
                     err_manifest
                 }
             };
-            let reason = match manifest.overall_status {
-                ManifestStatus::Passed => "passed",
-                ManifestStatus::Failed => "failed",
-                ManifestStatus::PendingReview => "pending-review",
-                _ => "complete",
-            };
+            let reason = background_terminal_reason(&manifest);
             logs_for_spawn
                 .append_terminal_frame(&args.feature_id, &args.run_id, reason)
                 .await;
@@ -1773,7 +2103,7 @@ async fn run_evaluate_orchestrator(
     use pice_core::layers::manifest::VerificationManifest;
 
     let plan = ParsedPlan::parse(&args.plan_path, args.plan_content.clone())?;
-    let _contract = plan
+    let contract = plan
         .contract
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no contract section found in plan"))?;
@@ -1848,8 +2178,14 @@ async fn run_evaluate_orchestrator(
         saver: &saver,
     };
 
-    let pass_sink: std::sync::Arc<dyn crate::orchestrator::PassMetricsSink> =
-        std::sync::Arc::new(crate::orchestrator::NullPassSink);
+    let metrics_handles = prepare_stack_loop_metrics(
+        args.env.project_root.as_path(),
+        args.plan_path.as_path(),
+        &contract,
+        config,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", metrics_persist_halt(&[e])))?;
+    let pass_sink = metrics_handles.pass_sink.clone();
 
     // Background evaluate has no live CLI stream to write to, but provider
     // chunks still need to be captured for `pice logs`. Use the same
@@ -1869,9 +2205,18 @@ async fn run_evaluate_orchestrator(
         pass_sink,
         cancel.clone(),
     )
-    .await;
+    .await?;
     log_sink.flush().await;
-    manifest
+    let metrics_errors = persist_stack_loop_metrics(
+        &metrics_handles.db_arc,
+        metrics_handles.eval_id,
+        &manifest,
+        workflow_snapshot,
+    );
+    if !metrics_errors.is_empty() {
+        return Err(anyhow::anyhow!("{}", metrics_persist_halt(&metrics_errors)));
+    }
+    Ok(manifest)
 }
 
 #[cfg(test)]
@@ -1910,6 +2255,86 @@ mod tests {
         )
         .unwrap();
         plan_path
+    }
+
+    #[test]
+    fn background_error_manifest_maps_metrics_persist_to_pending() {
+        let manifest =
+            VerificationManifest::new("feat-metrics", std::path::Path::new("/tmp/project"));
+        let err = anyhow::anyhow!(
+            "{}",
+            metrics_persist_halt(&["layer_run[infrastructure]: disk full".to_string()])
+        );
+
+        let out = background_error_manifest(manifest, "feat-metrics", &err);
+
+        assert_eq!(out.overall_status, ManifestStatus::Pending);
+        assert_eq!(out.layers.len(), 1);
+        assert_eq!(out.layers[0].status, LayerStatus::Pending);
+        assert!(out.layers[0]
+            .halted_by
+            .as_deref()
+            .is_some_and(ExitJsonStatus::is_metrics_persist_failed));
+        assert_eq!(
+            background_terminal_reason(&out),
+            ExitJsonStatus::MetricsPersistFailed.as_str()
+        );
+    }
+
+    #[test]
+    fn background_error_manifest_maps_runtime_error_to_failed() {
+        let manifest =
+            VerificationManifest::new("feat-runtime", std::path::Path::new("/tmp/project"));
+        let err = anyhow::anyhow!("provider crashed");
+
+        let out = background_error_manifest(manifest, "feat-runtime", &err);
+
+        assert_eq!(out.overall_status, ManifestStatus::Failed);
+        assert_eq!(out.layers.len(), 1);
+        assert_eq!(out.layers[0].status, LayerStatus::Failed);
+        assert_eq!(
+            out.layers[0].halted_by.as_deref(),
+            Some("runtime_error:provider crashed")
+        );
+        assert_eq!(background_terminal_reason(&out), "failed");
+    }
+
+    #[test]
+    fn layer_run_persistence_uses_effective_layer_tier_override() {
+        let db = crate::metrics::db::MetricsDb::open_in_memory().unwrap();
+        let mut workflow = pice_core::workflow::loader::embedded_defaults();
+        workflow.defaults.tier = 1;
+        workflow.layer_overrides.insert(
+            "infrastructure".to_string(),
+            pice_core::workflow::schema::LayerOverride {
+                tier: Some(3),
+                ..Default::default()
+            },
+        );
+
+        let row = crate::metrics::store::LayerRunRow {
+            feature_id: "feature",
+            layer: "infrastructure",
+            status: "passed",
+            contract_tier: effective_contract_tier_for_layer(&workflow, "infrastructure"),
+            passes: 1,
+            final_confidence: Some(0.97),
+            total_cost_usd: Some(0.0),
+            halted_by: Some("sprt_confidence_reached"),
+            started_at: "2026-05-12T00:00:00Z",
+            completed_at: Some("2026-05-12T00:00:01Z"),
+        };
+
+        crate::metrics::store::insert_layer_run(&db, None, &row).unwrap();
+        let tier: i64 = db
+            .conn()
+            .query_row(
+                "SELECT contract_tier FROM layer_runs WHERE feature_id = 'feature' AND layer = 'infrastructure'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tier, 3);
     }
 
     /// Contract criterion #2: "Evaluate releases per-manifest locks between

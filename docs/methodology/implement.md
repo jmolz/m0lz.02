@@ -3,7 +3,7 @@
 ## Purpose
 
 The Implement phase turns an approved plan into working code. A fresh AI session
-receives the plan file, the project's CLAUDE.md, and access to the codebase. It does
+receives the plan file, the project's project guidance, and access to the codebase. It does
 not receive the planning conversation, the developer's rationale, or any other context
 from the Plan phase.
 
@@ -18,7 +18,7 @@ When `pice execute <plan-path>` runs, the CLI:
 
 1. Starts a new provider process (separate from any previous session)
 2. Creates a fresh AI session with no conversation history
-3. Sends the plan file content and CLAUDE.md as the initial context
+3. Sends the plan file content and project guidance as the initial context
 4. The AI reads the codebase directly through tool use
 
 The implementation session never sees:
@@ -61,7 +61,7 @@ The CLI parses the plan file, extracts the contract (to validate the file is a p
 PICE plan), and assembles the execution prompt. The prompt includes:
 
 - The full plan content (research, steps, contract)
-- The project's CLAUDE.md (coding standards, project structure, conventions)
+- The project's project guidance (coding standards, project structure, conventions)
 - Instructions to follow the plan steps sequentially
 - Instructions to run validation after each step
 
@@ -142,7 +142,7 @@ commands never duplicate this sequence.
 
 After implementation is complete, the developer runs `pice evaluate <plan-path>` to
 grade the work against the contract. The [Evaluation System](evaluate.md) uses
-context-isolated evaluators that see only the contract, the git diff, and CLAUDE.md --
+context-isolated evaluators that see only the contract, the git diff, and project guidance --
 not the implementation session.
 
 ## Further Reading

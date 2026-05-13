@@ -1,0 +1,4 @@
+services:
+  - type: web
+    name: phase8-next-prisma
+    env: docker

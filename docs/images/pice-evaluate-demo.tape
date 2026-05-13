@@ -23,7 +23,7 @@ Show
 Sleep 500ms
 
 # Type the command visually, then execute (triggers mock via shell function)
-Type "pice evaluate .claude/plans/auth-plan.md"
+Type "pice evaluate --background --wait .claude/plans/stack-loops.md"
 Sleep 500ms
 Enter
 

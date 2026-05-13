@@ -1,0 +1,3 @@
+alerts:
+  - name: api-error-rate
+    expr: http_5xx_rate > 0.05

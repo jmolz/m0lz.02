@@ -3,16 +3,24 @@
 const { execFileSync } = require("child_process");
 
 let binaryPath;
+let daemonBinaryPath;
 try {
-  const { getBinaryPath } = require("../index.js");
+  const { getBinaryPath, getDaemonBinaryPath } = require("../index.js");
   binaryPath = getBinaryPath();
+  daemonBinaryPath = getDaemonBinaryPath();
 } catch (e) {
   console.error(`pice: ${e.message}`);
   process.exit(1);
 }
 
 try {
-  execFileSync(binaryPath, process.argv.slice(2), { stdio: "inherit" });
+  execFileSync(binaryPath, process.argv.slice(2), {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      PICE_DAEMON_BIN: daemonBinaryPath,
+    },
+  });
 } catch (e) {
   process.exit(e.status || 1);
 }

@@ -1,0 +1,15 @@
+{
+  "name": "phase8-sveltekit-supabase-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "svelte-kit sync && vite build",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@sveltejs/kit": "latest",
+    "@supabase/supabase-js": "latest",
+    "svelte": "latest",
+    "vite": "latest"
+  }
+}

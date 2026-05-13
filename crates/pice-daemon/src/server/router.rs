@@ -2,16 +2,16 @@
 //!
 //! The router sits between authentication ([`super::auth`]) and the per-command
 //! handlers (`crate::handlers::*`). It receives an already-framed
-//! [`DaemonRequest`], validates the bearer token, then dispatches to the
+//! [`pice_core::protocol::DaemonRequest`], validates the bearer token, then dispatches to the
 //! appropriate method handler.
 //!
 //! ## Phase 0 method surface
 //!
 //! | Method | Handler | Purpose |
 //! |--------|---------|---------|
-//! | `daemon/health` | [`handle_health`] | Liveness probe + version |
-//! | `daemon/shutdown` | [`handle_shutdown`] | Orderly shutdown request |
-//! | `cli/dispatch` | [`handle_dispatch`] | Execute a `CommandRequest` (T19 stub) |
+//! | `daemon/health` | `handle_health` | Liveness probe + version |
+//! | `daemon/shutdown` | `handle_shutdown` | Orderly shutdown request |
+//! | `cli/dispatch` | `handle_dispatch` | Execute a `CommandRequest` (T19 stub) |
 //! | anything else | — | `-32601 method not found` |
 //!
 //! ## `DaemonContext`

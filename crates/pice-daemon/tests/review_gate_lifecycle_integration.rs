@@ -572,11 +572,8 @@ async fn scenario_8_cancellation_during_pending_review() {
     let manifest = result.expect("cancelled run must return a manifest, not error");
     // feature_id derives from the plan filename stem; we named the plan
     // feat8.md so the resume path would match the seeded fixture. The
-    // core invariant: no deadlock, no panic. The manifest store path
-    // diverges here (fixture seeds at `$PICE_STATE_DIR`, whereas
-    // `manifest_path_for` in pice-core hardcodes `$HOME/.pice/state/`
-    // and does NOT honor the env override), so the cancelled run may
-    // not have observed the seeded PendingReview state — but it still
-    // returns cleanly, which is what criterion #14 demands.
+    // core invariant: no deadlock, no panic. The manifest path honors the
+    // `PICE_STATE_DIR` override; this scenario still asserts the cancellation
+    // path returns cleanly instead of coupling to a specific gate decision.
     assert_eq!(manifest.feature_id, "feat8");
 }

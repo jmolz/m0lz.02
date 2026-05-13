@@ -5,7 +5,7 @@
 //! (`execute/create`, `evaluate/create`, etc.) will be added in v0.2 Phase 1+
 //! when finer-grained layer-scoped control becomes necessary.
 //!
-//! See `.claude/rules/protocol.md` "Daemon RPC Methods (v0.2)" for the full
+//! See `.codex/rules/protocol.md` "Daemon RPC Methods (v0.2)" for the full
 //! planned v0.2+ surface.
 
 // ─── Lifecycle methods ──────────────────────────────────────────────────────

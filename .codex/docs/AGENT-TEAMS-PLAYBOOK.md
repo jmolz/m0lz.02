@@ -25,7 +25,9 @@ Use for Tier 2 contracts — new features, integrations, schema changes. Runs a 
 We just finished implementing [FEATURE]. The contract is in [PLAN PATH].
 
 Step 1: Launch the Codex adversarial review in the background first:
-/codex:adversarial-review --background evaluate against the contract in [PLAN PATH]
+node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
+  task --background --model gpt-5.5 --effort xhigh \
+  "Adversarially evaluate against the contract in [PLAN PATH]. Use only the contract, diff, and CLAUDE.md."
 
 Step 2: While Codex runs, spawn a Claude sub-agent as the contract evaluator:
 Read the contract JSON from [PLAN PATH]. For EACH criterion, run the
@@ -33,7 +35,7 @@ validation command, try to break the feature, and score 1-10. You are NOT
 the implementer. Do NOT be generous. A 7 means "meets the bar" — not
 "pretty good." Score lower when in doubt.
 
-Step 3: Collect Codex results with /codex:result
+Step 3: Collect the Codex task result
 
 Step 4: Synthesize both into a single evaluation report:
 - Contract Evaluation (Claude): {N}/{total} criteria passed (list each with score)
@@ -49,7 +51,9 @@ Use this for Tier 3 contracts — architectural changes, new pipeline phases, or
 We just finished implementing [FEATURE]. The contract is in [PLAN PATH].
 
 Step 1: Launch the Codex adversarial review in the background first:
-/codex:adversarial-review --background --effort xhigh evaluate against the contract in [PLAN PATH]
+node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
+  task --background --model gpt-5.5 --effort xhigh \
+  "Adversarially evaluate against the contract in [PLAN PATH]. Use only the contract, diff, and CLAUDE.md."
 
 Step 2: Create a Claude agent team to perform an adversarial evaluation.
 Spawn four teammates:
@@ -79,7 +83,7 @@ Rules:
   read code and speculate
 - All evaluators share findings at the end for cross-referencing
 
-Step 3: Collect Codex results with /codex:result
+Step 3: Collect the Codex task result
 
 Step 4: Synthesize ALL findings into a single evaluation report:
 - Contract Evaluation (Claude): {N}/{total} criteria passed (list each with score)

@@ -5,21 +5,23 @@
 //! 1. Reject inline mode (`PICE_DAEMON_INLINE=1`) — inline has no
 //!    long-lived process to own the detached future.
 //! 2. Derive a stable `feature_id` from the plan path.
-//! 3. Consult [`FeatureJobManager::run_id_for`] — a live feature
+//! 3. Consult [`crate::jobs::FeatureJobManager::run_id_for`] — a live feature
 //!    short-circuits with `ExitJsonStatus::FeatureAlreadyRunning`.
-//! 4. Allocate a fresh `run_id` via [`FeatureJobManager::next_run_id`].
+//! 4. Allocate a fresh `run_id` via [`crate::jobs::FeatureJobManager::next_run_id`].
 //! 5. Build a [`JobEnv`] snapshot from [`DaemonContext`] state.
 //! 6. Acquire a short per-feature admission lock, then re-check for an
 //!    existing live run.
 //! 7. Acquire the same per-manifest process + fs2 locks as foreground
-//!    evaluation, write `ManifestStatus::Queued` via [`NullSaver`], then
-//!    hand an owned closure to [`FeatureJobManager::spawn_after_signal`].
-//!    The worker is visible to the manager only after Queued is durable.
-//!    Queued
-//!    is a pre-work state and MUST NOT emit a `LayerStarted` event
-//!    (Stack Loops emits `LayerStarted` only after it computes the active
-//!    DAG for the spawned future).
-//! 8. The closure re-opens the manifest, transitions Queued → InProgress
+//!    evaluation, write a dispatch marker via [`NullSaver`], then hand an
+//!    owned closure to [`crate::jobs::FeatureJobManager::spawn_after_signal`]. Fresh
+//!    manifests use `Queued`; resume dispatches with existing layers/gates
+//!    use `Pending` so crash reconciliation cannot delete the approved
+//!    gate source of truth. The worker is visible to the manager only after
+//!    the marker is durable. This pre-work marker MUST NOT emit a
+//!    `LayerStarted` event (Stack Loops emits `LayerStarted` only after it
+//!    computes the active DAG for the spawned future).
+//! 8. The closure re-opens the manifest, transitions the dispatch marker to
+//!    `InProgress`
 //!    without emitting a layer event, invokes the caller-supplied
 //!    orchestrator, then persists any terminal manifest not already
 //!    persisted by that orchestrator.
@@ -291,18 +293,41 @@ fn collect_seam_file_contents(
     contents
 }
 
-/// Pre-write the `ManifestStatus::Queued` manifest to disk. Must use
-/// the [`NullSaver`] — Queued is a pre-work state and emits no event
-/// (the orchestrator future emits `LayerStarted` on the Queued →
-/// InProgress transition).
+/// Pre-write the dispatch manifest to disk. If a prior manifest already
+/// exists for this feature, preserve its layers/gates so review-gate resume
+/// dispatches continue from the source of truth instead of clobbering
+/// approved gates before the orchestrator can load them.
+///
+/// Fresh background dispatches use `Queued`, which startup reconciliation may
+/// delete because no work has happened. Resume dispatches with existing state
+/// use `Pending` instead: a crash between dispatch and the spawned worker's
+/// `InProgress` transition must not delete approved review gates.
+///
+/// Must use the [`NullSaver`] — this pre-work state emits no event (the
+/// orchestrator future emits `LayerStarted` on the transition to
+/// `InProgress`).
 pub fn write_queued_manifest(
     feature_id: &str,
     run_id: &str,
     project_root: &Path,
     manifest_path: &Path,
 ) -> Result<PathBuf> {
-    let mut manifest = VerificationManifest::new(feature_id, project_root);
-    manifest.overall_status = ManifestStatus::Queued;
+    let existing_manifest = manifest_path.exists();
+    let mut manifest = if existing_manifest {
+        VerificationManifest::load(manifest_path).with_context(|| {
+            format!(
+                "loading existing manifest at {} before background resume dispatch",
+                manifest_path.display()
+            )
+        })?
+    } else {
+        VerificationManifest::new(feature_id, project_root)
+    };
+    manifest.overall_status = if existing_manifest {
+        ManifestStatus::Pending
+    } else {
+        ManifestStatus::Queued
+    };
     manifest.run_id = Some(run_id.to_string());
     NullSaver
         .save_and_emit(&manifest, manifest_path, SaveIntent::FeatureCompleted)
@@ -379,15 +404,15 @@ async fn acquire_background_manifest_locks(
 /// The caller supplies a `future_builder` that owns all runtime state
 /// (EventBus clone, LogStore clone, PiceConfig clone, etc.) the
 /// detached orchestrator needs. The helper handles the handshake,
-/// Queued manifest write, and spawn.
+/// dispatch-marker manifest write, and spawn.
 ///
 /// The spawned future's FIRST action is `global_sem.acquire_owned().await`
-/// (handled inside [`FeatureJobManager::spawn`]). After the permit is
-/// held, the future must transition Queued → InProgress via its own
-/// `ManifestSaver` and then run the orchestrator. The helper does NOT
-/// own the Queued → InProgress transition — it only pre-writes the
-/// Queued row so the reconciliation invariant holds (a crashed
-/// pre-transition feature is observable on disk).
+/// (handled inside [`crate::jobs::FeatureJobManager::spawn`]). After the
+/// permit is held, the future must transition the dispatch marker to
+/// `InProgress` via its own `ManifestSaver` and then run the orchestrator.
+/// The helper does NOT own that transition — it only pre-writes the dispatch
+/// marker so the reconciliation invariant holds (a crashed pre-transition
+/// feature is observable on disk).
 pub async fn dispatch_background<F, Fut>(
     feature_id: String,
     json_mode: bool,
@@ -609,21 +634,22 @@ async fn fail_closed_after_background_error(
     }
 }
 
-/// Shared body for the spawned future's Queued → InProgress transition.
+/// Shared body for the spawned future's dispatch-marker → InProgress transition.
 ///
-/// Loads the just-written Queued manifest from disk, flips
-/// `overall_status` to `InProgress`, stamps `run_id`, and saves via an
-/// [`NullSaver`] so the durable transition lands on disk without emitting a
-/// layer event. This transition deliberately
-/// does NOT emit a `LayerStarted` event: Stack Loops owns those events after
-/// it computes the active DAG, so subscribers never see a false start for an
-/// inactive first configured layer.
+/// Loads the just-written manifest from disk, flips `overall_status` to
+/// `InProgress`, stamps `run_id`, and saves via an [`NullSaver`] so the
+/// durable transition lands on disk without emitting a layer event. Fresh
+/// dispatches arrive as `Queued`; resume dispatches with preserved state may
+/// arrive as `Pending`. This transition deliberately does NOT emit a
+/// `LayerStarted` event: Stack Loops owns those events after it computes the
+/// active DAG, so subscribers never see a false start for an inactive first
+/// configured layer.
 pub fn transition_queued_to_in_progress(
     args: &OrchestratorSpawnArgs,
 ) -> Result<VerificationManifest> {
     let mut manifest = VerificationManifest::load(&args.manifest_path).with_context(|| {
         format!(
-            "loading Queued manifest at {} for Queued→InProgress transition",
+            "loading dispatch manifest at {} for transition to InProgress",
             args.manifest_path.display()
         )
     })?;
@@ -925,6 +951,54 @@ paths = ["src/frontend/**"]
     }
 
     #[tokio::test]
+    async fn write_queued_manifest_preserves_existing_layers_and_gates() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let _guard = StateDirGuard::new(state_tmp.path());
+        let project_tmp = tempfile::tempdir().unwrap();
+        let path = VerificationManifest::manifest_path_in_state_dir(
+            "feat-resume",
+            project_tmp.path(),
+            state_tmp.path(),
+        );
+        let mut existing = VerificationManifest::new("feat-resume", project_tmp.path());
+        existing.add_layer_result(pice_core::layers::manifest::LayerResult {
+            name: "infrastructure".to_string(),
+            status: pice_core::layers::manifest::LayerStatus::Passed,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: Some("sprt_confidence_reached".to_string()),
+            final_confidence: Some(0.95),
+            total_cost_usd: Some(0.001),
+            escalation_events: None,
+        });
+        existing.gates.push(pice_core::layers::manifest::GateEntry {
+            id: "feat-resume:infrastructure:0001".to_string(),
+            layer: "infrastructure".to_string(),
+            status: pice_core::layers::manifest::GateStatus::Approved,
+            trigger_expression: "layer == infrastructure".to_string(),
+            requested_at: "2026-05-12T00:00:00Z".to_string(),
+            timeout_at: "2026-05-13T00:00:00Z".to_string(),
+            on_timeout_action: pice_core::workflow::schema::OnTimeout::Reject,
+            reject_attempts_remaining: 0,
+            decision: Some("approve".to_string()),
+            decided_at: Some("2026-05-12T00:01:00Z".to_string()),
+        });
+        existing.save(&path).unwrap();
+
+        let path = write_queued_manifest("feat-resume", "r-2", project_tmp.path(), &path).unwrap();
+        let loaded = VerificationManifest::load(&path).unwrap();
+        assert_eq!(loaded.overall_status, ManifestStatus::Pending);
+        assert_eq!(loaded.run_id.as_deref(), Some("r-2"));
+        assert_eq!(loaded.layers.len(), 1);
+        assert_eq!(loaded.layers[0].name, "infrastructure");
+        assert_eq!(loaded.gates.len(), 1);
+        assert_eq!(
+            loaded.gates[0].status,
+            pice_core::layers::manifest::GateStatus::Approved
+        );
+    }
+
+    #[tokio::test]
     async fn transition_queued_to_in_progress_writes_in_progress_without_start_event() {
         let state_tmp = tempfile::tempdir().unwrap();
         let _guard = StateDirGuard::new(state_tmp.path());
@@ -972,7 +1046,7 @@ paths = ["src/frontend/**"]
 
         match rx.try_recv() {
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {}
-            other => panic!("Queued→InProgress must not emit LayerStarted, got {other:?}"),
+            other => panic!("dispatch marker transition must not emit LayerStarted, got {other:?}"),
         }
     }
 

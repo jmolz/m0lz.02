@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 500">
   <title>PICE Architecture</title>
-  <desc>PICE architecture: Rust binary with core engine, metrics engine, template engine, and provider host communicating via JSON-RPC over stdio with TypeScript providers (Claude Code, Codex, community)</desc>
+  <desc>PICE architecture: CLI adapter communicates with pice-daemon over a local socket; the daemon owns orchestration, metrics, templates, manifests, and provider JSON-RPC over stdio with TypeScript providers.</desc>
 
   <!-- Arrow markers (must precede path elements that reference them) -->
   <defs>
@@ -21,24 +21,24 @@
   <!-- Background -->
   <rect width="940" height="500" fill="#0d1117" rx="8"/>
 
-  <!-- Rust Binary Container -->
+  <!-- CLI + Daemon Container -->
   <rect x="30" y="30" width="340" height="440" rx="12" fill="#161b22" stroke="#3b82f6" stroke-width="2"/>
-  <text x="200" y="62" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="18" font-weight="700" fill="#60a5fa">pice (Rust binary)</text>
+  <text x="200" y="62" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="18" font-weight="700" fill="#60a5fa">pice CLI + daemon</text>
 
-  <!-- Core Engine -->
+  <!-- CLI Adapter -->
   <rect x="50" y="85" width="300" height="70" rx="8" fill="#1e3a5f" stroke="#3b82f6" stroke-width="2"/>
-  <text x="200" y="113" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="15" font-weight="600" fill="#93c5fd">Core Engine</text>
-  <text x="200" y="133" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#60a5fa">state machine, lifecycle, config</text>
+  <text x="200" y="113" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="15" font-weight="600" fill="#93c5fd">CLI Adapter</text>
+  <text x="200" y="133" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#60a5fa">args, TTY, socket client</text>
 
-  <!-- Metrics Engine -->
+  <!-- Daemon Orchestrator -->
   <rect x="50" y="170" width="300" height="70" rx="8" fill="#1e3a5f" stroke="#60a5fa" stroke-width="2"/>
-  <text x="200" y="198" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="15" font-weight="600" fill="#93c5fd">Metrics Engine</text>
-  <text x="200" y="218" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#60a5fa">SQLite storage + telemetry</text>
+  <text x="200" y="198" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="15" font-weight="600" fill="#93c5fd">pice-daemon</text>
+  <text x="200" y="218" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#60a5fa">jobs, manifests, lifecycle</text>
 
   <!-- Template Engine -->
   <rect x="50" y="255" width="300" height="70" rx="8" fill="#172554" stroke="#93c5fd" stroke-width="2"/>
-  <text x="200" y="283" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="15" font-weight="600" fill="#bfdbfe">Template Engine</text>
-  <text x="200" y="303" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#93c5fd">scaffolding, file generation</text>
+  <text x="200" y="283" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="15" font-weight="600" fill="#bfdbfe">Metrics + Templates</text>
+  <text x="200" y="303" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#93c5fd">SQLite audit, scaffold files</text>
 
   <!-- Provider Host -->
   <rect x="50" y="340" width="300" height="70" rx="8" fill="#431407" stroke="#f97316" stroke-width="2"/>
@@ -47,7 +47,7 @@
 
   <!-- Bridge - Dashed Line -->
   <line x1="470" y1="45" x2="470" y2="465" stroke="#475569" stroke-width="2" stroke-dasharray="8,6"/>
-  <text x="470" y="32" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="12" font-weight="600" fill="#94a3b8">JSON-RPC over stdio</text>
+  <text x="470" y="32" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="12" font-weight="600" fill="#94a3b8">provider JSON-RPC over stdio</text>
 
   <!-- JSON Snippet -->
   <rect x="410" y="195" width="120" height="80" rx="6" fill="#0f172a" stroke="#334155" stroke-width="1"/>

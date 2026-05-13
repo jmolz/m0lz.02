@@ -1,0 +1,325 @@
+{
+  "generated_at": "2026-05-13T11:50:15.403Z",
+  "fixtures": [
+    {
+      "fixture": "next-prisma",
+      "init_created": 36,
+      "upgrade_created": 1,
+      "detected_layers": 7,
+      "configured_layers": 7,
+      "configured_layer_names": [
+        "backend",
+        "database",
+        "api",
+        "frontend",
+        "infrastructure",
+        "deployment",
+        "observability"
+      ],
+      "feature_id": "next-prisma-phase8",
+      "evaluate_status": "passed",
+      "evaluate_wait": {
+        "status": "passed",
+        "overall_status": null
+      },
+      "final_status": {
+        "overall_status": "passed",
+        "layer_count": 7,
+        "passed_layers": 6,
+        "skipped_layers": 1
+      },
+      "review_gate": null,
+      "status_follow_stream_json": {
+        "frames": 2,
+        "progress_frames": 1,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "passed"
+      },
+      "logs_follow_stream_json": {
+        "frames": 16,
+        "progress_frames": 15,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "logs-stream-ended"
+      },
+      "background_metrics_rows": {
+        "status": "verified",
+        "database": ".pice/metrics.db",
+        "evaluations": 1,
+        "pass_events": 36,
+        "seam_findings": 1,
+        "layer_runs": 7,
+        "distinct_layer_runs": 7,
+        "latest_evaluation_id": 1,
+        "latest_evaluation_layer_runs": 7,
+        "gate_decisions": 0,
+        "infrastructure_contract_tier": 3
+      },
+      "pending_gates": 0
+    },
+    {
+      "fixture": "fastapi-postgres",
+      "init_created": 36,
+      "upgrade_created": 1,
+      "detected_layers": 7,
+      "configured_layers": 7,
+      "configured_layer_names": [
+        "backend",
+        "database",
+        "api",
+        "frontend",
+        "infrastructure",
+        "deployment",
+        "observability"
+      ],
+      "feature_id": "fastapi-postgres-phase8",
+      "evaluate_status": "passed",
+      "evaluate_wait": null,
+      "final_status": {
+        "overall_status": "passed",
+        "layer_count": 7,
+        "passed_layers": 7,
+        "skipped_layers": 0
+      },
+      "review_gate": {
+        "gate_id": "fastapi-postgres-phase8:infrastructure:019e212c09b700000000",
+        "layer": "infrastructure",
+        "decision": "approve",
+        "audit_id": 1,
+        "resume_status": "passed",
+        "wait_status": "passed",
+        "audit_decision": {
+          "id": 1,
+          "gate_id": "fastapi-postgres-phase8:infrastructure:019e212c09b700000000",
+          "decision": "approve",
+          "layer": "infrastructure",
+          "reviewer": "phase8-acceptance"
+        }
+      },
+      "status_follow_stream_json": {
+        "frames": 2,
+        "progress_frames": 1,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "passed"
+      },
+      "logs_follow_stream_json": {
+        "frames": 11,
+        "progress_frames": 10,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "logs-stream-ended"
+      },
+      "background_metrics_rows": {
+        "status": "verified",
+        "database": ".pice/metrics.db",
+        "evaluations": 2,
+        "pass_events": 42,
+        "seam_findings": 2,
+        "layer_runs": 13,
+        "distinct_layer_runs": 7,
+        "latest_evaluation_id": 2,
+        "latest_evaluation_layer_runs": 7,
+        "gate_decisions": 1,
+        "infrastructure_contract_tier": 3
+      },
+      "pending_gates": 0
+    },
+    {
+      "fixture": "rails",
+      "init_created": 36,
+      "upgrade_created": 1,
+      "detected_layers": 7,
+      "configured_layers": 7,
+      "configured_layer_names": [
+        "backend",
+        "database",
+        "api",
+        "frontend",
+        "infrastructure",
+        "deployment",
+        "observability"
+      ],
+      "feature_id": "rails-phase8",
+      "evaluate_status": "passed",
+      "evaluate_wait": {
+        "status": "passed",
+        "overall_status": null
+      },
+      "final_status": {
+        "overall_status": "passed",
+        "layer_count": 7,
+        "passed_layers": 7,
+        "skipped_layers": 0
+      },
+      "review_gate": null,
+      "status_follow_stream_json": {
+        "frames": 2,
+        "progress_frames": 1,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "passed"
+      },
+      "logs_follow_stream_json": {
+        "frames": 17,
+        "progress_frames": 16,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "logs-stream-ended"
+      },
+      "background_metrics_rows": {
+        "status": "verified",
+        "database": ".pice/metrics.db",
+        "evaluations": 1,
+        "pass_events": 42,
+        "seam_findings": 1,
+        "layer_runs": 7,
+        "distinct_layer_runs": 7,
+        "latest_evaluation_id": 1,
+        "latest_evaluation_layer_runs": 7,
+        "gate_decisions": 0,
+        "infrastructure_contract_tier": 3
+      },
+      "pending_gates": 0
+    },
+    {
+      "fixture": "express-mongo",
+      "init_created": 36,
+      "upgrade_created": 1,
+      "detected_layers": 7,
+      "configured_layers": 7,
+      "configured_layer_names": [
+        "backend",
+        "database",
+        "api",
+        "frontend",
+        "infrastructure",
+        "deployment",
+        "observability"
+      ],
+      "feature_id": "express-mongo-phase8",
+      "evaluate_status": "passed",
+      "evaluate_wait": {
+        "status": "passed",
+        "overall_status": null
+      },
+      "final_status": {
+        "overall_status": "passed",
+        "layer_count": 7,
+        "passed_layers": 6,
+        "skipped_layers": 1
+      },
+      "review_gate": null,
+      "status_follow_stream_json": {
+        "frames": 2,
+        "progress_frames": 1,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "passed"
+      },
+      "logs_follow_stream_json": {
+        "frames": 16,
+        "progress_frames": 15,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "logs-stream-ended"
+      },
+      "background_metrics_rows": {
+        "status": "verified",
+        "database": ".pice/metrics.db",
+        "evaluations": 1,
+        "pass_events": 36,
+        "seam_findings": 1,
+        "layer_runs": 7,
+        "distinct_layer_runs": 7,
+        "latest_evaluation_id": 1,
+        "latest_evaluation_layer_runs": 7,
+        "gate_decisions": 0,
+        "infrastructure_contract_tier": 3
+      },
+      "pending_gates": 0
+    },
+    {
+      "fixture": "sveltekit-supabase",
+      "init_created": 36,
+      "upgrade_created": 1,
+      "detected_layers": 7,
+      "configured_layers": 7,
+      "configured_layer_names": [
+        "backend",
+        "database",
+        "api",
+        "frontend",
+        "infrastructure",
+        "deployment",
+        "observability"
+      ],
+      "feature_id": "sveltekit-supabase-phase8",
+      "evaluate_status": "passed",
+      "evaluate_wait": {
+        "status": "passed",
+        "overall_status": null
+      },
+      "final_status": {
+        "overall_status": "passed",
+        "layer_count": 7,
+        "passed_layers": 7,
+        "skipped_layers": 0
+      },
+      "review_gate": null,
+      "status_follow_stream_json": {
+        "frames": 2,
+        "progress_frames": 1,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "passed"
+      },
+      "logs_follow_stream_json": {
+        "frames": 17,
+        "progress_frames": 16,
+        "terminal_frame": true,
+        "terminal_exit_code": 0,
+        "terminal_status": "logs-stream-ended"
+      },
+      "background_metrics_rows": {
+        "status": "verified",
+        "database": ".pice/metrics.db",
+        "evaluations": 1,
+        "pass_events": 42,
+        "seam_findings": 1,
+        "layer_runs": 7,
+        "distinct_layer_runs": 7,
+        "latest_evaluation_id": 1,
+        "latest_evaluation_layer_runs": 7,
+        "gate_decisions": 0,
+        "infrastructure_contract_tier": 3
+      },
+      "pending_gates": 0
+    }
+  ],
+  "focused_regressions": {
+    "status": "passed",
+    "selectors": [
+      "cargo test -p pice-cli --test evaluate_background_wait_live_integration evaluate_background_wait_json_uses_second_subscribe_until_feature_complete -- --nocapture",
+      "cargo test -p pice-cli --test status_follow_live_stream_json_integration status_follow_stream_json_drains_live_burst_and_terminal_status_alias -- --nocapture",
+      "cargo test -p pice-cli --test terminal_short_circuit_live_cli_integration logs_follow_stream_json_terminal_frame_carries_logs_stream_ended_status -- --nocapture",
+      "cargo test -p pice-daemon --test review_gate_lifecycle_integration scenario_4b_reject_without_retry_halts_with_gate_rejected -- --nocapture"
+    ]
+  },
+  "commands": [
+    "pice init --json",
+    "pice init --upgrade --json",
+    "pice layers detect/check/list --json",
+    "pice validate --json",
+    "pice daemon start",
+    "pice evaluate <plan> --background --wait --timeout-secs 30 --json",
+    "pice status <feature-id> --follow --stream-json",
+    "pice logs <feature-id> --follow --stream-json",
+    "pice status <feature-id> --wait --timeout-secs 30 --json",
+    "pice status <feature-id> --json",
+    "pice logs <feature-id> --json",
+    "pice review-gate --list --feature-id <feature-id> --json",
+    "pice review-gate --gate-id <gate-id> --decision approve --json"
+  ]
+}

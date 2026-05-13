@@ -484,7 +484,7 @@ pnpm build
 
 | Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
-| 2    | 1 pass           | 1 `/codex:adversarial-review`    | New features, integrations, schema changes |
+| 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh`    | New features, integrations, schema changes |
 
 ### Success Criteria
 

@@ -1,76 +1,118 @@
-# Migration Guide: PICE v0.1 to v0.2
+# Migration Guide: PICE v0.1 To v0.2 Stack Loops
 
-## What changed
+v0.2 changes PICE from a single foreground loop into a daemon-backed, layer-aware workflow. The core Plan -> Implement -> Contract-Evaluate loop remains, but evaluation can now run per layer, in the background, with seam checks, review gates, and persisted manifests.
 
-### Architecture
+## What Changes On Disk
 
-v0.2 introduces a **headless daemon + CLI adapter split**. The Rust core becomes a long-running `pice-daemon` process; `pice` becomes a thin CLI adapter that communicates with the daemon over a Unix socket (macOS/Linux) or named pipe (Windows). This is transparent to users — the CLI auto-starts the daemon on first command.
+`pice init` creates:
 
-### Layer-aware evaluation
+- `.claude/` public workflow scaffold and command templates
+- `.pice/config.toml` provider, evaluation, telemetry, and metrics config
+- `.pice/workflow.yaml` Stack Loops defaults
 
-v0.1 evaluates features as monolithic units — one contract, one diff, one evaluation loop. v0.2 introduces **Stack Loops**: per-layer evaluation where a feature is PASS only when every layer passes. This catches the cross-layer blind spots that v0.1 misses (missing env vars, broken deploys, schema drift).
+`pice init --upgrade` adds:
 
-## How to upgrade
+- `.pice/layers.toml` detected layer configuration
+- `.pice/contracts/*.toml` layer contract templates
 
-### Quick upgrade
+This repository uses `.codex/` for maintainer-local plans and command wrappers. Fresh user projects should follow the `.claude/` scaffold emitted by `pice init`.
+
+## Upgrade Steps
 
 ```bash
+pice init
 pice init --upgrade
+pice layers detect --json
+pice layers check --json
+pice layers graph
+pice validate --json
 ```
 
-This generates:
-- `.pice/layers.toml` — detected layer configuration for your project
-- `.pice/contracts/` — default contract templates for each layer (backend, database, api, frontend, infrastructure, deployment, observability)
+Review `.pice/layers.toml` before committing it. The detector is a starting point, not an authority.
 
-Review and commit both files.
+## Daemon And Inline Mode
 
-### Manual upgrade
+The `pice` CLI talks to `pice-daemon` over a Unix socket on macOS/Linux or a named pipe on Windows. The CLI auto-starts the daemon when socket mode is needed.
 
-1. Run `pice layers detect` to see what PICE detects
-2. Run `pice layers detect --write` to write `.pice/layers.toml`
-3. Edit the file to match your project's actual architecture
-4. Run `pice layers check` to verify coverage
-5. Run `pice layers graph` to visualize dependencies
-6. Commit `.pice/layers.toml`
+Use `PICE_DAEMON_INLINE=1` for deterministic local validation where background subscriptions are not needed. Inline mode intentionally rejects or degrades `--background`, `--wait`, and follow streams because no long-lived daemon owns the job.
 
-## New files
+Useful isolation variables:
 
-| File | Purpose |
-|------|---------|
-| `.pice/layers.toml` | Layer definitions: paths, dependencies, always-run flags |
-| `.pice/contracts/*.toml` | Per-layer evaluation contracts (criteria, thresholds) |
+- `PICE_DAEMON_SOCKET`: daemon socket or pipe override
+- `PICE_STATE_DIR`: manifest state directory override
+- `PICE_DAEMON_BIN`: absolute daemon binary path, used by npm installs and artifact smoke tests
 
-## Backwards compatibility
+## Layer Review
 
-**Without `.pice/layers.toml`**, v0.2 falls back to v0.1 single-loop evaluation with a warning. All existing commands work unchanged. You can adopt layers incrementally.
+Check these fields in `.pice/layers.toml`:
 
-**v0.1 providers still work.** The provider protocol extensions (layer fields on `session/create`) are optional. Providers that don't declare `layerAware: true` are driven in single-layer fallback mode.
+- `paths`: source, config, deployment, and observability globs
+- `depends_on`: transitive layer dependencies
+- `always_run`: infrastructure, deployment, and observability should remain always-run unless your project records an explicit exception
+- `type`: meta-layers such as infrastructure can influence other layer contracts
 
-## New commands
+Run `pice layers check --json` after adding new files so unlayered files do not silently escape evaluation.
 
-| Command | Purpose |
-|---------|---------|
-| `pice layers detect` | Run detection, print proposed layers.toml |
-| `pice layers detect --write` | Write detected layers to `.pice/layers.toml` |
-| `pice layers list` | Show current layer configuration |
-| `pice layers check` | Report files not matched by any layer |
-| `pice layers graph` | ASCII diagram of layer dependencies |
-| `pice init --upgrade` | Generate layers.toml + contracts for v0.1 projects |
+## Workflow And Contracts
 
-## Layer detection
+`.pice/workflow.yaml` controls:
 
-PICE uses a six-level heuristic stack to detect layers:
+- default tier, confidence, max passes, and parallelism
+- `phases.evaluate.parallel`
+- adaptive algorithm settings
+- review gate policy
+- model overrides and budget behavior
 
-1. **Manifest files** — `package.json`, `Cargo.toml`, `pyproject.toml`, etc.
-2. **Directory patterns** — `terraform/`, `deploy/`, `pages/`, etc.
-3. **Framework signals** — Next.js, Express, FastAPI, Rails, SvelteKit
-4. **Config files** — Dockerfile, docker-compose.yml, CI configs
-5. **Import graph** — (stubbed in v0.2, full analysis in v0.3)
-6. **Override file** — `.pice/layers.toml` always wins
+`.pice/contracts/*.toml` controls layer-specific criteria. Keep infrastructure, deployment, and observability criteria concrete; these are the checks that single feature-level contracts usually miss.
 
-## What to review after upgrade
+## Background Jobs
 
-1. **Layer paths**: Verify each layer's `paths` globs match your actual file layout
-2. **Dependencies**: Check `depends_on` reflects your real dependency graph
-3. **Always-run layers**: Infrastructure, deployment, and observability are `always_run = true` by default — they evaluate on every change regardless of scope
-4. **Contracts**: Customize `.pice/contracts/*.toml` criteria for your project's specific quality standards
+Run:
+
+```bash
+pice evaluate <plan.md> --background --wait --timeout-secs 120 --json
+pice status <feature-id> --json
+pice status <feature-id> --follow --stream-json
+pice logs <feature-id> --json
+pice logs <feature-id> --follow --stream-json
+```
+
+Manifests are persisted under `~/.pice/state/{project-hash}/{feature-id}.manifest.json` unless `PICE_STATE_DIR` is set.
+
+## Review Gates
+
+Enable gates in `.pice/workflow.yaml`:
+
+```yaml
+review:
+  enabled: true
+  trigger: "tier >= 3 OR layer == infrastructure"
+  timeout_hours: 24
+  on_timeout: reject
+  retry_on_reject: 1
+```
+
+Operate gates with:
+
+```bash
+pice review-gate --list --feature-id <feature-id> --json
+pice review-gate --gate-id <gate-id> --decision approve --reason "reviewed" --json
+```
+
+Every decision is written to the local `gate_decisions` audit table.
+
+## Provider Compatibility
+
+v0.1 providers can continue in single-layer mode. v0.2 providers may receive
+optional layer scoping fields on `session/create` (`layer`, `layerPaths`,
+`contractPath`) and optional seam/adaptive fields on `evaluate/create`
+(`seamChecks`, `passIndex`, `freshContext`, `effortOverride`). Providers that
+do not use those fields should ignore them; the daemon owns manifests, review
+gates, and built-in seam execution fallback. Providers that report real
+per-pass spend must explicitly declare `costTelemetry: true`.
+
+## Rollback
+
+To temporarily return to single-loop behavior, remove or rename `.pice/layers.toml` and disable review gates in `.pice/workflow.yaml`. To stop daemon state for a test run, use an isolated `PICE_STATE_DIR` and `PICE_DAEMON_SOCKET`, then `pice daemon stop`.
+
+Do not delete `.pice/metrics.db` unless you intentionally want to discard local audit and evaluation history.

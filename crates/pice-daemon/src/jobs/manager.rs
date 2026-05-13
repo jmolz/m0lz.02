@@ -211,9 +211,9 @@ pub struct JobHandle {
     /// (per Phase 5 conventions; see `.claude/rules/stack-loops.md`).
     pub cancel: CancellationToken,
 
-    /// JoinHandle of the detached orchestrator task. Awaited by
-    /// [`FeatureJobManager::join`] for the `--wait` CLI path; otherwise
-    /// the supervisor task in `spawn` awaits it for cleanup.
+    /// JoinHandle of the detached orchestrator task. The `--wait` CLI path
+    /// observes terminal manifest state; otherwise the supervisor task in
+    /// `spawn` awaits it for cleanup.
     pub join_handle: JoinHandle<Result<VerificationManifest>>,
 
     /// The immutable env snapshot passed to the orchestrator future.
@@ -497,8 +497,7 @@ impl FeatureJobManager {
     /// live feature was found and signaled; `false` if the feature was
     /// not present (already completed, never dispatched).
     ///
-    /// Does NOT await orchestrator completion — call [`Self::join`] for
-    /// that. The cancellation signal is cooperative: the orchestrator
+    /// Does NOT await orchestrator completion. The cancellation signal is cooperative: the orchestrator
     /// polls the token at cohort boundaries.
     pub fn cancel(&self, feature_id: &str) -> bool {
         if let Some(entry) = self.jobs.get(feature_id) {

@@ -193,8 +193,117 @@ fn status_follow_stream_json_drains_live_burst_and_terminal_status_alias() {
         terminal,
         StreamJsonFrame::Terminal {
             exit_code: 0,
-            status: None
-        }
+            status: Some(ref status)
+        } if status == "passed"
+    ));
+}
+
+#[test]
+fn status_follow_stream_json_terminal_frame_carries_metrics_persist_failed_status() {
+    let home = tempfile::tempdir_in("/private/tmp").unwrap();
+    let pice_dir = home.path().join(".pice");
+    std::fs::create_dir_all(&pice_dir).unwrap();
+    std::fs::write(pice_dir.join("daemon.token"), TOKEN).unwrap();
+
+    let socket_path = home.path().join("daemon.sock");
+    let listener = UnixListener::bind(&socket_path).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept client");
+
+        let health = read_request(&stream);
+        assert_eq!(health.auth, TOKEN);
+        assert_eq!(health.method, DAEMON_HEALTH);
+        write_response(
+            &mut stream,
+            health.id,
+            serde_json::json!({
+                "status": "ok",
+                "version": "test",
+                "uptime_seconds": 0,
+            }),
+        );
+
+        let subscribe = read_request(&stream);
+        assert_eq!(subscribe.auth, TOKEN);
+        assert_eq!(subscribe.method, MANIFEST_SUBSCRIBE);
+
+        let mut manifest = VerificationManifest::new(
+            "metrics-persist-feat",
+            std::path::Path::new("/tmp/pice-test"),
+        );
+        manifest.overall_status = ManifestStatus::InProgress;
+        manifest.run_id = Some("r-metrics-persist".to_string());
+        let response = SubscribeManifestResponse {
+            snapshots: vec![manifest],
+            run_ids: BTreeMap::from([(
+                "metrics-persist-feat".to_string(),
+                "r-metrics-persist".to_string(),
+            )]),
+        };
+        write_response(
+            &mut stream,
+            subscribe.id,
+            serde_json::to_value(response).expect("serialize snapshot"),
+        );
+
+        write_notification(
+            &mut stream,
+            ManifestEventPayload {
+                feature_id: "metrics-persist-feat".to_string(),
+                run_id: "r-metrics-persist".to_string(),
+                event: ManifestEvent::FeatureComplete,
+                layer: None,
+                data: serde_json::json!({"exit_status": "metrics-persist-failed"}),
+                timestamp: "2026-05-11T12:00:01.000Z".to_string(),
+            },
+        );
+    });
+
+    let output = Command::cargo_bin("pice")
+        .unwrap()
+        .env("HOME", home.path())
+        .env("PICE_DAEMON_SOCKET", &socket_path)
+        .env_remove("PICE_DAEMON_INLINE")
+        .args([
+            "status",
+            "--follow",
+            "metrics-persist-feat",
+            "--stream-json",
+        ])
+        .output()
+        .unwrap();
+
+    server.join().expect("fake daemon thread");
+    assert_eq!(
+        output.status.code(),
+        Some(ExitJsonStatus::MetricsPersistFailed.exit_code()),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf-8");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        3,
+        "snapshot + event + terminal; stdout={stdout}"
+    );
+    assert!(matches!(
+        serde_json::from_str::<StreamJsonFrame>(lines[0]).expect("snapshot frame"),
+        StreamJsonFrame::Snapshot { .. }
+    ));
+    assert!(matches!(
+        serde_json::from_str::<StreamJsonFrame>(lines[1]).expect("event frame"),
+        StreamJsonFrame::Event { .. }
+    ));
+    assert!(matches!(
+        serde_json::from_str::<StreamJsonFrame>(lines[2]).expect("terminal frame"),
+        StreamJsonFrame::Terminal {
+            exit_code,
+            status: Some(ref status)
+        } if exit_code == ExitJsonStatus::MetricsPersistFailed.exit_code()
+            && status == ExitJsonStatus::MetricsPersistFailed.as_str()
     ));
 }
 

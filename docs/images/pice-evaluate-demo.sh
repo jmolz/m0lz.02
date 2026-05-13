@@ -6,27 +6,27 @@ sleep 0.5
 
 echo ""
 echo "╔══════════════════════════════════════╗"
-echo "║   Evaluation Report — Tier 2         ║"
+echo "║   Stack Loops Evaluation — Tier 3    ║"
 echo "╠══════════════════════════════════════╣"
 sleep 0.4
-echo "║ ✅ Auth endpoints return 401     8/7 ║"
-echo "║   All protected routes verified      ║"
+echo "║ ✅ infrastructure layer          9/9 ║"
+echo "║   Docker + deploy seam checks pass   ║"
 sleep 0.3
-echo "║ ✅ Password hashing uses bcrypt  9/7 ║"
-echo "║   bcrypt with cost factor 12         ║"
+echo "║ ✅ database layer               10/9 ║"
+echo "║   migrations and rollback verified   ║"
 sleep 0.3
-echo "║ ✅ Session tokens expire in 24h  8/8 ║"
-echo "║   24h expiry confirmed in tests      ║"
+echo "║ ✅ api layer                     9/9 ║"
+echo "║   provider contract stayed isolated  ║"
 sleep 0.3
-echo "║ ✅ No secrets in git history     7/7 ║"
-echo "║   Clean scan across all commits      ║"
+echo "║ ✅ frontend layer                9/9 ║"
+echo "║   review gate approved and resumed   ║"
 sleep 0.5
 echo "╠══════════════════════════════════════╣"
-echo "║  Adversarial Review                  ║"
-echo "║  [consider] Rate limiting on logi... ║"
-echo "║  [consider] Token rotation strate... ║"
+echo "║  Background run                      ║"
+echo "║  status --follow emitted terminal    ║"
+echo "║  logs --follow captured progress     ║"
 sleep 0.4
 echo "╠══════════════════════════════════════╣"
 echo "║  Overall: PASS ✅                    ║"
-echo "║  All contract criteria met           ║"
+echo "║  All activated layers met threshold  ║"
 echo "╚══════════════════════════════════════╝"

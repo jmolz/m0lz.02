@@ -126,6 +126,6 @@ flow and asserts the `category`, `boundary`, and `halted_by` fields.
 ## See also
 
 - `PRDv2.md` § Feature 6 — the 12-category taxonomy
-- `.claude/rules/stack-loops.md` § Seam verification — operational invariants
+- `.codex/rules/stack-loops.md` § Seam verification — source-tree invariants
 - `docs/methodology/evaluate.md` — how seam findings surface in the evaluate
   report

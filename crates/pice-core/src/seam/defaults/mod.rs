@@ -1,6 +1,6 @@
 //! Default seam-check library — 12 checks, one per PRDv2 failure category.
 //!
-//! Each submodule implements a single [`SeamCheck`]. The aggregator below
+//! Each submodule implements a single [`crate::seam::types::SeamCheck`]. The aggregator below
 //! registers all of them into a fresh [`Registry`]. Adding a new default
 //! check requires: (a) a new submodule, (b) a `mod` line here, (c) a
 //! `register_defaults` entry. The default-registry tests in

@@ -1062,7 +1062,7 @@ See "E2E Validation Steps" above. All 9 steps must pass with behavior identical 
 
 | Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 xhigh) | Use When |
 | ---- | ---------------- | --------------------------------- | -------- |
-| 3    | Claude agent team | 1 `/codex:adversarial-review --effort xhigh` | Architectural changes, new pipeline phases |
+| 3    | Claude agent team | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | Architectural changes, new pipeline phases |
 
 ### Success Criteria
 

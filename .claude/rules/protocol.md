@@ -80,8 +80,7 @@ v0.2 extends the provider protocol without breaking v0.1 providers. All addition
     "workflow": true,
     "evaluation": true,
     "agentTeams": true,
-    "layerAware": true,           // v0.2: provider understands layer-scoped sessions
-    "seamChecks": ["schema_match", "openapi_compliance"],  // v0.2: seam check IDs the provider can run
+    "costTelemetry": true,
     "models": ["claude-opus-4-6", "claude-sonnet-4-6"],
     "defaultEvalModel": "claude-opus-4-6"
   }
@@ -92,10 +91,10 @@ v0.2 extends the provider protocol without breaking v0.1 providers. All addition
 
 ```jsonc
 {
-  "workingDirectory": "/abs/path/to/worktree",     // v0.2: worktree path, not project root
-  "layer": "backend",                                // v0.2: layer name
-  "layerPaths": ["src/server/**", "lib/**"],        // v0.2: file globs scoped to this layer
-  "contractPath": ".pice/contracts/backend.toml"   // v0.2: per-layer contract file
+  "workingDirectory": "/abs/path/to/worktree",
+  "layer": "backend",
+  "layerPaths": ["src/server/**", "lib/**"],
+  "contractPath": ".pice/contracts/backend.toml"
 }
 ```
 
@@ -103,22 +102,27 @@ v0.2 extends the provider protocol without breaking v0.1 providers. All addition
 
 ```jsonc
 {
-  "layer": "backend",
   "contract": { /* parsed layer contract */ },
   "diff": "...",
+  "claudeMd": "# Project guidance\n...",
   "seamChecks": [                                   // v0.2: seam check specs for this layer's boundaries
     {
       "id": "schema_match",
       "boundary": "backend↔database",
-      "config": { /* ... */ }
+      "args": { /* ... */ }
     }
-  ]
+  ],
+  "passIndex": 0,
+  "freshContext": true,
+  "effortOverride": "xhigh"
 }
 ```
 
-### New notification: `manifest/event`
+### Daemon notification: `manifest/event`
 
-Providers emit structured events the daemon aggregates into the verification manifest.
+`manifest/event` is emitted by the daemon RPC stream, not by providers. Providers
+still emit provider notifications such as `response/chunk`, `response/complete`,
+`response/tool_use`, `evaluate/result`, and `metrics/event`.
 
 ```jsonc
 {
@@ -134,19 +138,23 @@ Providers emit structured events the daemon aggregates into the verification man
 }
 ```
 
-### New method: `layer/detect` (optional)
+### Layer detection
 
-Provider-contributed layer detection hints. The daemon's core detector calls this if the provider declares it. Used for framework-specific signals that belong to the provider (e.g., Rails-specific Active Record detection).
+Layer detection is daemon/core-owned in v0.2. There is no shipped provider RPC
+method named `layer/detect`.
 
 ### Backwards compatibility
 
-- A provider that does NOT declare `layerAware: true` is driven in "single virtual layer" fallback mode. The daemon sends `session/create` without `layer`/`layerPaths`/`contractPath`. Seam checks are skipped.
-- The daemon synthesizes `manifest/event` from command boundaries when the provider doesn't emit them.
+- A legacy provider can ignore the optional `session/create` layer fields and
+  `evaluate/create` seam/adaptive fields. Unknown-field tolerance is a provider
+  implementation concern; the protocol additions are optional and additive.
+- The daemon owns manifest persistence and emits `manifest/event` on daemon
+  subscriptions.
 - v0.1 providers keep working without modification.
 
 ## Daemon RPC Methods (v0.2)
 
-Daemon RPC is newline-delimited JSON-RPC 2.0 over Unix socket (`~/.pice/daemon.sock`) or named pipe (`\\.\pipe\pice-daemon`). See `.claude/rules/daemon.md` for transport, auth, and lifecycle rules.
+Daemon RPC is newline-delimited JSON-RPC 2.0 over Unix socket (`~/.pice/daemon.sock`) or named pipe (`\\.\pipe\pice-daemon`). See `.codex/rules/daemon.md` for transport, auth, and lifecycle rules.
 
 | Method | Purpose |
 |--------|---------|

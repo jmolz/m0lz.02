@@ -4,7 +4,7 @@
 # it at `.pice/workflow.yaml`, and individual developers may restrict (but
 # never relax) project settings at `~/.pice/workflow.yaml`.
 #
-# Docs: PRDv2.md § Feature 4 and .claude/rules/workflow-yaml.md
+# Docs: PICE Stack Loops and workflow YAML guides.
 
 schema_version: "0.2"
 
@@ -92,7 +92,7 @@ review:
   notification: stdout
 
 # Seam verification — per-boundary static checks. See PRDv2 § Feature 6 and
-# .claude/rules/stack-loops.md. Boundary keys use `A↔B` or `A<->B`.
+# the PICE Stack Loops guide. Boundary keys use `A↔B` or `A<->B`.
 # Example:
 #
 # seams:
@@ -104,7 +104,6 @@ review:
 #   "api↔frontend":
 #     - openapi_compliance
 #
-# Available check IDs (see `pice seam list`): config_mismatch, version_skew,
-# openapi_compliance, auth_handoff, cascade_timeout, retry_storm,
-# service_discovery, health_check, schema_drift, cold_start_order,
-# network_topology, resource_exhaustion.
+# Available check IDs: config_mismatch, version_skew, openapi_compliance,
+# auth_handoff, cascade_timeout, retry_storm, service_discovery, health_check,
+# schema_drift, cold_start_order, network_topology, resource_exhaustion.

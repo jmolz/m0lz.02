@@ -1,0 +1,18 @@
+{
+  "name": "phase8-next-prisma-fixture",
+  "private": true,
+  "scripts": {
+    "build": "next build",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@prisma/client": "latest",
+    "next": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "prisma": "latest",
+    "typescript": "latest"
+  }
+}

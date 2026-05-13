@@ -14,7 +14,7 @@
 //! (default 0.053). `A·B ≈ 1` is the usual Wald boundary choice.
 //!
 //! Reported `confidence` is the posterior-mean estimate `α / (α + β)` capped at
-//! [`CONFIDENCE_CEILING`]. This is deliberately independent of the halt test —
+//! `CONFIDENCE_CEILING`. This is deliberately independent of the halt test —
 //! the log-LR decides WHEN to stop; the posterior mean is what we REPORT.
 //! PRDv2:1113 maps `min_confidence` to `A`, but the reported value is the
 //! posterior mean, not `min_confidence`, because:

@@ -164,7 +164,7 @@ Complements SPRT when the posterior is neither strongly accepted nor rejected. S
 
 ### Cost budget enforcement
 
-- Every pass writes `cost_usd` to `cost_events` (see `.codex/rules/metrics.md`)
+- Every pass writes cost to `pass_events.cost_usd` (see `.codex/rules/metrics.md`)
 - Before spawning pass N+1, the adaptive controller checks if adding the projected cost would exceed `workflow.defaults.budget_usd` (or layer-specific override)
 - If yes, halt with `halted_by: budget` regardless of confidence state
 - The `halted_by` field must be one of: `sprt_confidence_reached` | `sprt_rejected` | `budget` | `max_passes` | `vec_entropy` | `gate_rejected` | `gate_timeout_reject` | `adts_escalation_exhausted`

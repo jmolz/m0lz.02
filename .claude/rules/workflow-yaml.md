@@ -100,7 +100,7 @@ Invalid workflows block evaluation with specific errors — no silent defaults.
 
 - **Every workflow struct MUST carry `#[serde(deny_unknown_fields)]`.** Renamed or removed fields (e.g. the ex-`phases.review` block) must fail parsing, not be silently dropped. `WorkflowConfig`, `Defaults`, `Phases`, `PhaseConfig`, `ExecutePhase`, `RetryConfig`, `EvaluatePhase`, `LayerOverride`, `ReviewConfig` all carry the attribute — any new struct in `pice-core::workflow::schema` must too.
 - **Cross-reference uses `order ∩ defs`, not just `defs`.** Runtime only executes layers that appear in both `layers.order` AND `layers.defs`. `validate_all` must catch BOTH `order`-only and `defs`-only ghost layers — the intersection is the "known layers" set. A layer in only one side is a config bug and must surface as a cross-reference error, not a warning.
-- **`pice validate --json` on failure returns `CommandResponse::ExitJson { code: 1, value }` — never `Exit { message: <stringified json> }`.** See `.claude/rules/daemon.md` → "Structured JSON failure responses" for the rationale. The `evaluate` handler fails closed on the same validation errors at execution time (mirrors `validate_all` against the resolved workflow before spawning Stack Loops).
+- **`pice validate --json` on failure returns `CommandResponse::ExitJson { code: 1, value }` — never `Exit { message: <stringified json> }`.** See `.codex/rules/daemon.md` → "Structured JSON failure responses" for the rationale. The `evaluate` handler fails closed on the same validation errors at execution time (mirrors `validate_all` against the resolved workflow before spawning Stack Loops).
 - **Contract criterion #6 requires integration tests via the real `pice` binary.** `crates/pice-cli/tests/validate_integration.rs` exercises the adapter stack with `assert_cmd` + `PICE_DAEMON_INLINE=1`. Unit tests in the daemon handler are necessary but not sufficient — CLI-layer routing (stdout vs stderr, exit code propagation, JSON shape) must be covered end-to-end.
 
 ## Adaptive Evaluation — the ~96.6% ceiling
@@ -164,7 +164,7 @@ Complements SPRT when the posterior is neither strongly accepted nor rejected. S
 
 ### Cost budget enforcement
 
-- Every pass writes `cost_usd` to `cost_events` (see `.claude/rules/metrics.md`)
+- Every pass writes cost to `pass_events.cost_usd` (see `.codex/rules/metrics.md`)
 - Before spawning pass N+1, the adaptive controller checks if adding the projected cost would exceed `workflow.defaults.budget_usd` (or layer-specific override)
 - If yes, halt with `halted_by: budget` regardless of confidence state
 - The `halted_by` field must be one of: `sprt_confidence_reached` | `sprt_rejected` | `budget` | `max_passes` | `vec_entropy` | `gate_rejected` | `gate_timeout_reject` | `adts_escalation_exhausted`
@@ -226,7 +226,7 @@ Uses Unicode box drawing characters (same style as existing evaluation reports i
 
 ### Audit trail (mandatory)
 
-Every gate decision writes a row to `gate_decisions` SQLite table. See `.claude/rules/metrics.md` for schema. Fields: `feature_id`, `layer`, `trigger_expression`, `decision`, `reviewer`, `reason`, `requested_at`, `decided_at`, `elapsed_seconds`. Decisions are INSERTs (never UPDATEs) — a changed decision creates a new row.
+Every gate decision writes a row to `gate_decisions` SQLite table. See `.codex/rules/metrics.md` for schema. Fields: `feature_id`, `layer`, `trigger_expression`, `decision`, `reviewer`, `reason`, `requested_at`, `decided_at`, `elapsed_seconds`. Decisions are INSERTs (never UPDATEs) — a changed decision creates a new row.
 
 ### Trigger expression reuse
 

@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Immutable env snapshot passed to a background feature's orchestrator
-/// closure. Built at dispatch time from [`DaemonContext`] — never mutated,
+/// closure. Built at dispatch time from the daemon's `DaemonContext` — never mutated,
 /// always `Arc`-shared across the spawned future's lifetime.
 ///
 /// `BTreeMap` (not `HashMap`) for `contracts` so iteration order is

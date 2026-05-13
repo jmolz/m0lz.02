@@ -1,0 +1,3 @@
+alerts:
+  - name: db-pool-exhausted
+    expr: postgres_pool_available == 0

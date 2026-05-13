@@ -1,0 +1,2 @@
+service: phase8-rails
+image: example/phase8-rails

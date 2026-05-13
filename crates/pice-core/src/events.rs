@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 /// - Last line before exit: `terminal` — exit code signalling stream close.
 ///
 /// Callers that want a homogeneous stream can filter on `kind == "event"`.
-/// See `.claude/rules/daemon.md` → "Streaming and JSON mode" for the
+/// See `.codex/rules/daemon.md` → "Streaming and JSON mode" for the
 /// channel-ownership rule (stdout for frames, stderr for prompts).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]

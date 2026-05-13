@@ -67,7 +67,7 @@ impl NotificationKind {
 }
 
 /// Pluggable fallback writer. Production uses [`StderrFallbackWriter`] which
-/// calls `eprintln!`; tests inject [`CapturingFallbackWriter`] to assert the
+/// calls `eprintln!`; tests inject `CapturingFallbackWriter` to assert the
 /// exact bytes written without needing to redirect the process's stderr fd.
 pub trait FallbackWriter: Send + Sync {
     fn write_line(&self, line: &str);
@@ -107,7 +107,7 @@ impl FallbackWriter for CapturingFallbackWriter {
 /// ~1 tokio tick, well inside the window.
 ///
 /// `dispatcher` is the pluggable notification backend. Production uses
-/// [`NotifyRustDispatcher`]; tests use [`RecordingDispatcher`].
+/// [`NotifyRustDispatcher`]; tests use `RecordingDispatcher`.
 pub fn notify(
     state: &NotificationState,
     cfg: &NotificationsConfig,
@@ -131,7 +131,7 @@ pub fn notify(
 
 /// Internal variant of [`notify`] with a pluggable fallback writer. Called
 /// by the public `notify` with the production [`StderrFallbackWriter`]; tests
-/// call this directly with a [`CapturingFallbackWriter`] to assert content.
+/// call this directly with a `CapturingFallbackWriter` to assert content.
 #[allow(clippy::too_many_arguments)]
 pub fn notify_with_fallback(
     state: &NotificationState,
@@ -203,7 +203,7 @@ impl NotificationState {
 }
 
 /// Abstraction over the notification backend. Production wires
-/// [`NotifyRustDispatcher`]; tests inject [`RecordingDispatcher`] or a
+/// [`NotifyRustDispatcher`]; tests inject `RecordingDispatcher` or a
 /// `FailingDispatcher` to assert the terminal fallback.
 pub trait Dispatcher: Send + Sync {
     /// Show a notification. Errors flow through `notify`'s tracing +

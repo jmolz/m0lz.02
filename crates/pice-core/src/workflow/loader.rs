@@ -1,7 +1,7 @@
 //! Workflow file loading — embedded defaults, project file, user file, resolve().
 //!
 //! Resolution order: framework → project → user. Each level is merged into the
-//! previous via [`merge::merge_with_floor`]. Schema version `"0.2"` is checked
+//! previous via [`crate::workflow::merge::merge_with_floor`]. Schema version `"0.2"` is checked
 //! on every loaded config before any merge happens — a mismatch is a hard error.
 
 use anyhow::{anyhow, Context, Result};

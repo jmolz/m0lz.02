@@ -1,0 +1,3 @@
+alerts:
+  - name: mongo-latency
+    expr: mongo_query_latency_seconds > 1

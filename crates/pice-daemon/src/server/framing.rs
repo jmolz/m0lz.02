@@ -2,8 +2,8 @@
 //!
 //! Provides [`JsonLineFramed`], a full-duplex framed connection that speaks
 //! the daemon RPC wire format over any `tokio::io::AsyncRead` +
-//! `tokio::io::AsyncWrite` pair. Both [`super::unix`] (Unix domain socket,
-//! T15) and [`super::windows`] (named pipe, T16) wrap this type; the framing
+//! `tokio::io::AsyncWrite` pair. Both `server::unix` (Unix domain socket,
+//! T15) and `server::windows` (named pipe, T16) wrap this type; the framing
 //! logic itself has no knowledge of the underlying transport.
 //!
 //! ## Why a separate module

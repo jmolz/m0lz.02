@@ -1,5 +1,6 @@
 //! Phase 7 Task 18: `SubscribedGateSource` — reviewer input for
-//! `pice status --follow` when a [`ManifestEvent::GateRequested`] arrives.
+//! `pice status --follow` when a
+//! [`pice_core::events::ManifestEvent::GateRequested`] arrives.
 //!
 //! This is a **concrete struct, not a trait**. Phase 6 initially shipped
 //! a `DecisionSource` trait with 3 impls; the Pass-3 review removed it

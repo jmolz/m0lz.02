@@ -1,155 +1,122 @@
 <p align="center">
-  <img src="branch-mark.svg" width="48" height="48" alt="m0lz.02 branch mark — pice variant">
+  <img src="branch-mark.svg" width="48" height="48" alt="m0lz.02 branch mark for the PICE CLI">
 </p>
 
 <h1 align="center">m0lz.02</h1>
 
 <p align="center">
-  Structured AI coding workflow orchestrator<br>
-  Plan → Implement → Contract-Evaluate with dual-model adversarial evaluation<br>
-  <a href="https://m0lz.dev/writing/pice-framework">m0lz.dev/writing/pice-framework</a>
+  PICE CLI: a Rust daemon and CLI adapter for structured AI coding workflows.
 </p>
-
----
-
-
-Structured AI coding workflow orchestrator -- Plan, Implement, Contract-Evaluate.
 
 [![CI](https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml/badge.svg)](https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml)
-[![Tests: 418](https://img.shields.io/badge/tests-418_passing-brightgreen)](https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-<p align="center">
-  <img src="docs/images/pice-evaluate-demo.gif" alt="m0lz.02 running a Tier 2 dual-model adversarial evaluation showing contract criteria scores and adversarial review" width="700">
-</p>
+## What It Does
 
-## What is m0lz.02?
+m0lz.02 implements PICE: Plan, Implement, Contract-Evaluate. The v0.7.0 release line adds Stack Loops, which split a feature across technology layers, evaluate each layer against its own contract, run seam checks at integration boundaries, and keep background evaluations observable through status, logs, review gates, and audit data.
 
-m0lz.02 implements the PICE methodology — a structured approach to AI coding that breaks work into three formal phases: **Plan** (research, design, and contract negotiation), **Implement** (code generation from a plan), and **Contract-Evaluate** (adversarial grading of the implementation against the contract). The CLI orchestrates this lifecycle -- it manages the state, the prompts, and the measurement while an AI assistant does the actual coding.
+The shipped architecture is a CLI adapter plus a headless `pice-daemon`. The CLI handles arguments and terminal rendering. The daemon owns orchestration, background jobs, provider sessions, manifests, metrics, templates, and audit state. AI providers run out of process over the provider JSON-RPC protocol.
 
-The key differentiator is **dual-model adversarial evaluation**. Instead of asking the same AI that wrote the code to judge it, m0lz.02 runs parallel evaluations from independent models -- Claude grades contract criteria while GPT-5.5 challenges the approach as an adversary. This eliminates the single-model blind spots that plague self-review workflows.
-
-m0lz.02 is the outer loop. It spawns AI providers over a JSON-RPC protocol, feeds them scoped context, captures structured output, and stores quality metrics locally in SQLite. The AI does the coding; m0lz.02 makes sure it is doing it well.
-
-## Installation
-
-### npm (recommended)
+## Install
 
 ```bash
 npm install -g @jacobmolz/pice
 ```
 
-### Cargo
+The npm package installs a platform package containing both `pice` and `pice-daemon`. The wrapper resolves both binaries and passes the daemon path to the CLI so background mode does not require a manual `PATH` edit.
+
+From source:
 
 ```bash
 cargo install pice-cli
 ```
 
-### GitHub Releases
-
-Download a prebuilt binary for your platform from [GitHub Releases](https://github.com/jacobmolz/pice/releases), extract it, and place it on your `PATH`.
+Prebuilt archives are published from GitHub Releases when a tag is approved.
 
 ## Quick Start
 
 ```bash
-# Scaffold PICE framework files in your project
 pice init
-
-# Orient on the codebase and get recommended next actions
-pice prime
-
-# Research, plan, and generate a contract for a feature
-pice plan "add user auth"
-
-# Implement the plan in a fresh AI session
-pice execute .claude/plans/auth-plan.md
-
-# Run dual-model adversarial evaluation against the contract
-pice evaluate .claude/plans/auth-plan.md
-
-# Code review with regression checks
-pice review
-
-# Create a standardized git commit
-pice commit
+pice init --upgrade
+pice layers detect --json
+pice layers check --json
+pice validate --json
+pice plan "add account settings"
+pice execute <plan.md>
+pice evaluate <plan.md> --background --wait --timeout-secs 120
+pice status <feature-id> --json
+pice logs <feature-id> --json
+pice review-gate --list --feature-id <feature-id> --json
 ```
 
-## Example
+`pice init` scaffolds public workflow files under `.claude/` and project config under `.pice/`. This repo also uses `.codex/` for maintainer-local command and planning context; that namespace is not what fresh user projects receive from `pice init`.
 
-Here's what a Tier 2 dual-model evaluation looks like after implementing a user authentication feature:
+## Stack Loops
 
-```
-$ pice evaluate .claude/plans/auth-plan.md
+Stack Loops turn one feature into layer-specific loops:
 
-╔══════════════════════════════════════╗
-║   Evaluation Report — Tier 2         ║
-╠══════════════════════════════════════╣
-║ ✅ Auth endpoints return 401     8/7 ║
-║   All protected routes verified      ║
-║ ✅ Password hashing uses bcrypt  9/7 ║
-║   bcrypt with cost factor 12         ║
-║ ✅ Session tokens expire in 24h  8/8 ║
-║   24h expiry confirmed in tests      ║
-║ ✅ No secrets in git history     7/7 ║
-║   Clean scan across all commits      ║
-╠══════════════════════════════════════╣
-║  Adversarial Review                  ║
-║  [consider] Rate limiting on logi... ║
-║  [consider] Token rotation strate... ║
-╠══════════════════════════════════════╣
-║  Overall: PASS ✅                    ║
-║  All contract criteria met           ║
-╚══════════════════════════════════════╝
-```
+1. Detect layers from source, infrastructure, database, deployment, and observability files.
+2. Cascade dependencies so upstream changes activate downstream checks.
+3. Always run infrastructure, deployment, and observability layers unless the project explicitly overrides that policy.
+4. Evaluate independent DAG cohorts concurrently when `phases.evaluate.parallel` is enabled.
+5. Halt adaptively when confidence, budget, gate, cancellation, or max-pass rules decide the result.
+6. Persist the manifest to `~/.pice/state/{project-hash}/{feature-id}.manifest.json`.
 
-Claude grades each contract criterion with a numeric score against a threshold. GPT-5.5 independently challenges the approach as an adversary — surfacing blind spots neither model would catch alone.
+See [the Stack Loops guide](docs/guides/stack-loops.md) and [the v0.1 to v0.2 migration guide](docs/guides/migration-v01-to-v02.md).
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `pice init` | Scaffold `.claude/` and `.pice/` directories with framework files |
-| `pice prime` | Orient on the codebase and get recommended next actions |
-| `pice plan <description>` | Research, plan, and generate a contract for a feature or change |
-| `pice execute <plan>` | Implement from a plan file in a fresh AI session |
-| `pice evaluate <plan>` | Run adversarial evaluation against a plan's contract |
-| `pice review` | Code review and regression suite |
-| `pice commit` | Create a standardized git commit |
-| `pice handoff` | Capture session state for the next session or agent |
-| `pice status` | Display active plans and workflow state |
-| `pice metrics` | Aggregate and display quality metrics |
-| `pice benchmark` | Before/after workflow effectiveness comparison |
-| `pice completions <shell>` | Generate shell completions (bash, zsh, fish, powershell) |
+| Command | Purpose |
+| --- | --- |
+| `pice init` | Scaffold `.claude/` and `.pice/` files |
+| `pice prime` | Orient on the current project |
+| `pice plan <description>` | Create a plan and contract |
+| `pice execute <plan>` | Implement from a plan in a fresh provider session |
+| `pice evaluate <plan>` | Evaluate a plan contract, including background mode |
+| `pice review` | Run code review and regression checks |
+| `pice commit` | Create a standardized commit |
+| `pice handoff` | Capture session state |
+| `pice status [feature-id]` | Inspect manifests; `--follow --stream-json` tails live updates |
+| `pice logs <feature-id>` | Inspect captured provider logs; `--follow --stream-json` tails live chunks |
+| `pice metrics` | Aggregate local quality metrics |
+| `pice benchmark` | Compare workflow effectiveness |
+| `pice layers detect/list/check/graph` | Manage layer configuration |
+| `pice validate` | Validate `.pice/` workflow, layer, and contract config |
+| `pice daemon start/status/stop/restart/logs` | Manage the headless daemon |
+| `pice audit` | Export gate and audit data |
+| `pice review-gate` | List or decide pending human review gates |
+| `pice completions <shell>` | Generate shell completions |
 
-All commands support `--json` for machine-readable output.
+Every command that returns structured data supports `--json`; follow modes use newline-delimited `--stream-json` frames.
 
 ## Architecture
 
-m0lz.02 uses a **provider architecture** that separates the Rust core from AI provider implementations:
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg">
-  <img alt="m0lz.02 architecture: Rust binary with core engine, metrics engine, template engine, and provider host communicating via JSON-RPC over stdio with TypeScript providers (Claude Code, Codex, community)" src="docs/images/architecture-light.svg" width="800">
+  <img alt="m0lz.02 architecture showing CLI adapter, daemon, metrics, templates, provider host, and external providers connected by JSON-RPC" src="docs/images/architecture-light.svg" width="800">
 </picture>
 
-The Rust core handles argument parsing, state management, configuration, metrics, and process orchestration. AI providers are separate TypeScript processes that communicate over JSON-RPC on stdio. This design allows community-built providers for any AI coding tool without modifying the core binary.
+There are two JSON-RPC boundaries:
 
-For provider development, see [`docs/providers/`](docs/providers/).
+- CLI to daemon: socket transport for commands, background jobs, subscriptions, and daemon lifecycle.
+- Daemon to provider: stdio transport for workflow and evaluation providers.
 
-## Dual-Model Adversarial Evaluation
+Provider failures are allowed to degrade evaluation, but they must not crash the CLI. Provider stdout is reserved for JSON-RPC; provider logs go to stderr.
 
-Evaluation scales with the significance of the change:
+## Evaluation
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/evaluation-tiers-dark.svg">
-  <img alt="Evaluation tiers: Tier 1 uses single Claude Opus evaluator for minor changes; Tier 2 adds parallel GPT-5.5 adversarial review for new features; Tier 3 uses a Claude Opus agent team of 4 plus high-effort GPT-5.5 review for architectural changes" src="docs/images/evaluation-tiers-light.svg" width="800">
+  <img alt="Evaluation tiers showing single-model contract grading, dual-model adversarial review, and higher-tier agent-team review" src="docs/images/evaluation-tiers-light.svg" width="800">
 </picture>
 
-Evaluators are **context-isolated** -- they see only the contract JSON, the git diff, and the project's `CLAUDE.md`. They never see the implementation conversation or planning rationale.
+Evaluators are context-isolated. A layer evaluator sees its layer contract, filtered diff, and project guidance text carried on the compatibility `claudeMd` wire field. It does not receive implementation chat, plan rationale, sibling layer contracts, or unrelated findings.
+
+Tier 2 runs primary contract grading plus adversarial review. Tier 3 adds agent-team evaluation. Adaptive evaluation respects the correlated-evaluator confidence ceiling documented in [convergence analysis](docs/research/convergence-analysis.md).
 
 ## Configuration
 
-m0lz.02 stores project configuration in `.pice/config.toml`, created by `pice init`:
+Project config lives in `.pice/config.toml`; Stack Loops behavior lives in `.pice/workflow.yaml` and `.pice/layers.toml`.
 
 ```toml
 [provider]
@@ -162,7 +129,7 @@ model = "claude-opus-4-6"
 [evaluation.adversarial]
 provider = "codex"
 model = "gpt-5.5"
-effort = "high"
+effort = "xhigh"
 enabled = true
 
 [telemetry]
@@ -172,103 +139,57 @@ enabled = false
 db_path = ".pice/metrics.db"
 ```
 
-Key settings:
-- **`provider.name`** -- The AI provider for workflow commands (plan, execute, review, commit).
-- **`evaluation.primary`** -- Model for contract grading.
-- **`evaluation.adversarial`** -- Model for adversarial review. Set `enabled = false` to use single-model evaluation only.
-- **`telemetry.enabled`** -- Opt-in anonymous telemetry (see below).
+Required environment variables depend on the providers you enable:
 
-### Environment Variables
+| Variable | Used by |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | Claude provider workflow and evaluation sessions |
+| `OPENAI_API_KEY` | Codex adversarial evaluation |
 
-| Variable | Required for |
-|----------|-------------|
-| `ANTHROPIC_API_KEY` | Claude Code provider (workflow + evaluation) |
-| `OPENAI_API_KEY` | Codex provider (adversarial evaluation) |
+## Metrics And Telemetry
 
-## Shell Completions
+Metrics are local SQLite data in `.pice/metrics.db`. v0.7.0 records evaluation rows, pass events with cost fields, seam findings, layer runs, and gate decisions. The release inventory script writes fresh schema evidence to `docs/releases/metrics-schema-evidence.json`; the Phase 8 reference harness writes runtime row-count evidence to `docs/releases/phase8-reference-evidence.json`.
 
-Generate completions for your shell and add them to your profile:
+Telemetry is opt-in and disabled by default. Public telemetry claims are limited to aggregate workflow events; local metrics can include project-specific identifiers, but outbound telemetry must not send code, prompts, file paths, secrets, or PII.
 
-**Bash:**
+## Release Evidence
+
+Release evidence for v0.7.0 is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
+
+Current branch evidence from May 12, 2026:
+
+| Check | Result |
+| --- | --- |
+| Rust tests | `cargo test --workspace --all-targets`: 1237 passed |
+| Rust doc tests | `cargo test --workspace --doc`: 1 ignored documentation example |
+| Rust docs | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`: passed |
+| TypeScript tests | `pnpm test`: 97 passed |
+| Rust lint/format | `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings` |
+| TypeScript lint/typecheck/build | `pnpm lint`; `pnpm typecheck`; `pnpm build` |
+| Release build | `cargo build --release` |
+| Speedup gate | `parallel_cohort_speedup_assertion`: ratio `0.566`, target `<= 0.625` |
+| Criterion benchmark | Sequential `[586.49 ms, 593.39 ms]`; parallel `[347.03 ms, 350.09 ms]` |
+
+Environment: local macOS arm64 development host in the Phase 8 worktree on May
+12, 2026. The speedup assertion is the release gate; the Criterion numbers are
+informational benchmark output from the same validation pass.
+
+The Phase 8 acceptance suite is:
+
 ```bash
-pice completions bash > ~/.local/share/bash-completion/completions/pice
+node scripts/acceptance/metrics-schema-inventory.mjs
+node scripts/acceptance/phase8-reference-projects.mjs
+tar -czf /private/tmp/pice-release-smoke-local.tar.gz -C target/release pice pice-daemon
+PICE_ARTIFACT_ARCHIVE=/private/tmp/pice-release-smoke-local.tar.gz PICE_NPM_PACK_SMOKE=1 node scripts/acceptance/release-artifact-smoke.mjs
+node scripts/acceptance/readme-media-audit.mjs
 ```
 
-**Zsh:**
-```bash
-pice completions zsh > ~/.zfunc/_pice
-# Ensure ~/.zfunc is in your fpath before compinit
-```
+## Provider Development
 
-**Fish:**
-```bash
-pice completions fish > ~/.config/fish/completions/pice.fish
-```
+Providers declare `workflow`, `evaluation`, and optional telemetry capabilities during `initialize`. Protocol changes must update both Rust and TypeScript types and add roundtrip tests on both sides.
 
-## Telemetry
-
-Telemetry is **opt-in** and **off by default**. When enabled, m0lz.02 collects anonymous usage metrics (command frequency, evaluation pass rates, workflow timing) to improve the tool. No code, prompts, or personally identifiable information is collected.
-
-Telemetry data is fully inspectable in `.pice/telemetry-log.jsonl` before any data leaves your machine. To enable:
-
-```toml
-# .pice/config.toml
-[telemetry]
-enabled = true
-```
-
-## FAQ
-
-### Why not just use aider/cursor/copilot?
-
-m0lz.02 is the orchestration layer, not a replacement for your AI coding tool. It works *with* tools like Claude Code, Cursor, or Copilot through a provider protocol — managing the lifecycle, enforcing contracts, and measuring quality while your preferred tool does the coding. Think of it as the CI/CD for AI coding sessions.
-
-### Why Rust + TypeScript?
-
-Rust for the CLI core — it's fast, compiles to a single binary, and handles process orchestration well. TypeScript for providers — AI SDKs (Anthropic, OpenAI) are JavaScript-first, and the provider protocol lets each side use its natural language. The two communicate over JSON-RPC on stdio.
-
-### Is the telemetry sketchy?
-
-No. Telemetry is opt-in and off by default. When enabled, it collects anonymous usage metrics (command frequency, evaluation pass rates, timing) — never code, prompts, or personal information. All telemetry data is written to `.pice/telemetry-log.jsonl` where you can inspect every event before anything leaves your machine.
-
-### Does this actually improve code quality?
-
-That's what the metrics engine is designed to answer. m0lz.02 tracks evaluation scores, pass rates, and workflow timing across your sessions so you can see whether structured workflows produce measurably better results than ad-hoc AI coding. Data over vibes.
-
-## Roadmap
-
-m0lz.02 v0.1 ships the core loop. The [roadmap](docs/roadmap.md) covers what's next — grounded in empirical research and mathematical foundations:
-
-- **v0.2 — Stack Loops** — per-layer PICE loops across the technology stack with seam verification at every boundary. [Why: software breaks at integration points, not inside components.](docs/roadmap.md#the-seam-problem)
-- **v0.3 — Arch Experts** — dynamically generated specialist agents inferred from your project's architecture files.
-- **v0.4 — Implicit Contract Inference** — automated cross-component assumption asymmetry detection from code and traffic.
-- **v0.5 — Self-Evolving Verification** — a closed-loop system where every execution makes the next one smarter, more targeted, and cheaper.
-
-Supporting research: [seam blindspot analysis](docs/research/seam-blindspot.md), [convergence analysis](docs/research/convergence-analysis.md), [originality analysis](docs/research/originality-analysis.md), and more in [`docs/research/`](docs/research/).
-
-For term definitions, see the [glossary](docs/glossary.md).
+Read [building a provider](docs/providers/building-a-provider.md) and [the provider protocol](docs/providers/protocol.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and contribution guidelines.
-
-### Development
-
-```bash
-# Rust
-cargo build
-cargo test
-cargo clippy -- -D warnings
-cargo fmt --check
-
-# TypeScript
-pnpm install
-pnpm build
-pnpm test
-pnpm lint
-pnpm typecheck
-```
-
-## License
-
-MIT -- see [LICENSE](LICENSE) for details.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Full validation includes Rust format, clippy, tests, TypeScript lint/typecheck/tests/build, release build, Phase 8 acceptance harnesses, and artifact smoke.

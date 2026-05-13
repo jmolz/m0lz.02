@@ -1,0 +1,3 @@
+alerts:
+  - name: supabase-auth-errors
+    expr: supabase_auth_errors_total > 0

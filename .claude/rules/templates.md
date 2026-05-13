@@ -8,18 +8,21 @@ paths:
 
 ## Ownership
 
-- `templates/claude/` — files scaffolded by `pice init` into `.claude/`
+- `templates/claude/` — files scaffolded by `pice init` into `.claude/`.
+  The directory name remains `.claude` for public compatibility; this repo's
+  root `.codex/` tree is maintainer-local Codex context, not the product
+  scaffold namespace.
 - `templates/pice/` — files scaffolded by `pice init` into `.pice/`
 - `crates/pice-daemon/src/templates/mod.rs` — `rust-embed` embedding + extraction logic
 - The **daemon** owns template extraction (init handler). The CLI delegates via adapter.
 
 ## Template Drift (CRITICAL)
 
-`templates/claude/` and the root `.claude/` can drift when methodology improvements (threshold changes, worktree awareness, workflow updates) are made to the root `.claude/` commands without syncing back to `templates/`.
+`templates/claude/` and the root `.codex/` can drift when methodology improvements (threshold changes, worktree awareness, workflow updates) are made to the root `.codex/` commands without syncing back to `templates/`.
 
-**Rule: when you update a file in `.claude/commands/` or `.claude/templates/`, check if the same file exists in `templates/claude/` and sync the change.**
+**Rule: when you update a file in `.codex/commands/` or `.codex/templates/`, check if the same file exists in `templates/claude/` and sync the change.**
 
-**Carve-out for project-materialized commands:** `.claude/commands/review.md` is a self-customizing command — its regression-suite table, source-file inventory, and baseline test counts are materialized to the PICE project (e.g., 811 Rust + 78 TS, specific Phase 4 daemon test files). Those project-specific blocks MUST NOT be synced into `templates/claude/commands/review.md`, which ships to new projects with placeholder text (`{test-runner}`, `{test-file-1}`, `{lint-command}`, etc.). When updating `review.md`, classify the change first:
+**Carve-out for project-materialized commands:** `.codex/commands/review.md` is a self-customizing command — its regression-suite table, source-file inventory, and baseline test counts are materialized to the PICE project (e.g., 811 Rust + 78 TS, specific Phase 4 daemon test files). Those project-specific blocks MUST NOT be synced into `templates/claude/commands/review.md`, which ships to new projects with placeholder text (`{test-runner}`, `{test-file-1}`, `{lint-command}`, etc.). When updating `review.md`, classify the change first:
 
 - **Methodology change** (new phase added, output format changed, contract-evaluation flow updated, new validation rule) → sync to template (preserving placeholders).
 - **Project state change** (new test file added to the regression suite, baseline count bumped, new source file inventoried) → root only.
@@ -30,18 +33,18 @@ Files that must stay in sync:
 
 | Root | Template |
 |------|----------|
-| `.claude/commands/evaluate.md` | `templates/claude/commands/evaluate.md` |
-| `.claude/commands/execute.md` | `templates/claude/commands/execute.md` |
-| `.claude/commands/plan-feature.md` | `templates/claude/commands/plan-feature.md` |
-| `.claude/commands/commit-and-deploy.md` | `templates/claude/commands/commit-and-deploy.md` |
-| `.claude/commands/empty-redeploy.md` | `templates/claude/commands/empty-redeploy.md` |
-| `.claude/commands/review.md` | `templates/claude/commands/review.md` |
-| `.claude/commands/handoff.md` | `templates/claude/commands/handoff.md` |
-| `.claude/commands/prime.md` | `templates/claude/commands/prime.md` |
-| `.claude/templates/plan-template.md` | `templates/claude/templates/plan-template.md` |
+| `.codex/commands/evaluate.md` | `templates/claude/commands/evaluate.md` |
+| `.codex/commands/execute.md` | `templates/claude/commands/execute.md` |
+| `.codex/commands/plan-feature.md` | `templates/claude/commands/plan-feature.md` |
+| `.codex/commands/commit-and-deploy.md` | `templates/claude/commands/commit-and-deploy.md` |
+| `.codex/commands/empty-redeploy.md` | `templates/claude/commands/empty-redeploy.md` |
+| `.codex/commands/review.md` | `templates/claude/commands/review.md` |
+| `.codex/commands/handoff.md` | `templates/claude/commands/handoff.md` |
+| `.codex/commands/prime.md` | `templates/claude/commands/prime.md` |
+| `.codex/templates/plan-template.md` | `templates/claude/templates/plan-template.md` |
 
-Files that exist only in root (project-specific, not scaffolded):
-- `.claude/PRD.md`, `.claude/rules/*.md`, `.claude/docs/*.md`, `.claude/plans/*.md`, `.claude/settings.local.json`, `.claude/skills/`
+Files that exist only in root (project-specific maintainer context, not scaffolded):
+- `.codex/PRD.md`, `.codex/rules/*.md`, `.codex/docs/*.md`, `.codex/plans/*.md`, `.codex/settings.local.json`, `.codex/skills/`
 
 ## Contract Templates (v0.2+)
 
@@ -65,6 +68,8 @@ Files that exist only in root (project-specific, not scaffolded):
 
 ## Per-Crate .claude/ Artifacts
 
-Running `pice init` inside a crate subdirectory (e.g., during testing) creates a `.claude/` directory there. These are test artifacts, not tracked code:
+Running `pice init` inside a crate subdirectory (e.g., during testing) creates
+a `.claude/` directory there because the public scaffold namespace is `.claude`.
+These are test artifacts, not tracked code:
 - `crates/*/.claude/` is gitignored
 - If you see per-crate `.claude/` directories, delete them — they are stale copies of the templates

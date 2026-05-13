@@ -8,7 +8,10 @@ paths:
 
 ## Ownership
 
-- `templates/claude/` — files scaffolded by `pice init` into `.codex/`
+- `templates/claude/` — files scaffolded by `pice init` into `.claude/`.
+  The directory name remains `.claude` for public compatibility; this repo's
+  root `.codex/` tree is maintainer-local Codex context, not the product
+  scaffold namespace.
 - `templates/pice/` — files scaffolded by `pice init` into `.pice/`
 - `crates/pice-daemon/src/templates/mod.rs` — `rust-embed` embedding + extraction logic
 - The **daemon** owns template extraction (init handler). The CLI delegates via adapter.
@@ -40,7 +43,7 @@ Files that must stay in sync:
 | `.codex/commands/prime.md` | `templates/claude/commands/prime.md` |
 | `.codex/templates/plan-template.md` | `templates/claude/templates/plan-template.md` |
 
-Files that exist only in root (project-specific, not scaffolded):
+Files that exist only in root (project-specific maintainer context, not scaffolded):
 - `.codex/PRD.md`, `.codex/rules/*.md`, `.codex/docs/*.md`, `.codex/plans/*.md`, `.codex/settings.local.json`, `.codex/skills/`
 
 ## Contract Templates (v0.2+)
@@ -63,8 +66,10 @@ Files that exist only in root (project-specific, not scaffolded):
 - The `rust-embed` derive is in `pice-daemon/src/templates/mod.rs`.
 - Existing tests verify template files are embedded and extractable. They check file existence, not content.
 
-## Per-Crate .codex/ Artifacts
+## Per-Crate .claude/ Artifacts
 
-Running `pice init` inside a crate subdirectory (e.g., during testing) creates a `.codex/` directory there. These are test artifacts, not tracked code:
-- `crates/*/.codex/` is gitignored
-- If you see per-crate `.codex/` directories, delete them — they are stale copies of the templates
+Running `pice init` inside a crate subdirectory (e.g., during testing) creates
+a `.claude/` directory there because the public scaffold namespace is `.claude`.
+These are test artifacts, not tracked code:
+- `crates/*/.claude/` is gitignored
+- If you see per-crate `.claude/` directories, delete them — they are stale copies of the templates

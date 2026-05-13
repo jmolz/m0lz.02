@@ -141,7 +141,7 @@ impl DaemonClient {
 
     /// Send a `daemon/health` RPC and return the raw result JSON.
     ///
-    /// Unlike [`health_check`], which only asserts liveness, this returns the
+    /// Unlike [`Self::health_check`], which only asserts liveness, this returns the
     /// response body so callers can extract `version`, `uptime_seconds`, etc.
     /// Used by `pice daemon status` (T24).
     pub async fn health_query(&mut self) -> Result<serde_json::Value> {
@@ -383,14 +383,16 @@ mod tests {
         let tp = token_path.clone();
         let handle = tokio::spawn(pice_daemon::lifecycle::run_with_paths(sp, tp));
 
-        // Wait for the socket to appear.
-        for _ in 0..100 {
-            if sock_path.exists() {
+        // Wait for the socket + token to appear. Debug daemon startup can
+        // exceed one second under parallel cargo test load.
+        for _ in 0..500 {
+            if sock_path.exists() && token_path.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(sock_path.exists(), "socket should exist after startup");
+        assert!(token_path.exists(), "token should exist after startup");
 
         // Connect and health-check.
         let mut client = DaemonClient::connect(&socket_path, &token_path)
@@ -490,13 +492,14 @@ mod tests {
         let tp = token_path.clone();
         let handle = tokio::spawn(pice_daemon::lifecycle::run_with_paths(sp, tp));
 
-        for _ in 0..100 {
-            if sock_path.exists() {
+        for _ in 0..500 {
+            if sock_path.exists() && token_path.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(sock_path.exists(), "daemon socket should be up");
+        assert!(token_path.exists(), "daemon token should be up");
 
         // Open the subscribe stream on a fresh connection.
         let client = DaemonClient::connect(&socket_path, &token_path)
@@ -574,12 +577,14 @@ mod tests {
         let tp = token_path.clone();
         let handle = tokio::spawn(pice_daemon::lifecycle::run_with_paths(sp, tp));
 
-        for _ in 0..100 {
-            if sock_path.exists() {
+        for _ in 0..500 {
+            if sock_path.exists() && token_path.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        assert!(sock_path.exists(), "daemon socket should be up");
+        assert!(token_path.exists(), "daemon token should be up");
 
         let client = DaemonClient::connect(&socket_path, &token_path)
             .await

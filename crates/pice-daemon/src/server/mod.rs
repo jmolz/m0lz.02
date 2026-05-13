@@ -10,7 +10,7 @@
 //! compiles on a given target. Both depend on the platform-neutral
 //! `framing` module for newline-delimited JSON-RPC framing. The router
 //! ([`router::route`]) is transport-agnostic — it operates on deserialized
-//! [`DaemonRequest`] values, not raw bytes.
+//! [`pice_core::protocol::DaemonRequest`] values, not raw bytes.
 
 pub mod auth;
 pub mod connection;

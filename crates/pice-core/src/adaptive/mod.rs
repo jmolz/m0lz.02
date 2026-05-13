@@ -29,7 +29,7 @@
 //! | [`types`]  | Sub-configs, `HaltReason`, `HaltDecision`, `AdaptiveError`, `EscalationEvent` |
 //! | [`sprt`]   | Bayesian Sequential Probability Ratio Test (default algorithm) |
 //! | [`adts`]   | Adversarial Divergence-Triggered Scaling (three-level escalation) |
-//! | [`vec`]    | Verification Entropy Convergence (Beta posterior entropy stop) |
+//! | [`mod@vec`] | Verification Entropy Convergence (Beta posterior entropy stop) |
 //! | [`cost`]   | Jacobson/Karels cost projector (`mean + 4·MAD`) |
 //! | [`decide`] | Halt-decision dispatcher (universal guardrails + algo routing) |
 

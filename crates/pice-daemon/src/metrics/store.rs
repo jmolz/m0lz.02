@@ -141,6 +141,53 @@ pub fn insert_seam_finding(
     Ok(db.conn().last_insert_rowid())
 }
 
+/// A single layer-run summary row. Mirrors the `layer_runs` table schema from
+/// the v5 migration.
+#[derive(Debug, Clone)]
+pub struct LayerRunRow<'a> {
+    pub feature_id: &'a str,
+    pub layer: &'a str,
+    pub status: &'a str,
+    pub contract_tier: u8,
+    pub passes: u32,
+    pub final_confidence: Option<f64>,
+    pub total_cost_usd: Option<f64>,
+    pub halted_by: Option<&'a str>,
+    pub started_at: &'a str,
+    pub completed_at: Option<&'a str>,
+}
+
+/// Insert a per-layer summary attached to an evaluation where available.
+/// The manifest remains authoritative for live state; this row is the local
+/// SQLite audit/metrics projection.
+pub fn insert_layer_run(
+    db: &MetricsDb,
+    evaluation_id: Option<i64>,
+    row: &LayerRunRow<'_>,
+) -> Result<i64> {
+    db.conn()
+        .execute(
+            "INSERT INTO layer_runs (evaluation_id, feature_id, layer, status, contract_tier, \
+             passes, final_confidence, total_cost_usd, halted_by, started_at, completed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                evaluation_id,
+                row.feature_id,
+                row.layer,
+                row.status,
+                row.contract_tier,
+                row.passes,
+                row.final_confidence,
+                row.total_cost_usd,
+                row.halted_by,
+                row.started_at,
+                row.completed_at,
+            ],
+        )
+        .context("failed to insert layer run")?;
+    Ok(db.conn().last_insert_rowid())
+}
+
 /// Insert an evaluation header with placeholder values for fields that are
 /// only known after the adaptive loop completes. Returns the new row id so
 /// the caller can attach `pass_events`, `seam_findings`, and (later)
@@ -698,6 +745,34 @@ mod tests {
         let db = test_db();
         let pending = get_pending_telemetry(&db, 10).unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn layer_run_insert_roundtrip() {
+        let db = test_db();
+        let row = LayerRunRow {
+            feature_id: "feat",
+            layer: "backend",
+            status: "passed",
+            contract_tier: 2,
+            passes: 3,
+            final_confidence: Some(0.95),
+            total_cost_usd: Some(0.12),
+            halted_by: Some("sprt_confidence_reached"),
+            started_at: "2026-05-12T00:00:00Z",
+            completed_at: Some("2026-05-12T00:00:01Z"),
+        };
+
+        let id = insert_layer_run(&db, None, &row).unwrap();
+        let found: (String, String, String, u32) = db
+            .conn()
+            .query_row(
+                "SELECT feature_id, layer, status, passes FROM layer_runs WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(found, ("feat".into(), "backend".into(), "passed".into(), 3));
     }
 
     // ─── Phase 4 pass_events & adaptive summary tests ─────────────────

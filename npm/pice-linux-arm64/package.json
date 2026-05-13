@@ -1,10 +1,10 @@
 {
   "name": "@pice/pice-linux-arm64",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "PICE CLI binary for Linux ARM64",
   "os": ["linux"],
   "cpu": ["arm64"],
-  "files": ["pice"],
+  "files": ["pice", "pice-daemon"],
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/jacobmolz/pice" },
   "preferUnplugged": true

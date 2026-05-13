@@ -3,7 +3,7 @@
 //! Phase 6's reconciler (`orchestrator::gate_reconciler`) and the
 //! `ReviewGate::Decide` handler both need to ask "has this gate
 //! expired?". Production uses [`SystemClock`] (wraps `chrono::Utc::now`
-//! and `tokio::time::sleep`). Tests use [`MockClock`] to advance time
+//! and `tokio::time::sleep`). Tests use `MockClock` to advance time
 //! deterministically under `tokio::test(start_paused = true)`.
 //!
 //! ## Why is this in `pice-daemon` and not `pice-core`?

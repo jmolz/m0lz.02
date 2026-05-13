@@ -114,6 +114,19 @@ The evaluator uses these as evidence when scoring, not as the sole determinant.
 
 ## Writing Good Criteria
 
+## Layer Contracts In Stack Loops
+
+v0.2 keeps the same JSON contract shape, but the daemon can bind contracts to
+layers. Layer contracts should test the responsibilities of that layer rather
+than repeat a broad feature checklist. For example, an infrastructure layer
+contract should name environment variables, secrets, network boundaries, and
+resource limits; a deployment contract should name rollout, rollback, and health
+check evidence.
+
+Layer contracts are evaluated with filtered diffs. A database evaluator should
+not receive unrelated frontend changes, and a frontend evaluator should not
+receive sibling layer findings.
+
 ### Be Specific
 
 Bad: "Code quality is acceptable"
@@ -134,7 +147,7 @@ A good contract covers multiple aspects of the implementation:
 - **Correctness**: Tests pass, expected behavior verified
 - **Quality**: Lint clean, type safe, no warnings
 - **Completeness**: All planned files exist, all endpoints implemented
-- **Conventions**: Follows project patterns documented in CLAUDE.md
+- **Conventions**: Follows project patterns documented in project guidance
 
 ### Match Thresholds to Importance
 

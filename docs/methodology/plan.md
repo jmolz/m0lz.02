@@ -16,7 +16,7 @@ rationale instead of following the plan itself.
 ## What Makes a Good Plan
 
 A good plan is self-contained. A developer (or AI) reading only the plan file, the
-project's CLAUDE.md, and the codebase should have everything needed to implement the
+project's project guidance, and the codebase should have everything needed to implement the
 feature correctly. The plan should include:
 
 ### Research
@@ -113,7 +113,7 @@ algorithm. Rate limits are defined per-endpoint in the configuration file.
 4. Wire rate limit middleware into the server middleware chain
 5. Add unit tests for token bucket logic
 6. Add integration test for rate-limited endpoint
-7. Update CLAUDE.md with rate limiting documentation
+7. Update project guidance with rate limiting documentation
 
 ## Contract
 

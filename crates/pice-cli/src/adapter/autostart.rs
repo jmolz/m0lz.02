@@ -13,7 +13,7 @@
 //! 4. Poll the socket every 10ms for up to 2000ms
 //! 5. Return the connection, or error with "daemon failed to start within 2s"
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -69,7 +69,7 @@ pub async fn ensure_daemon_running_with_paths(
         tokio::time::sleep(POLL_INTERVAL).await;
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "daemon failed to start within {}s — check `pice-daemon` is installed and in PATH",
+                "daemon failed to start within {}s — check PICE_DAEMON_BIN or `pice-daemon` on PATH",
                 STARTUP_TIMEOUT.as_secs()
             );
         }
@@ -98,7 +98,7 @@ async fn try_connect_and_health(
 ///
 /// `pub(crate)` because `commands::daemon::cmd_start` also uses this.
 pub(crate) fn spawn_daemon() -> Result<()> {
-    std::process::Command::new("pice-daemon")
+    std::process::Command::new(daemon_binary_path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -107,10 +107,55 @@ pub(crate) fn spawn_daemon() -> Result<()> {
     Ok(())
 }
 
+fn daemon_binary_path() -> PathBuf {
+    std::env::var_os("PICE_DAEMON_BIN")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("pice-daemon"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn daemon_binary_path_uses_env_override() {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous = std::env::var_os("PICE_DAEMON_BIN");
+        let override_path = if cfg!(windows) {
+            r"C:\tools\pice-daemon.exe"
+        } else {
+            "/tmp/pice-daemon"
+        };
+
+        std::env::set_var("PICE_DAEMON_BIN", override_path);
+        assert_eq!(daemon_binary_path(), PathBuf::from(override_path));
+
+        match previous {
+            Some(value) => std::env::set_var("PICE_DAEMON_BIN", value),
+            None => std::env::remove_var("PICE_DAEMON_BIN"),
+        }
+    }
+
+    #[test]
+    fn daemon_binary_path_falls_back_to_path_lookup() {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous = std::env::var_os("PICE_DAEMON_BIN");
+        std::env::remove_var("PICE_DAEMON_BIN");
+        assert_eq!(daemon_binary_path(), PathBuf::from("pice-daemon"));
+
+        match previous {
+            Some(value) => std::env::set_var("PICE_DAEMON_BIN", value),
+            None => std::env::remove_var("PICE_DAEMON_BIN"),
+        }
+    }
 
     /// Test the "daemon already running" fast path: start a daemon in a
     /// background task, then call `ensure_daemon_running_with_paths`.
@@ -127,9 +172,10 @@ mod tests {
         let tp = token_path.clone();
         let handle = tokio::spawn(pice_daemon::lifecycle::run_with_paths(sp, tp));
 
-        // Wait for socket.
-        for _ in 0..100 {
-            if sock_path.exists() {
+        // Wait for socket + token; debug builds can take more than one
+        // second on loaded CI workers.
+        for _ in 0..500 {
+            if sock_path.exists() && token_path.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

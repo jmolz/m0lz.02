@@ -216,8 +216,8 @@ fn status_follow_short_circuits_terminal_snapshot_within_500ms() {
         serde_json::from_str::<StreamJsonFrame>(stdout.lines().last().unwrap()).unwrap(),
         StreamJsonFrame::Terminal {
             exit_code: 0,
-            status: None
-        }
+            status: Some(ref status)
+        } if status == "passed"
     ));
 }
 

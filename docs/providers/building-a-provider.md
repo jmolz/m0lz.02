@@ -6,7 +6,7 @@ This guide walks through building a community provider for the PICE CLI. A provi
 
 ## What Providers Do
 
-The PICE CLI core (Rust) handles argument parsing, state management, config, metrics, and templates. It does not call AI SDKs directly. Instead, it spawns provider processes and communicates via JSON-RPC 2.0 on stdio.
+`pice-daemon` handles state management, background jobs, config, metrics, templates, and provider lifecycle. It does not call AI SDKs directly. Instead, it spawns provider processes and communicates via JSON-RPC 2.0 on stdio. The `pice` CLI talks to the daemon over a separate socket protocol.
 
 A provider is a standalone process that:
 
@@ -188,7 +188,8 @@ Key points:
 
 Set `evaluation: true` in capabilities and implement `evaluate/create` and `evaluate/score`.
 
-Evaluation sessions are context-isolated. They receive only: contract JSON, git diff, and CLAUDE.md. Never include implementation conversation.
+Evaluation sessions are context-isolated. They receive only contract JSON, filtered git diff, and project guidance text. Never include implementation conversation.
+The `claudeMd` wire field is retained for v0.1 compatibility. v0.7.0 callers may populate it with generated `CLAUDE.md` contents or equivalent project guidance; providers should treat it as opaque guidance text.
 
 ```typescript
 import type { EvaluateCreateParams, EvaluateScoreParams, CriterionScore } from '@pice/provider-protocol';
@@ -369,7 +370,14 @@ The core resolves provider names to `pice-provider-{name}` binaries in the `pack
 |------------|---------------|---------------------|
 | `workflow` | SDK supports interactive coding sessions | `session/create`, `session/send`, `session/destroy` |
 | `evaluation` | SDK can grade code against criteria | `evaluate/create`, `evaluate/score` |
+| `costTelemetry` | Provider can report real per-pass cost | `evaluate/create` result `costUsd` |
 | `agentTeams` | SDK supports multi-agent orchestration | Required for Tier 3 evaluation |
+
+v0.2 Stack Loops add optional `layer`, `layerPaths`, and `contractPath` fields
+to `session/create`, plus `seamChecks` and adaptive pass fields to
+`evaluate/create`. Providers that do not use these fields should ignore them;
+the daemon owns manifests, seam execution fallback, review gates, and
+`manifest/event` subscriptions.
 
 A provider can support workflow only, evaluation only, or both.
 
@@ -385,7 +393,7 @@ A provider can support workflow only, evaluation only, or both.
 - [ ] `response/chunk` notifications stream during `session/send`
 - [ ] `response/complete` sent before `session/send` returns
 - [ ] `evaluate/result` sent before `evaluate/score` returns
-- [ ] Evaluation sessions are context-isolated (contract + diff + CLAUDE.md only)
+- [ ] Evaluation sessions are context-isolated (contract + filtered diff + project guidance only)
 - [ ] Entry point starts provider with `provider.start()`
 - [ ] Tests cover happy path, edge cases, and error cases
 - [ ] No live API calls in default test suite

@@ -1,0 +1,16 @@
+{
+  "name": "phase8-express-mongo-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "latest",
+    "mongodb": "latest"
+  },
+  "devDependencies": {
+    "typescript": "latest"
+  }
+}

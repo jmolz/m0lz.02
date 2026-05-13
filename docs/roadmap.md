@@ -1,12 +1,12 @@
 # PICE Roadmap
 
-This document outlines the vision for PICE beyond v0.1. The core loop — Plan → Implement → Contract-Evaluate — is stable and shipping. What follows is where it's going, grounded in empirical research and mathematical foundations.
+This document outlines the PICE roadmap. The core Plan -> Implement -> Contract-Evaluate loop is stable, and the v0.7.0 release line packages the v0.2 Stack Loops work for public release.
 
 Feedback welcome in [Discussions](https://github.com/jmolz/pice-framework/discussions).
 
 -----
 
-## v0.1 — Current Release ✅
+## v0.1 — Baseline Release
 
 Structured AI coding workflow orchestrator with dual-model adversarial evaluation.
 
@@ -16,7 +16,14 @@ Structured AI coding workflow orchestrator with dual-model adversarial evaluatio
 - Provider architecture (Rust core + TypeScript providers over JSON-RPC)
 - SQLite metrics engine for quality tracking
 - Template scaffolding for new and existing projects
-- 217 tests passing
+
+-----
+
+## v0.2 / v0.7.0 — Stack Loops Release Line
+
+v0.7.0 is the release vehicle for v0.2 Stack Loops: the daemon split, layer detection, dependency cascade, always-run layers, seam checks, adaptive evaluation, review gates, background evaluation, status/log streaming, audit tables, and cross-platform artifact smoke.
+
+The release evidence lives in `docs/releases/v0.7.0.md`. Quantitative benchmark and test-count claims are not repeated here; they must come from the current branch validation run.
 
 -----
 
@@ -62,7 +69,7 @@ PICE v0.2+ targets this gap. Every other AI coding tool optimizes for generating
 
 -----
 
-## v0.2 — Stack Loops *(novel concept, coined in PICE)*
+## Stack Loops *(novel concept, coined in PICE)*
 
 **The problem:** AI-assisted development consistently produces ~80% of a feature. The code works in isolation, but deployment configuration, environment variables, infrastructure updates, monitoring, and production readiness get skipped. The contract says "does the feature work?" but never asks "is it actually shipped?"
 
@@ -369,7 +376,7 @@ Research shows developers context-switch away from CI after 6–7 minutes (Honey
 
 **Four strategies keep total time under 10 minutes:**
 
-**1. Path-based filtering (biggest impact).** Only verify layers whose files changed. A CSS-only change skips backend, database, API, and infrastructure layers — verifying only frontend + always-run layers (deployment, observability). Implemented via `pice affected` which computes the changed layer set from the git diff.
+**1. Path-based filtering (biggest impact).** Only verify layers whose files changed. A CSS-only change skips backend, database, and API layers while still evaluating frontend plus always-run layers such as deployment and observability. The shipped command surface exposes this through `pice layers detect`, `pice layers check`, and the evaluation manifest.
 
 **2. Parallel layer execution.** Independent layers (backend and frontend have no dependency edge) run their PICE loops concurrently. The dependency graph in `.pice/layers.toml` determines which layers can parallelize. Claude Code subagents support `run_in_background: true` for concurrent execution.
 
@@ -498,16 +505,13 @@ Low-confidence findings are marked as such — presenting uncertain findings as 
 # Plan generates sections for each relevant layer
 pice plan "add user auth"
 
-# Execute and evaluate run per layer
-pice execute .claude/plans/auth-plan.md
-pice evaluate .claude/plans/auth-plan.md
+# Execute and evaluate against the approved plan
+pice execute <plan.md>
+pice evaluate <plan.md> --background --wait
 
-# Target a specific layer
-pice execute .claude/plans/auth-plan.md --layer infrastructure
-pice evaluate .claude/plans/auth-plan.md --layer deployment
-
-# Seam verification across all layer boundaries
-pice seams .claude/plans/auth-plan.md
+# Inspect layer progress and captured logs
+pice status <feature-id> --json
+pice logs <feature-id> --json
 
 # Status shows layer-level progress including seam checks
 pice status

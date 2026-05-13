@@ -297,7 +297,7 @@ impl LogStoreSink {
 
     /// Wait for all spawned `append_chunk` tasks to land in the store.
     ///
-    /// `send_chunk` is synchronous because it implements [`StreamSink`], but
+    /// `send_chunk` is synchronous because it implements [`crate::orchestrator::StreamSink`], but
     /// `LogStore::append_chunk` is async. Background handlers call `flush`
     /// after provider shutdown and before writing the terminal frame so the
     /// terminal frame cannot overtake buffered provider output.

@@ -1,0 +1,7 @@
+services:
+  api:
+    build: .
+    depends_on:
+      - mongo
+  mongo:
+    image: mongo:7

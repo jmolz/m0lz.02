@@ -172,17 +172,20 @@ pub enum ManifestStatus {
     /// the feature cannot advance until a reviewer actions the gate(s).
     /// Serializes as `"pending-review"`.
     PendingReview,
-    /// Phase 7: dispatched via `pice {evaluate,execute} --background` but
-    /// the spawned orchestrator task has not yet acquired the global
-    /// provider permit to transition to `InProgress`. Only observed on
-    /// disk; the orchestrator's FIRST action after acquiring the permit
-    /// is `Queued → InProgress` + `ManifestEvent::LayerStarted` emission.
+    /// Phase 7: freshly dispatched via `pice {evaluate,execute}
+    /// --background` but the spawned orchestrator task has not yet acquired
+    /// the global provider permit to transition to `InProgress`. Only
+    /// observed on disk for new, blank manifests; resume dispatches with
+    /// existing layers/gates use `Pending` so startup reconciliation cannot
+    /// delete approved review state.
     ///
-    /// Startup reconciliation DELETES `Queued` manifests (a `Queued`
-    /// manifest represents a dispatch that never produced work; rewriting
-    /// it to `Failed` would falsely imply the feature ran). `InProgress`
-    /// manifests are instead rewritten as `Failed` + `halted_by =
-    /// failed-interrupted`. Serializes as `"queued"`.
+    /// Startup reconciliation DELETES blank `Queued` manifests (a blank
+    /// `Queued` manifest represents a dispatch that never produced work;
+    /// rewriting it to `Failed` would falsely imply the feature ran).
+    /// `Queued` manifests that already contain layers/gates are defensively
+    /// preserved as `Pending`. `InProgress` manifests are rewritten as
+    /// `Failed` + `halted_by = failed-interrupted`. Serializes as
+    /// `"queued"`.
     Queued,
 }
 

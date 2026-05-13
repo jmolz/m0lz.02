@@ -1,0 +1,3 @@
+groups:
+  - name: sveltekit-supabase
+    rules: []

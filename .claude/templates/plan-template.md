@@ -157,8 +157,8 @@ Execute in order, top to bottom. Each task is atomic.
 | Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 high) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 1    | 1 pass           | —                                | Bug fixes, simple endpoints, UI tweaks |
-| 2    | 1 pass           | 1 `/codex:adversarial-review`    | New features, integrations, schema changes |
-| 3    | Claude agent team | 1 `/codex:adversarial-review --effort xhigh` | Architectural changes, new pipeline phases |
+| 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | New features, integrations, schema changes |
+| 3    | Claude agent team | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | Architectural changes, new pipeline phases |
 
 ### Success Criteria
 
@@ -189,28 +189,6 @@ Execute in order, top to bottom. Each task is atomic.
 - **Thresholds: minimum 8, maximum 10.** Use 8 for standard functionality and UX criteria, 9 for correctness and regression-safety criteria, 10 for security, data integrity, secret handling, and multi-tenancy concerns. A threshold below 8 is never allowed — if it feels like a 7, the criterion is too vague to test or does not belong in the contract.
 - `pass_threshold` on the top-level contract object must also be at least 8.
 - Include at least one negative criterion (e.g., "Returns 403 when accessing another org's data")
-
----
-
-## Adversarial Review
-
-> Populated during `/plan-feature` Phase 5.5. Findings from fresh Claude sub-agent + Codex GPT-5.5 (Tier 2+) or self-critique (Tier 1) against the Karpathy four principles + PoetiQ cross-model verification. Critical findings are resolved or explicitly Acknowledged before the contract is drafted.
-
-**Tier**: {1 | 2 | 3}
-**Reviewers**: {"self-critique" | "Claude sub-agent + Codex GPT-5.5"}
-**Refinement cycles**: {N}
-
-### Critical (resolved before proceeding)
-
-1. {dimension}: {specific weakness} — section: {heading} — resolution: {revised text | Acknowledged with reasoning}
-
-### Consider (flagged, not acted on)
-
-1. {dimension}: {specific weakness} — section: {heading}
-
-### Reasoning divergence (alternative paths not taken)
-
-1. {alternative approach} — why not: {reasoning}
 
 ---
 

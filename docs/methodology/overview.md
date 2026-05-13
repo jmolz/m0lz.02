@@ -17,6 +17,12 @@ the four phases every change passes through:
 Each phase feeds the next. The plan produces the contract. The contract governs
 implementation. The evaluation grades against the contract. Nothing is implicit.
 
+v0.2 Stack Loops apply the same lifecycle per layer. A feature can activate
+database, API, frontend, infrastructure, deployment, and observability loops, and
+the feature passes only when the activated layer contracts and seam checks pass.
+The daemon persists that state so background evaluation can be inspected with
+`pice status`, `pice logs`, and `pice review-gate`.
+
 ## Why Structured AI Coding Matters
 
 Unstructured AI coding -- sometimes called "vibing" -- works like this: open a chat,
@@ -50,7 +56,7 @@ See [Plan Phase](plan.md) for details.
 
 ### Implement
 
-A fresh AI session receives the plan file, the project's CLAUDE.md, and access to the
+A fresh AI session receives the plan file, the project's project guidance, and access to the
 codebase. It does not receive the planning conversation. This context isolation is
 deliberate -- implementation should follow the plan, not the reasoning that produced it.
 
@@ -73,7 +79,7 @@ See [Contract Format](contract.md) for details.
 ### Evaluate
 
 Evaluation runs one or more AI models against the implementation. The evaluators see
-only three things: the contract JSON, the git diff, and the project's CLAUDE.md. They
+only three things: the contract JSON, the git diff, and the project's project guidance. They
 never see the planning conversation or implementation session.
 
 PICE uses dual-model adversarial evaluation as a key differentiator. Claude grades each
@@ -107,12 +113,12 @@ degrades gracefully to single-model mode with a warning.
 
 PICE uses the WISC framework to manage AI context windows effectively:
 
-- **Write** -- Capture key context in persistent files (plans, contracts, CLAUDE.md)
+- **Write** -- Capture key context in persistent files (plans, contracts, project guidance)
   rather than relying on conversation history.
 - **Isolate** -- Each phase runs in its own session. Planning context does not leak
   into implementation. Implementation context does not leak into evaluation.
 - **Select** -- Give each session only the context it needs. Evaluators get the
-  contract, diff, and CLAUDE.md -- nothing else.
+  contract, diff, and project guidance -- nothing else.
 - **Compress** -- Handoff files capture session state in a compact form that the next
   session can consume without replaying the full conversation.
 

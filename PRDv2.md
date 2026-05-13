@@ -2130,7 +2130,7 @@ regression_safety_threshold = 0.99
 
 ### Phase 8: Polish, Documentation, Release
 
-**Goal:** Ship v0.2.0.
+**Goal:** Ship the v0.2 Stack Loops release line as `v0.7.0`.
 
 - [ ] Migration guide (`docs/guides/migration-v01-to-v02.md`)
 - [ ] Stack Loops adoption guide (`docs/guides/stack-loops.md`)
@@ -2140,7 +2140,7 @@ regression_safety_threshold = 0.99
 - [ ] CI passes full acceptance suite on macOS arm64/x64, Linux arm64/x64, Windows x64
 - [ ] Release notes with breaking changes called out (architectural pivot, new config surface)
 - [ ] Telemetry schema extended for v0.2 metrics (cost tracking, adaptive halt reasons, gate decisions)
-- [ ] v0.2.0 tag + release
+- [ ] v0.7.0 tag + release
 
 **Validation:** Full PICE loop from `pice init --upgrade` through parallel Stack Loops execution to background-actioned gates completes on all platforms.
 

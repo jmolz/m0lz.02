@@ -3,8 +3,8 @@
 //! This is the SECOND JSON-RPC 2.0 protocol in the repository. Do NOT conflate
 //! it with `pice-protocol`, which is the provider protocol (daemon ↔ provider
 //! over stdio). This module defines `pice-cli ↔ pice-daemon` RPC (over Unix
-//! socket / Windows named pipe), see `.claude/rules/protocol.md` ("Two separate
-//! protocols") and `.claude/rules/daemon.md` for the architectural separation.
+//! socket / Windows named pipe), see `.codex/rules/protocol.md` ("Two separate
+//! protocols") and `.codex/rules/daemon.md` for the architectural separation.
 //!
 //! ## Authentication
 //!

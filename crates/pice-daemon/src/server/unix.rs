@@ -2,7 +2,7 @@
 //!
 //! Implements newline-delimited JSON-RPC 2.0 framing over `tokio::net::UnixStream`.
 //! This is the macOS/Linux side of T15; the Windows named pipe equivalent will
-//! live in [`super::windows`] (T16, `#[cfg(windows)]`).
+//! live in `server::windows` (T16, `#[cfg(windows)]`).
 //!
 //! ## Stale-socket handling
 //!

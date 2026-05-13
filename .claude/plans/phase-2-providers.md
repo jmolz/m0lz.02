@@ -1614,8 +1614,8 @@ cargo run -- evaluate .claude/plans/health-check.md  # Should run dual-model
 | Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 1    | 1 pass           | —                                | Bug fixes, simple endpoints, UI tweaks |
-| 2    | 1 pass           | 1 `/codex:adversarial-review`    | New features, integrations, schema changes |
-| 3    | Claude agent team | 1 `/codex:adversarial-review --effort xhigh` | Architectural changes, new pipeline phases |
+| 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh`    | New features, integrations, schema changes |
+| 3    | Claude agent team | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | Architectural changes, new pipeline phases |
 
 ### Success Criteria
 

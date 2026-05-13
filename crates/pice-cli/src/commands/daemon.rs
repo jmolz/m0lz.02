@@ -43,7 +43,7 @@ pub enum DaemonAction {
 }
 
 /// Maximum time to wait for a freshly-spawned daemon during `start`.
-const START_TIMEOUT: Duration = Duration::from_secs(5);
+const START_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Polling interval during `start` wait.
 const START_POLL: Duration = Duration::from_millis(50);
@@ -259,14 +259,16 @@ mod tests {
         let tp = token_path.clone();
         let handle = tokio::spawn(pice_daemon::lifecycle::run_with_paths(sp, tp));
 
-        // Wait for socket.
-        for _ in 0..100 {
-            if sock_path.exists() {
+        // Wait for socket + token. Debug daemon startup can exceed one
+        // second under parallel cargo test load.
+        for _ in 0..500 {
+            if sock_path.exists() && token_path.exists() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(sock_path.exists(), "socket should appear");
+        assert!(token_path.exists(), "token should appear");
 
         // Status should succeed and report version info via health_query.
         cmd_status(&socket_path, &token_path)

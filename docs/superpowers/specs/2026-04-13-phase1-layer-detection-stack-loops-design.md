@@ -231,7 +231,7 @@ If none of those files exist but multiple independent `package.json`/`Cargo.toml
      a. Filter git diff to files matching this layer's paths globs
      b. Load layer contract (.pice/contracts/{layer}.toml, or plan contract as fallback)
      c. Build context-isolated prompt: layer contract + filtered diff + CLAUDE.md ONLY
-     d. Create provider session with layer metadata
+     d. Create provider session with optional `session/create` layer fields
      e. Run evaluation pass(es) via existing session lifecycle (run_session / run_session_and_capture)
      f. Record per-layer results to verification manifest
      // Phase 3: seam checks here

@@ -13,7 +13,7 @@ paths:
 - Use `rusqlite` with WAL mode for concurrent read access
 - Schema versioning via a `schema_version` table — check and migrate on startup
 - Tables (v0.1): `evaluations`, `criteria_scores`, `loop_events`, `telemetry_queue`
-- Tables (v0.2+): `gate_decisions`, `cost_events`, `seam_findings`, `layer_runs`
+- Tables (v0.2+): `gate_decisions`, `pass_events` with `cost_usd`, `seam_findings`, `layer_runs`
 - Tables (v0.5+): `check_outcomes`, `model_predictions` (for predictive check selection)
 - All timestamps are UTC ISO 8601 (RFC 3339)
 - Multi-table inserts (e.g., evaluation + criteria_scores) must use `BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK` to prevent orphaned rows
@@ -29,7 +29,7 @@ Metrics are collected automatically by every orchestration command. No user acti
 
 ## Non-Fatal Recording Pattern
 
-Workflow commands (evaluate, plan, execute, commit) must NEVER fail due to metrics errors. Use this pattern:
+Workflow commands (plan, execute, commit) must NEVER fail due to best-effort loop-event metrics errors. `pice evaluate` is different once provider scoring has started: pass-sink persistence failures are operationally fail-closed as `metrics_persist_failed:` / `Pending` / exit code 1 so users do not mistake untrusted metrics for a passed contract. Use this best-effort pattern only for non-load-bearing loop-event writes:
 
 ```rust
 if let Ok(Some(db)) = metrics::open_metrics_db(&project_root) {
@@ -123,27 +123,30 @@ These sharpen the audit-trail semantics after the Phase 6 eval cycle exposed two
 
 ## v0.2+ Cost Tracking
 
-Every provider pass writes a row to `cost_events`:
+Every provider pass writes a row to `pass_events`. Cost is recorded on
+`pass_events.cost_usd`; there is no separate `cost_events` table in v0.7.0.
 
 ```sql
-CREATE TABLE cost_events (
-    id INTEGER PRIMARY KEY,
-    feature_id TEXT NOT NULL,
-    layer TEXT,                   -- NULL for feature-level events
-    pass_index INTEGER,           -- NULL for non-evaluation events
-    provider TEXT NOT NULL,       -- "claude-code" | "codex" | ...
-    model TEXT NOT NULL,
-    cost_usd REAL NOT NULL,
-    tokens_input INTEGER,
-    tokens_output INTEGER,
+CREATE TABLE pass_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evaluation_id INTEGER NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,
+    pass_index INTEGER NOT NULL,
+    model TEXT NOT NULL,          -- "stub-echo" | "claude-opus-4-6" | ...
+    score REAL,
+    cost_usd REAL,
     timestamp TEXT NOT NULL
 );
 ```
 
-- Cost is attributed to the layer and pass that incurred it.
-- `pice metrics cost [--by-day|--by-feature|--by-layer]` reports aggregated spend.
-- Budget enforcement reads from this table in real time — if adding the next projected pass would exceed `workflow.defaults.budget_usd`, the adaptive controller halts with `halted_by: budget`.
-- The non-fatal recording pattern applies here too: a cost_events write failure must NOT abort the evaluation. Log at `warn` and continue.
+- Cost is attributed to the evaluation pass that incurred it through
+  `evaluation_id` and `pass_index`; per-layer rollups live in `layer_runs`.
+- Aggregators read per-pass cost from `pass_events.cost_usd` and layer totals
+  from `layer_runs.total_cost_usd`.
+- Budget enforcement uses the adaptive controller's in-memory observed/projected
+  pass costs during a run and persists the resulting pass rows.
+- `pass_events` writes are load-bearing after provider scoring starts. A
+  write failure must fail closed as `metrics_persist_failed:` with
+  `LayerStatus::Pending` and exit code 1; do not log-and-continue here.
 
 ## v0.2+ Layer Runs and Seam Findings
 
@@ -151,14 +154,16 @@ CREATE TABLE cost_events (
 
 ```sql
 CREATE TABLE layer_runs (
-    id INTEGER PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evaluation_id INTEGER REFERENCES evaluations(id) ON DELETE SET NULL,
     feature_id TEXT NOT NULL,
     layer TEXT NOT NULL,
-    status TEXT NOT NULL,          -- running | passed | failed | skipped | pending_review
+    status TEXT NOT NULL CHECK(status IN
+        ('pending','in-progress','passed','failed','skipped','pending-review')),
     contract_tier INTEGER NOT NULL,
-    passes INTEGER NOT NULL,
+    passes INTEGER NOT NULL CHECK(passes >= 0),
     final_confidence REAL,
-    total_cost_usd REAL NOT NULL,
+    total_cost_usd REAL,
     halted_by TEXT,                -- sprt_confidence_reached | sprt_rejected | budget | max_passes | vec_entropy | gate_rejected
     started_at TEXT NOT NULL,
     completed_at TEXT
@@ -169,14 +174,15 @@ CREATE TABLE layer_runs (
 
 ```sql
 CREATE TABLE seam_findings (
-    id INTEGER PRIMARY KEY,
-    feature_id TEXT NOT NULL,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evaluation_id INTEGER NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,
+    layer TEXT NOT NULL,
     boundary TEXT NOT NULL,         -- "backend↔database", "api↔frontend", ...
     check_id TEXT NOT NULL,         -- "schema_match", "openapi_compliance", ...
-    severity TEXT NOT NULL,         -- pass | warn | fail
-    category INTEGER NOT NULL,      -- 1–12 from the 12 seam failure categories
+    category INTEGER NOT NULL CHECK(category BETWEEN 1 AND 12),
+    status TEXT NOT NULL CHECK(status IN ('passed','warning','failed')),
     details TEXT,
-    timestamp TEXT NOT NULL
+    created_at TEXT NOT NULL
 );
 ```
 

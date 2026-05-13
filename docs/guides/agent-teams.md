@@ -36,11 +36,11 @@ Use for Tier 3 contracts -- architectural changes. Spawns separate evaluators th
 Spawn four teammates:
 
 1. **Contract evaluator** -- formal scoring against criteria
-2. **Convention auditor** -- check CLAUDE.md and rules compliance
+2. **Convention auditor** -- check project guidance and rules compliance
 3. **Regression hunter** -- run full test suite, check callers of changed files
 4. **Edge case breaker** -- find ways to break the feature with malformed inputs, missing auth, boundary values
 
-Rules: evaluators work independently, read only contract + diff + CLAUDE.md, and share findings at the end.
+Rules: evaluators work independently, read only contract + diff + project guidance, and share findings at the end.
 
 ## Code Review
 

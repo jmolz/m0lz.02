@@ -1,6 +1,6 @@
 # PICE Provider Protocol Specification
 
-This document specifies the JSON-RPC 2.0 protocol between the PICE CLI core (Rust) and provider processes (TypeScript). The protocol runs over stdio -- the core writes JSON-RPC messages to the provider's stdin and reads from the provider's stdout.
+This document specifies the JSON-RPC 2.0 protocol between `pice-daemon` and provider processes. It is separate from the daemon RPC used by the `pice` CLI adapter. The provider protocol runs over stdio: the daemon writes JSON-RPC messages to the provider's stdin and reads responses from provider stdout.
 
 ---
 
@@ -75,6 +75,7 @@ Initialize the provider and declare capabilities. Always the first message sent.
 | `agentTeams` | `boolean` | Supports agent team evaluation (Tier 3) |
 | `models` | `string[]` | Supported model identifiers |
 | `defaultEvalModel` | `string?` | Default model for evaluation |
+| `costTelemetry` | `boolean?` | Provider emits trustworthy `costUsd` values from `evaluate/create` |
 
 ```json
 // Request
@@ -108,6 +109,9 @@ Create a new AI session.
 | `workingDirectory` | `string` | Yes | Absolute path to the project directory |
 | `model` | `string` | No | Model override |
 | `systemPrompt` | `string` | No | System prompt override |
+| `layer` | `string` | No | v0.2 layer name for context-isolated Stack Loops sessions |
+| `layerPaths` | `string[]` | No | Glob patterns for files that belong to this layer |
+| `contractPath` | `string` | No | Path to the layer contract file |
 
 **Result:** `{ sessionId: string }`
 
@@ -155,13 +159,13 @@ Destroy a session and release resources.
 
 ### `evaluate/create`
 
-Create an evaluation session. Evaluation sessions are context-isolated -- they receive only the contract, diff, and CLAUDE.md, never implementation conversation.
+Create an evaluation session. Evaluation sessions are context-isolated: they receive only the contract, filtered diff, and project guidance. The wire field is still named `claudeMd` for v0.1 compatibility; v0.7.0 callers populate it with project guidance text such as generated `CLAUDE.md` contents.
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `contract` | `object` | Yes | Contract JSON from the plan file |
 | `diff` | `string` | Yes | Git diff of changes to evaluate |
-| `claudeMd` | `string` | Yes | Project CLAUDE.md contents |
+| `claudeMd` | `string` | Yes | Project guidance contents; field name retained for compatibility |
 | `model` | `string` | No | Model override |
 | `effort` | `string` | No | Effort level (e.g., `"high"`, `"xhigh"`) |
 | `seamChecks` | `SeamCheckSpec[]` | No | Seam checks to run for this layer's boundaries (v0.2+) |
@@ -170,22 +174,24 @@ Create an evaluation session. Evaluation sessions are context-isolated -- they r
 | `effortOverride` | `string` | No | Per-pass effort override (e.g. `"xhigh"` for ADTS Level 2, v0.4+). Takes precedence over `effort` when both are set. |
 
 Each `SeamCheckSpec` is `{ id: string, boundary?: string, args?: object }`.
-Providers that don't declare `seamChecks` capability should ignore this
-field; the daemon runs seam checks in-process using its built-in registry
-when the provider omits support. See [Seam Verification](../methodology/evaluate.md#seam-verification-v02)
+Providers that do not support seam checks should ignore this field. The daemon runs seam checks in-process using its built-in registry when the provider omits support. See [Seam Verification](../methodology/evaluate.md#seam-verification-v02)
 and [Authoring Seam Checks](../guides/authoring-seam-checks.md).
 
 **Result:** `{ sessionId: string, costUsd?: number, confidence?: number }`
 
-Cost and confidence (v0.4+) are optional self-reports from the provider.
-The daemon uses `costUsd` for budget enforcement and `confidence` for
-adaptive halting. Providers without cost telemetry should omit these
-fields — the daemon falls back to its own posterior estimate.
+Cost and confidence are optional provider self-reports. The daemon uses `costUsd` for budget enforcement only when the provider declares `costTelemetry: true`; otherwise a positive layer budget fails closed before evaluation. Confidence is advisory and the daemon still applies its adaptive halt policy.
 
 ```json
 {"jsonrpc":"2.0","id":4,"method":"evaluate/create","params":{"contract":{"criteria":[{"name":"Tests pass","threshold":7},{"name":"No unwrap in lib","threshold":8}]},"diff":"+fn new_feature() -> Result<()> {\n+    Ok(())\n+}","claudeMd":"# Rules\n- Never unwrap in lib code"}}
 {"jsonrpc":"2.0","id":4,"result":{"sessionId":"claude-eval-1"}}
 ```
+
+## Daemon RPC Is Not Provider RPC
+
+Do not implement daemon methods in providers. Methods such as `cli/dispatch`,
+`manifest/subscribe`, `manifest/event`, `logs/stream`, and `daemon/health` are
+socket-level methods between the CLI and `pice-daemon`. Providers only implement
+the stdio methods in this document.
 
 ### `evaluate/score`
 

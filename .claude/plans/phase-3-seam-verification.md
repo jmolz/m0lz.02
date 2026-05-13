@@ -673,5 +673,5 @@ Prepare tests for each of these BEFORE the adversarial pass.
 **Follow-ups (post v0.3 scope):**
 - Dynamic plugin loading for community seam check crates (full `pice-seam-checks-grpc` pattern)
 - LLM-backed checks for categories 5/10/11 (deferred to v0.4 implicit contract inference)
-- `pice seam list` and `pice seam explain <id>` CLI subcommands (nice-to-have, easy to add after the registry exists)
+- Seam registry inspection CLI commands (nice-to-have, easy to add after the registry exists)
 - Arch-Experts-driven custom checks (v0.3)

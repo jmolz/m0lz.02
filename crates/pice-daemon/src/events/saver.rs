@@ -6,14 +6,14 @@
 //!
 //! 1. Persist the manifest to disk (crash-safe via
 //!    `VerificationManifest::save`).
-//! 2. Publish the matching `ManifestEventPayload` to the event bus.
+//! 2. Publish the matching [`pice_core::events::ManifestEventPayload`] to the event bus.
 //!
 //! The orchestrator call site KNOWS its intent (it just transitioned a
 //! layer `Pending → InProgress`, or appended a gate, etc). Rather than
 //! inferring the event kind from manifest diffing — which would be
 //! slow, lossy, and brittle — the saver asks the caller to supply an
 //! explicit [`SaveIntent`]. The saver matches on the intent, builds
-//! the right [`ManifestEventPayload`], writes the manifest, then
+//! the right [`pice_core::events::ManifestEventPayload`], writes the manifest, then
 //! publishes.
 //!
 //! **Trait design rationale.** We ship a trait (not a concrete impl)
@@ -31,7 +31,7 @@ use std::path::Path;
 
 /// What state transition the caller just completed.
 ///
-/// The saver uses this to build a typed `ManifestEventPayload` — it
+/// The saver uses this to build a typed [`pice_core::events::ManifestEventPayload`] — it
 /// never inspects the manifest contents to infer the event kind. See
 /// Task 4 in `.claude/plans/phase-7-background-execution.md` for the
 /// full call-site → intent mapping.
@@ -231,9 +231,21 @@ impl<'a> EventEmittingSaver<'a> {
             SaveIntent::FeatureCompleted => {
                 let status = serde_json::to_value(&manifest.overall_status)
                     .unwrap_or_else(|_| serde_json::Value::String("failed".to_string()));
+                let status_wire = status.as_str().unwrap_or("failed");
+                let exit_status = if manifest
+                    .layers
+                    .iter()
+                    .filter_map(|layer| layer.halted_by.as_deref())
+                    .any(ExitJsonStatus::is_metrics_persist_failed)
+                {
+                    ExitJsonStatus::MetricsPersistFailed.as_str()
+                } else {
+                    status_wire
+                };
                 let data = serde_json::json!({
                     "overall_status": status,
                     "status": status,
+                    "exit_status": exit_status,
                 });
                 self.bus.emit_feature_complete(feature_id, run_id, data);
             }
@@ -527,6 +539,44 @@ mod tests {
             evt.data["status"], "passed",
             "legacy status alias should stay in sync with overall_status"
         );
+        assert_eq!(evt.data["exit_status"], "passed");
+    }
+
+    #[tokio::test]
+    async fn feature_complete_payload_marks_metrics_persist_failed_exit_status() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe_feature("feat-metrics-terminal");
+        let saver = EventEmittingSaver::new(&bus);
+
+        let dir = tempdir().unwrap();
+        let mut manifest = sample_manifest("feat-metrics-terminal", Some("run-terminal"));
+        manifest.overall_status = ManifestStatus::Failed;
+        manifest.layers.push(LayerResult {
+            name: "metrics".into(),
+            status: LayerStatus::Failed,
+            passes: Vec::new(),
+            seam_checks: Vec::new(),
+            halted_by: Some(format!(
+                "{}sqlite locked",
+                ExitJsonStatus::METRICS_PERSIST_FAILED_PREFIX
+            )),
+            final_confidence: None,
+            total_cost_usd: None,
+            escalation_events: None,
+        });
+
+        saver
+            .save_and_emit(
+                &manifest,
+                &dir.path().join("manifest-terminal.json"),
+                SaveIntent::FeatureCompleted,
+            )
+            .expect("save_and_emit should succeed");
+
+        let evt = rx.recv().await.unwrap();
+        assert_eq!(evt.event, ManifestEvent::FeatureComplete);
+        assert_eq!(evt.data["overall_status"], "failed");
+        assert_eq!(evt.data["exit_status"], "metrics-persist-failed");
     }
 
     #[tokio::test]

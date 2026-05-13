@@ -1,0 +1,87 @@
+{
+  "generated_at": "2026-05-12T22:42:37Z",
+  "environment": {
+    "host": "local macOS arm64 development host",
+    "worktree": ".worktrees/phase-8-polish-documentation-release",
+    "network_note": "pnpm install required network escalation; lockfile was current",
+    "daemon_socket_note": "daemon-backed tests and smoke harnesses were run in socket-capable local execution; sandbox-only Unix socket bind denial is not product behavior"
+  },
+  "commands": [
+    {
+      "command": "pnpm install",
+      "result": "passed after network escalation"
+    },
+    {
+      "command": "pnpm build",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check",
+      "result": "passed"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps",
+      "result": "passed"
+    },
+    {
+      "command": "env RUST_TEST_THREADS=1 PATH=\"$PWD/target/debug:$PATH\" cargo test --workspace --all-targets",
+      "result": "passed: 1237 Rust tests"
+    },
+    {
+      "command": "cargo test --workspace --doc",
+      "result": "passed: 1 ignored documentation example"
+    },
+    {
+      "command": "cargo test -p pice-daemon templates:: -- --nocapture",
+      "result": "passed: 5 template extraction tests"
+    },
+    {
+      "command": "cargo test -p pice-daemon handlers::init -- --nocapture",
+      "result": "passed: 7 init/template scaffold tests"
+    },
+    {
+      "command": "cargo test -p pice-daemon --test parallel_cohort_speedup_assertion -- --nocapture",
+      "result": "passed with PICE_STATE_DIR=/private/tmp/pice-phase8-speedup-state: sequential 553.273194ms, parallel 313.267277ms, ratio 0.566, target <= 0.625"
+    },
+    {
+      "command": "cargo bench -p pice-daemon --bench parallel_cohort_speedup",
+      "result": "passed with PICE_STATE_DIR=/private/tmp/pice-phase8-bench-state; sequential [586.49 ms, 593.39 ms], parallel [347.03 ms, 350.09 ms]"
+    },
+    {
+      "command": "pnpm lint",
+      "result": "passed"
+    },
+    {
+      "command": "pnpm typecheck",
+      "result": "passed"
+    },
+    {
+      "command": "pnpm test",
+      "result": "passed: 97 TypeScript tests"
+    },
+    {
+      "command": "cargo build --release",
+      "result": "passed"
+    },
+    {
+      "command": "node scripts/acceptance/metrics-schema-inventory.mjs",
+      "result": "passed; wrote docs/releases/metrics-schema-evidence.json"
+    },
+    {
+      "command": "node scripts/acceptance/phase8-reference-projects.mjs",
+      "result": "passed for 5 fixtures with 7 configured/runtime layers each, bounded status/log streams, background metrics rows for evaluations/pass_events/seam_findings/layer_runs, seven distinct layer_runs layers, seven latest-evaluation layer_runs rows, infrastructure_contract_tier=3, and one review-gate approve/resume path with gate_decisions"
+    },
+    {
+      "command": "PICE_ARTIFACT_ARCHIVE=/private/tmp/pice-release-smoke-local.tar.gz PICE_NPM_PACK_SMOKE=1 node scripts/acceptance/release-artifact-smoke.mjs",
+      "result": "passed using an unpacked local release archive; local npm pack/install smoke passed"
+    },
+    {
+      "command": "node scripts/acceptance/readme-media-audit.mjs",
+      "result": "passed: 7 README media references"
+    }
+  ]
+}

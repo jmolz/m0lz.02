@@ -62,7 +62,30 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build && \
 cargo build --release
 ```
 
-Expected baseline: 271 Rust tests (1 ignored), 49 TypeScript tests, zero lint errors, zero warnings, clean release build.
+For Phase 8 release-readiness work, also run the acceptance and benchmark
+gates before final review:
+
+```bash
+cargo test -p pice-daemon --test parallel_cohort_speedup_assertion -- --nocapture
+cargo bench -p pice-daemon --bench parallel_cohort_speedup
+node scripts/acceptance/metrics-schema-inventory.mjs
+node scripts/acceptance/phase8-reference-projects.mjs
+tar -czf /private/tmp/pice-release-smoke-local.tar.gz -C target/release pice pice-daemon
+PICE_ARTIFACT_ARCHIVE=/private/tmp/pice-release-smoke-local.tar.gz PICE_NPM_PACK_SMOKE=1 node scripts/acceptance/release-artifact-smoke.mjs
+node scripts/acceptance/readme-media-audit.mjs
+```
+
+Expected Phase 8 baseline from the May 12, 2026 validation run:
+
+- Rust: `cargo test --workspace --all-targets` passed 1237 tests.
+- Rust docs: `cargo test --workspace --doc` passed with 1 ignored documentation example.
+- TypeScript: `pnpm test` passed 97 tests.
+- Lint/typecheck/build: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `cargo build --release` passed.
+- Phase 8 acceptance: metrics inventory, five-reference-project harness,
+  npm pack artifact smoke, README media audit, speedup assertion, and Criterion
+  benchmark passed. See `docs/releases/validation-evidence.json`.
+
+Do not update these counts from memory or stale CI output.
 
 ## Testing
 
@@ -91,7 +114,7 @@ Provider tests must use the stub provider (`packages/provider-stub/`). Never dep
 
 ## Code Style
 
-Follow the conventions documented in `CLAUDE.md`. The key points:
+Follow the conventions documented in repo guidance such as `AGENTS.md`. The key points:
 
 - **Rust**: `snake_case` files and functions, `PascalCase` types, `SCREAMING_SNAKE_CASE` constants.
 - **TypeScript**: `kebab-case` files, `camelCase` functions, `PascalCase` types.

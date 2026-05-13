@@ -31,7 +31,7 @@ See [methodology overview](../methodology/overview.md) for a deeper explanation 
 
 Claude evaluates contract criteria formally (scores, pass/fail). GPT-5.5 challenges whether the approach itself is sound. Different model families have different blind spots, so running both in parallel maximizes coverage.
 
-Both evaluators are adversarial by design -- they never see implementation reasoning, only the contract, code diff, and CLAUDE.md.
+Both evaluators are adversarial by design -- they never see implementation reasoning, only the contract, code diff, and project guidance.
 
 See [evaluation deep-dive](../methodology/evaluate.md) for details on the tier system and contract enforcement.
 
@@ -58,14 +58,14 @@ See [evaluation deep-dive](../methodology/evaluate.md) for details on the tier s
 2. Ask the agent to ask YOU questions (reduces assumptions)
 3. Generate a PRD from the conversation
 4. Review the PRD thoroughly
-5. Generate CLAUDE.md rules from the codebase
+5. Generate project guidance rules from the codebase
 6. Set up environment variables
 7. For each phase in the PRD: run a PICE loop
 8. After Phase 1: set up a regression test harness
 
 ## Brownfield Checklist
 
-1. Generate CLAUDE.md by reverse-engineering existing code
+1. Generate project guidance by reverse-engineering existing code
 2. Review and customize the generated rules
 3. Create on-demand rules for major subsystems
 4. Run `pice prime` to verify agent understanding

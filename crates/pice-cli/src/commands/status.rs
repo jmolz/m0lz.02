@@ -21,6 +21,7 @@
 //!
 //! Exit codes for `Wait`:
 //! - 0 `Passed`
+//! - 1 `MetricsPersistFailed`
 //! - 2 `Failed` / `FailedInterrupted`
 //! - 3 `PendingReview`
 //! - 4 `WaitTimeout`
@@ -30,7 +31,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use pice_core::cli::{CommandRequest, ExitJsonStatus, StatusMode, StatusRequest};
 use pice_core::events::{ManifestEvent, ManifestEventPayload, StreamJsonFrame};
-use pice_core::layers::manifest::ManifestStatus;
+use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
 use pice_core::protocol::methods::{MANIFEST_EVENT, MANIFEST_SUBSCRIBE};
 use pice_core::protocol::subscribe::{SubscribeManifestRequest, SubscribeManifestResponse};
 use serde_json::json;
@@ -216,10 +217,10 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
             .snapshots
             .iter()
             .find(|m| &m.feature_id == fid)
-            .and_then(|m| terminal_exit_code(&m.overall_status));
-        if let Some(code) = terminal {
+            .and_then(terminal_outcome_for_manifest);
+        if let Some((status_wire, code)) = terminal {
             if stream_json {
-                emit_stream_terminal(code)?;
+                emit_stream_terminal_with_status(code, Some(&status_wire))?;
             } else {
                 eprintln!("feature {fid} already terminal — follow stream closed");
             }
@@ -298,10 +299,10 @@ async fn run_follow(req: StatusRequest) -> Result<()> {
                         }
                     }
                 }
-                if let Some((_, code)) = terminal_from_event(&payload) {
+                if let Some((status_wire, code)) = terminal_from_event(&payload) {
                     if should_close_follow_on_terminal(feature_id_filter.as_deref()) {
                         if stream_json {
-                            emit_stream_terminal(code)?;
+                            emit_stream_terminal_with_status(code, Some(&status_wire))?;
                         } else {
                             eprintln!("feature {} terminal — closing stream", payload.feature_id);
                         }
@@ -371,10 +372,10 @@ async fn run_wait(req: StatusRequest) -> Result<()> {
         .snapshots
         .iter()
         .find(|m| m.feature_id == feature_id)
-        .and_then(|m| terminal_exit_code(&m.overall_status).map(|c| (m.overall_status.clone(), c)));
-    if let Some((status, code)) = terminal {
+        .and_then(terminal_outcome_for_manifest);
+    if let Some((status_wire, code)) = terminal {
         stream.close().await;
-        emit_wait_outcome(&feature_id, &manifest_status_wire(&status), json);
+        emit_wait_outcome(&feature_id, &status_wire, json);
         std::process::exit(code);
     }
 
@@ -587,6 +588,22 @@ fn terminal_exit_code(status: &ManifestStatus) -> Option<i32> {
     }
 }
 
+fn terminal_outcome_for_manifest(manifest: &VerificationManifest) -> Option<(String, i32)> {
+    if manifest
+        .layers
+        .iter()
+        .filter_map(|layer| layer.halted_by.as_deref())
+        .any(ExitJsonStatus::is_metrics_persist_failed)
+    {
+        return Some((
+            ExitJsonStatus::MetricsPersistFailed.as_str().to_string(),
+            ExitJsonStatus::MetricsPersistFailed.exit_code(),
+        ));
+    }
+    terminal_exit_code(&manifest.overall_status)
+        .map(|code| (manifest_status_wire(&manifest.overall_status), code))
+}
+
 fn snapshot_contains_feature(snap: &SubscribeManifestResponse, feature_id: &str) -> bool {
     snap.snapshots.iter().any(|m| m.feature_id == feature_id)
         || snap.run_ids.contains_key(feature_id)
@@ -627,7 +644,8 @@ fn classify_notification(payload: &ManifestEventPayload) -> Option<NotificationK
         ManifestEvent::FeatureComplete => {
             let wire = payload
                 .data
-                .get("overall_status")
+                .get("exit_status")
+                .or_else(|| payload.data.get("overall_status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("failed");
             match wire {
@@ -670,7 +688,8 @@ fn maybe_notify_for_event(
             format!("pice: {} failed", payload.feature_id),
             payload
                 .data
-                .get("overall_status")
+                .get("exit_status")
+                .or_else(|| payload.data.get("overall_status"))
                 .or_else(|| payload.data.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("failed")
@@ -696,7 +715,8 @@ fn terminal_from_event(payload: &ManifestEventPayload) -> Option<(String, i32)> 
         ManifestEvent::FeatureComplete => {
             let status_wire = payload
                 .data
-                .get("overall_status")
+                .get("exit_status")
+                .or_else(|| payload.data.get("overall_status"))
                 .or_else(|| payload.data.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("failed")
@@ -704,6 +724,7 @@ fn terminal_from_event(payload: &ManifestEventPayload) -> Option<(String, i32)> 
             let code = match status_wire.as_str() {
                 "passed" => 0,
                 "pending-review" => ExitJsonStatus::ReviewGatePending.exit_code(),
+                "metrics-persist-failed" => ExitJsonStatus::MetricsPersistFailed.exit_code(),
                 _ => ExitJsonStatus::EvaluationFailed.exit_code(),
             };
             Some((status_wire, code))
@@ -867,6 +888,34 @@ mod tests {
     }
 
     #[test]
+    fn terminal_outcome_for_manifest_maps_metrics_persist_failed_to_status_one() {
+        let mut manifest = VerificationManifest::new("f", std::path::Path::new("."));
+        manifest.overall_status = ManifestStatus::Pending;
+        manifest
+            .layers
+            .push(pice_core::layers::manifest::LayerResult {
+                name: "metrics".to_string(),
+                status: pice_core::layers::manifest::LayerStatus::Pending,
+                passes: Vec::new(),
+                seam_checks: Vec::new(),
+                halted_by: Some(format!(
+                    "{}sqlite locked",
+                    ExitJsonStatus::METRICS_PERSIST_FAILED_PREFIX
+                )),
+                final_confidence: None,
+                total_cost_usd: None,
+                escalation_events: None,
+            });
+        assert_eq!(
+            terminal_outcome_for_manifest(&manifest),
+            Some((
+                ExitJsonStatus::MetricsPersistFailed.as_str().to_string(),
+                ExitJsonStatus::MetricsPersistFailed.exit_code()
+            ))
+        );
+    }
+
+    #[test]
     fn terminal_from_event_feature_complete_passed_returns_zero() {
         let payload = ManifestEventPayload {
             feature_id: "f".to_string(),
@@ -879,6 +928,24 @@ mod tests {
         let (status, code) = terminal_from_event(&payload).expect("terminal");
         assert_eq!(status, "passed");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn terminal_from_event_feature_complete_metrics_failed_returns_one() {
+        let payload = ManifestEventPayload {
+            feature_id: "f".to_string(),
+            run_id: "r-1".to_string(),
+            event: ManifestEvent::FeatureComplete,
+            layer: None,
+            data: json!({
+                "overall_status": "failed",
+                "exit_status": "metrics-persist-failed"
+            }),
+            timestamp: "2026-04-21T10:00:00Z".to_string(),
+        };
+        let (status, code) = terminal_from_event(&payload).expect("terminal");
+        assert_eq!(status, "metrics-persist-failed");
+        assert_eq!(code, ExitJsonStatus::MetricsPersistFailed.exit_code());
     }
 
     #[test]

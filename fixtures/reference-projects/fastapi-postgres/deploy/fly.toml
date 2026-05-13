@@ -1,0 +1,2 @@
+app = "phase8-fastapi-postgres"
+primary_region = "iad"

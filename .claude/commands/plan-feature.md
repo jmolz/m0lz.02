@@ -163,14 +163,14 @@ Run two independent adversaries **in parallel** (not sequentially) for every tie
 **Stream B — Codex GPT-5.5 xhigh task** (runs in background via `Bash` with `run_in_background: true`). Always `--effort xhigh` regardless of tier:
 
 ```bash
-node "$HOME/.claude/plugins/marketplaces/openai-codex/plugins/codex/scripts/codex-companion.mjs" \
-  task --background --effort xhigh \
+node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
+  task --background --model gpt-5.5 --effort xhigh \
   "{the critique prompt above, with plan + CLAUDE.md + git log appended}"
 ```
 
 #### Rate-Limit Fallback
 
-Inherits the fallback from `/evaluate`. If Stream B output contains rate-limit markers (`rate limit`, `rate_limit_exceeded`, `429`, `too many requests`, `usage cap`, `quota exceeded`), read `~/.claude/.openai-fallback-key` and retry via direct OpenAI Responses API:
+Inherits the fallback from `/evaluate`. If Stream B output contains rate-limit markers (`rate limit`, `rate_limit_exceeded`, `429`, `too many requests`, `usage cap`, `quota exceeded`), read `~/.codex/.openai-fallback-key` and retry via direct OpenAI Responses API:
 
 - `model: "gpt-5.5"`, `reasoning.effort: "xhigh"` (all tiers)
 - `max_output_tokens: 32000`; on `status: "incomplete"` with `reason: "max_output_tokens"`, retry with larger budget

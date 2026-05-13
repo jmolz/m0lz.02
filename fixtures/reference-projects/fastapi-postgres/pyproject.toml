@@ -1,0 +1,7 @@
+[project]
+name = "phase8-fastapi-postgres-fixture"
+version = "0.0.0"
+dependencies = ["fastapi", "psycopg[binary]", "uvicorn"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

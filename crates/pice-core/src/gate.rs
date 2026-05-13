@@ -147,7 +147,7 @@ impl GateDecisionOutcome {
         }
     }
 
-    /// Reverse of [`audit_decision_string`]. Used by idempotent crash-
+    /// Reverse of [`Self::audit_decision_string`]. Used by idempotent crash-
     /// recovery in the decide handler: when the SQLite `gate_decisions`
     /// row exists but the manifest gate is still `Pending` (a prior
     /// decide crashed between audit insert and manifest save), the
@@ -369,7 +369,8 @@ impl CohortGateCheck {
 /// - Transitioning `LayerStatus::Passed → PendingReview` on the named layers.
 /// - Appending the new gates to `manifest.gates`.
 /// - Writing the audit notification (reconciler wake).
-/// - Recomputing `overall_status` via [`compute_overall_status`].
+/// - Recomputing `overall_status` via
+///   [`crate::layers::manifest::VerificationManifest::compute_overall_status`].
 ///
 /// This keeps the function pure (no I/O, no locks, no mutation).
 #[allow(clippy::too_many_arguments)]

@@ -136,7 +136,7 @@ export interface EvaluateCreateParams {
 
 /**
  * Per-boundary seam check specification. Mirrored from `pice-protocol` Rust
- * crate so the TS + Rust sides stay in sync (see `.claude/rules/protocol.md`).
+ * crate so the TS + Rust sides stay in sync (see `.codex/rules/protocol.md`).
  */
 export interface SeamCheckSpec {
   id: string;

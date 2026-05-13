@@ -4,7 +4,7 @@
 
 The Evaluate phase grades an implementation against its plan's contract using
 context-isolated AI evaluators. Evaluators see only three things: the contract JSON,
-the git diff, and the project's CLAUDE.md. They never see the planning conversation,
+the git diff, and the project's project guidance. They never see the planning conversation,
 implementation session, or any other context.
 
 This isolation eliminates self-evaluation bias. The evaluator cannot rationalize a
@@ -64,7 +64,7 @@ Evaluator sessions receive a controlled, minimal context:
 |-------|-------------|
 | Contract JSON | The criteria, thresholds, and validation commands from the plan |
 | Git diff | The actual code changes produced by implementation |
-| CLAUDE.md | The project's coding standards, patterns, and conventions |
+| project guidance | The project's coding standards, patterns, and conventions |
 
 Evaluators do not receive:
 
@@ -75,8 +75,15 @@ Evaluators do not receive:
 - Any explanation of why the code looks the way it does
 
 This is enforced at the protocol level. The `evaluate/create` JSON-RPC method accepts
-only `contract`, `diff`, and `claude_md` parameters. There is no mechanism for passing
-additional context even if a provider wanted to.
+only the contract, diff, project-guidance text on the compatibility `claudeMd`
+field, optional model/effort controls, seam-check specs, and adaptive pass
+controls. Layer scoping lives on the provider session created by
+`session/create`; there is no mechanism for passing implementation conversation
+even if a provider wanted to.
+
+In Stack Loops, the daemon filters contract and diff context per layer. A layer
+evaluator does not see sibling layer contracts or another layer's evaluation
+findings.
 
 ## Tier System
 
@@ -101,7 +108,7 @@ For architectural changes, new subsystems, and core refactors. Maximum rigor. A 
 agent team runs four specialized evaluators in parallel:
 
 - **Contract evaluator** -- scores each criterion (same as Tier 1/2)
-- **Convention auditor** -- checks adherence to CLAUDE.md patterns
+- **Convention auditor** -- checks adherence to project guidance patterns
 - **Regression hunter** -- looks for unintended side effects in the diff
 - **Edge case breaker** -- probes for boundary conditions and failure modes
 
@@ -165,11 +172,21 @@ grading is required.
 Evaluation models are not hardcoded. Users configure them in `.pice/config.toml`:
 
 ```toml
-[evaluation]
-contract_provider = "claude-code"
-contract_model = "claude-opus-4-6"
-adversarial_provider = "codex"
-adversarial_model = "gpt-5.5"
+[evaluation.primary]
+provider = "claude-code"
+model = "claude-opus-4-6"
+
+[evaluation.adversarial]
+provider = "codex"
+model = "gpt-5.5"
+effort = "xhigh"
+enabled = true
+
+[evaluation.tiers]
+tier1_models = ["claude-opus-4-6"]
+tier2_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_agent_team = true
 ```
 
 This lets users swap in newer models, use cheaper models for iteration, or configure

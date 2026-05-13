@@ -6,7 +6,7 @@ Working with an existing codebase is different from starting fresh. The code alr
 
 ### Generate Rules
 
-Run `pice init` in the project root to scaffold the PICE framework files. Then review and customize the generated CLAUDE.md to match your project's actual conventions.
+Run `pice init` in the project root to scaffold the PICE framework files. Then review and customize the generated project guidance to match your project's actual conventions.
 
 Go through the generated rules and check:
 
@@ -68,7 +68,7 @@ The same workflow works for brownfield -- but with more emphasis on codebase res
 
 For brownfield, `pice prime` should:
 
-- Read CLAUDE.md and on-demand rules
+- Read project guidance and on-demand rules
 - Check git history for recent patterns
 - Look at the specific area you are about to modify
 - Understand the existing tests around that area
@@ -103,7 +103,7 @@ When running `pice execute`:
 
 After execution, run `pice evaluate` against the contract. The [evaluator](../methodology/evaluate.md) is especially valuable for brownfield because:
 
-- It checks convention compliance against CLAUDE.md without being primed by implementation decisions
+- It checks convention compliance against project guidance without being primed by implementation decisions
 - It can catch leaks by testing negative criteria
 - It runs validation commands against the real codebase, not against assumptions
 
@@ -113,10 +113,10 @@ After each PICE loop, improve the AI layer:
 
 | Problem | Solution |
 |---------|----------|
-| Agent uses wrong import style | Add import patterns to CLAUDE.md |
+| Agent uses wrong import style | Add import patterns to project guidance |
 | Agent does not know about legacy code | Create `.claude/docs/legacy-systems.md` |
 | Agent breaks adjacent features | Add regression tests to validation |
-| Agent picks wrong file to modify | Add architecture section to CLAUDE.md |
+| Agent picks wrong file to modify | Add architecture section to project guidance |
 | Agent misunderstands auth flow | Create `.claude/rules/auth.md` |
 
 ## Key Differences from Greenfield

@@ -1,0 +1,3 @@
+groups:
+  - name: express-mongo
+    rules: []

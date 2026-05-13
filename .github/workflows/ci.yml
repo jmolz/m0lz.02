@@ -37,9 +37,14 @@ jobs:
       - run: pnpm install
       - run: pnpm build
 
+      - name: Add debug binaries to PATH
+        run: echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
-      - run: cargo test
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --all-targets
+        env:
+          RUST_TEST_THREADS: "1"
       - run: cargo build --release
 
   rust-platform-coverage:
@@ -55,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -84,8 +89,19 @@ jobs:
       - run: pnpm install
       - run: pnpm build
 
+      - name: Add debug binaries to PATH (Unix)
+        if: runner.os != 'Windows'
+        run: echo "$GITHUB_WORKSPACE/target/debug" >> "$GITHUB_PATH"
+
+      - name: Add debug binaries to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "$env:GITHUB_WORKSPACE\target\debug"
+
       - run: cargo clippy -- -D warnings
       - run: cargo test
+        env:
+          RUST_TEST_THREADS: "1"
 
   typescript:
     name: TypeScript
@@ -107,3 +123,55 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+
+  phase8-acceptance:
+    name: Phase 8 acceptance (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+            skip_focused: "0"
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            skip_focused: "1"
+          - name: macos-x64
+            os: macos-15-intel
+            skip_focused: "1"
+          - name: macos-arm64
+            os: macos-15
+            skip_focused: "1"
+          - name: windows-x64
+            os: windows-latest
+            skip_focused: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install
+      - run: pnpm build
+      - run: cargo build -p pice-cli -p pice-daemon
+
+      - name: Reference project acceptance
+        env:
+          PICE_PHASE8_SKIP_FOCUSED_TESTS: ${{ matrix.skip_focused }}
+        run: node scripts/acceptance/phase8-reference-projects.mjs
+
+      - name: Metrics schema inventory
+        run: node scripts/acceptance/metrics-schema-inventory.mjs
+
+      - name: README media audit
+        if: matrix.name == 'linux-x64'
+        run: node scripts/acceptance/readme-media-audit.mjs

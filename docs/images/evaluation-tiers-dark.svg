@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 280">
   <title>PICE Evaluation Tiers</title>
-  <desc>Evaluation tiers: Tier 1 uses single Claude Opus evaluator for minor changes; Tier 2 adds parallel GPT-5.4 adversarial review for new features; Tier 3 uses a Claude Opus agent team of 4 plus high-effort GPT-5.4 review for architectural changes</desc>
+  <desc>Evaluation tiers: Tier 1 uses single Claude Opus evaluator for minor changes; Tier 2 adds parallel GPT-5.5 adversarial review for new features; Tier 3 uses a Claude Opus agent team of 4 plus high-effort GPT-5.5 review for architectural changes</desc>
 
   <!-- Arrow markers (must precede elements that reference them) -->
   <defs>
@@ -37,7 +37,7 @@
   <text x="380" y="117" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="10" fill="#a78bfa">Contract Grading</text>
 
   <rect x="460" y="70" width="120" height="70" rx="8" fill="#451a03" stroke="#f59e0b" stroke-width="2"/>
-  <text x="520" y="98" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#fcd34d">GPT-5.4</text>
+  <text x="520" y="98" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#fcd34d">GPT-5.5</text>
   <text x="520" y="117" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="10" fill="#f59e0b">Adversarial Review</text>
 
   <text x="450" y="165" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#94a3b8">Parallel evaluation</text>
@@ -60,9 +60,9 @@
   <rect x="685" y="134" width="42" height="36" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="1"/>
   <rect x="735" y="134" width="42" height="36" rx="4" fill="#2e1065" stroke="#8b5cf6" stroke-width="1"/>
 
-  <!-- GPT-5.4 xhigh -->
+  <!-- GPT-5.5 xhigh -->
   <rect x="815" y="80" width="105" height="80" rx="8" fill="#451a03" stroke="#f59e0b" stroke-width="2"/>
-  <text x="867" y="113" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#fcd34d">GPT-5.4</text>
+  <text x="867" y="113" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#fcd34d">GPT-5.5</text>
   <text x="867" y="132" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="10" fill="#f59e0b">xhigh effort</text>
 
   <text x="790" y="220" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#94a3b8">Agent team + adversarial</text>

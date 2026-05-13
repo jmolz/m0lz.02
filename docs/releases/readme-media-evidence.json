@@ -1,0 +1,73 @@
+{
+  "generated_at": "2026-05-12T21:53:25.109Z",
+  "readme": "README.md",
+  "checked": [
+    {
+      "kind": "markdown-image",
+      "alt": "CI",
+      "src": "https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml/badge.svg",
+      "status": "external-or-empty"
+    },
+    {
+      "kind": "markdown-image",
+      "alt": "License: MIT",
+      "src": "https://img.shields.io/badge/license-MIT-blue.svg",
+      "status": "external-or-empty"
+    },
+    {
+      "kind": "html-img",
+      "alt": "m0lz.02 branch mark for the PICE CLI",
+      "src": "branch-mark.svg",
+      "size_bytes": 788,
+      "status": "ok"
+    },
+    {
+      "kind": "html-img",
+      "alt": "m0lz.02 architecture showing CLI adapter, daemon, metrics, templates, provider host, and external providers connected by JSON-RPC",
+      "src": "docs/images/architecture-light.svg",
+      "size_bytes": 6750,
+      "status": "ok"
+    },
+    {
+      "kind": "html-img",
+      "alt": "Evaluation tiers showing single-model contract grading, dual-model adversarial review, and higher-tier agent-team review",
+      "src": "docs/images/evaluation-tiers-light.svg",
+      "size_bytes": 6285,
+      "status": "ok"
+    },
+    {
+      "kind": "html-source",
+      "alt": "(source)",
+      "src": "docs/images/architecture-dark.svg",
+      "size_bytes": 6750,
+      "status": "ok"
+    },
+    {
+      "kind": "html-source",
+      "alt": "(source)",
+      "src": "docs/images/evaluation-tiers-dark.svg",
+      "size_bytes": 6255,
+      "status": "ok"
+    }
+  ],
+  "first_party_media_sources_checked": [
+    "docs/images/architecture-dark.svg",
+    "docs/images/architecture-light.svg",
+    "docs/images/evaluation-tiers-dark.svg",
+    "docs/images/evaluation-tiers-light.svg",
+    "docs/images/pice-evaluate-demo.sh",
+    "docs/images/pice-evaluate-demo.tape",
+    "docs/diagrams/architecture.excalidraw",
+    "docs/diagrams/evaluation-tiers.excalidraw"
+  ],
+  "first_party_gifs_checked": [
+    {
+      "src": "docs/images/pice-evaluate-demo.gif",
+      "size_bytes": 73763,
+      "status": "ok"
+    }
+  ],
+  "stale_phrase_checks": 7,
+  "stale_asset_phrase_checks": 10,
+  "failures": []
+}

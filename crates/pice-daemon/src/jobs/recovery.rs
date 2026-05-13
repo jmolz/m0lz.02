@@ -7,7 +7,8 @@
 //!
 //! | Prior status | Action |
 //! |--------------|--------|
-//! | `Queued` | DELETE the manifest file. A `Queued` manifest represents a dispatch that never acquired a global permit and never ran orchestrator logic. Rewriting it to `Failed` would mislead the user into thinking their evaluation ran and failed; deletion correctly represents "the dispatch didn't produce work." |
+//! | `Queued` without layers/gates | DELETE the manifest file. A blank `Queued` manifest represents a dispatch that never acquired a global permit and never ran orchestrator logic. Rewriting it to `Failed` would mislead the user into thinking their evaluation ran and failed; deletion correctly represents "the dispatch didn't produce work." |
+//! | `Queued` with layers/gates | Rewrite to `Pending`. This is a defensive repair for resume dispatches: a queued manifest with preserved work is already an audit source of truth and must not be deleted. |
 //! | `InProgress` | Rewrite as `Failed` with `overall_status = Failed`; every `InProgress` / `Pending` / `PendingReview` layer becomes `Failed` with `halted_by = "failed-interrupted"`. Preserves any already-completed layer results (Passed / Failed / Skipped) for audit. |
 //! | Terminal (`Passed` / `Failed` / `FailedInterrupted` / `Cancelled`) | Untouched. |
 //! | `PendingReview` with fully-decided gates | Untouched (terminal from gate POV). |
@@ -34,6 +35,9 @@ pub const FAILED_INTERRUPTED: &str = ExitJsonStatus::FAILED_INTERRUPTED_HALT;
 pub struct ReconciliationReport {
     /// Feature ids whose `Queued` manifests were deleted.
     pub discarded_queued: Vec<String>,
+    /// Feature ids whose `Queued` manifests already contained layers/gates
+    /// and were preserved as `Pending` instead of deleted.
+    pub preserved_queued_resume: Vec<String>,
     /// Feature ids whose `InProgress` manifests were rewritten to
     /// `Failed` with `halted_by = "failed-interrupted"`.
     pub reconciled_interrupted: Vec<String>,
@@ -98,9 +102,13 @@ pub fn reconcile_on_startup(state_dir: &Path) -> Result<ReconciliationReport> {
         }
     }
 
-    if !report.discarded_queued.is_empty() || !report.reconciled_interrupted.is_empty() {
+    if !report.discarded_queued.is_empty()
+        || !report.preserved_queued_resume.is_empty()
+        || !report.reconciled_interrupted.is_empty()
+    {
         tracing::info!(
             discarded = report.discarded_queued.len(),
+            preserved_queued_resume = report.preserved_queued_resume.len(),
             reconciled = report.reconciled_interrupted.len(),
             unreadable = report.unreadable.len(),
             "reconciled startup state"
@@ -116,9 +124,29 @@ fn reconcile_one(path: &Path, feature_id: &str, report: &mut ReconciliationRepor
 
     match manifest.overall_status {
         ManifestStatus::Queued => {
-            std::fs::remove_file(path)
-                .with_context(|| format!("failed to delete Queued manifest {}", path.display()))?;
-            report.discarded_queued.push(feature_id.to_string());
+            if queued_manifest_has_resume_state(&manifest) {
+                let mut preserved = manifest;
+                preserved.overall_status = ManifestStatus::Pending;
+                let saver = crate::events::NullSaver;
+                crate::events::ManifestSaver::save_and_emit(
+                    &saver,
+                    &preserved,
+                    path,
+                    crate::events::SaveIntent::FeatureCompleted,
+                )
+                .with_context(|| {
+                    format!(
+                        "failed to preserve Queued resume manifest {}",
+                        path.display()
+                    )
+                })?;
+                report.preserved_queued_resume.push(feature_id.to_string());
+            } else {
+                std::fs::remove_file(path).with_context(|| {
+                    format!("failed to delete Queued manifest {}", path.display())
+                })?;
+                report.discarded_queued.push(feature_id.to_string());
+            }
         }
         ManifestStatus::InProgress => {
             let rewritten = rewrite_interrupted(manifest, feature_id);
@@ -149,6 +177,10 @@ fn reconcile_one(path: &Path, feature_id: &str, report: &mut ReconciliationRepor
         }
     }
     Ok(())
+}
+
+fn queued_manifest_has_resume_state(manifest: &VerificationManifest) -> bool {
+    !manifest.layers.is_empty() || !manifest.gates.is_empty()
 }
 
 /// Rewrite an `InProgress` manifest to `Failed` with `halted_by =
@@ -233,8 +265,51 @@ mod tests {
         let report = reconcile_on_startup(dir.path()).unwrap();
 
         assert_eq!(report.discarded_queued, vec!["feat-q".to_string()]);
+        assert!(report.preserved_queued_resume.is_empty());
         assert!(report.reconciled_interrupted.is_empty());
         assert!(!path.exists(), "Queued manifest should be deleted");
+    }
+
+    #[test]
+    fn queued_resume_manifest_with_state_is_preserved_as_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let ns = dir.path().join("ns-12hex");
+        std::fs::create_dir_all(&ns).unwrap();
+        let path = ns.join("feat-resume.manifest.json");
+
+        let mut m = make_manifest("feat-resume", ManifestStatus::Queued);
+        m.layers = vec![seeded_layer("infrastructure", LayerStatus::Passed)];
+        m.gates.push(pice_core::layers::manifest::GateEntry {
+            id: "feat-resume:infrastructure:0001".to_string(),
+            layer: "infrastructure".to_string(),
+            status: pice_core::layers::manifest::GateStatus::Approved,
+            trigger_expression: "layer == infrastructure".to_string(),
+            requested_at: "2026-05-12T00:00:00Z".to_string(),
+            timeout_at: "2026-05-13T00:00:00Z".to_string(),
+            on_timeout_action: pice_core::workflow::schema::OnTimeout::Reject,
+            reject_attempts_remaining: 0,
+            decision: Some("approve".to_string()),
+            decided_at: Some("2026-05-12T00:01:00Z".to_string()),
+        });
+        m.save(&path).unwrap();
+
+        let report = reconcile_on_startup(dir.path()).unwrap();
+
+        assert!(report.discarded_queued.is_empty());
+        assert_eq!(
+            report.preserved_queued_resume,
+            vec!["feat-resume".to_string()]
+        );
+        assert!(path.exists(), "resume manifest should be preserved");
+
+        let reloaded = VerificationManifest::load(&path).unwrap();
+        assert_eq!(reloaded.overall_status, ManifestStatus::Pending);
+        assert_eq!(reloaded.layers.len(), 1);
+        assert_eq!(reloaded.gates.len(), 1);
+        assert_eq!(
+            reloaded.gates[0].status,
+            pice_core::layers::manifest::GateStatus::Approved
+        );
     }
 
     #[test]
@@ -256,6 +331,7 @@ mod tests {
 
         assert_eq!(report.reconciled_interrupted, vec!["feat-ip".to_string()]);
         assert!(report.discarded_queued.is_empty());
+        assert!(report.preserved_queued_resume.is_empty());
 
         let reloaded = VerificationManifest::load(&path).unwrap();
         assert_eq!(reloaded.overall_status, ManifestStatus::Failed);
@@ -345,6 +421,7 @@ mod tests {
         let report = reconcile_on_startup(dir.path()).unwrap();
 
         assert_eq!(report.discarded_queued, vec!["q".to_string()]);
+        assert!(report.preserved_queued_resume.is_empty());
         assert_eq!(report.reconciled_interrupted, vec!["ip".to_string()]);
         assert!(!queued.exists());
         assert!(in_progress.exists()); // rewritten
@@ -359,6 +436,7 @@ mod tests {
     fn nonexistent_state_dir_reports_empty() {
         let report = reconcile_on_startup(Path::new("/tmp/absolutely-nonexistent-xyz")).unwrap();
         assert!(report.discarded_queued.is_empty());
+        assert!(report.preserved_queued_resume.is_empty());
         assert!(report.reconciled_interrupted.is_empty());
     }
 
@@ -391,6 +469,7 @@ mod tests {
 
         let report = reconcile_on_startup(dir.path()).unwrap();
         assert!(report.discarded_queued.is_empty());
+        assert!(report.preserved_queued_resume.is_empty());
         assert!(report.reconciled_interrupted.is_empty());
         assert!(report.unreadable.is_empty());
     }

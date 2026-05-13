@@ -1,0 +1,69 @@
+{
+  "generated_at": "2026-05-12T21:53:25.829Z",
+  "command": "pice init --json",
+  "database": "../../../../../../var/folders/g2/l6xfd5cn3wq09t_w_prhtnfw0000gn/T/pice-metrics-57848/.pice/metrics.db",
+  "inventory_source": "node:sqlite",
+  "surfaces": {
+    "gate_decisions": "exists",
+    "cost_events": "implemented under pass_events.cost_usd",
+    "pass_events": "exists",
+    "seam_findings": "exists",
+    "layer_runs": "exists",
+    "adaptive_halt_reasons": "exists"
+  },
+  "write_paths": {
+    "gate_decisions": true,
+    "pass_events": true,
+    "seam_findings": true,
+    "layer_runs": true,
+    "adaptive_halt_reasons": true
+  },
+  "telemetry_privacy": {
+    "source": "crates/pice-daemon/src/metrics/telemetry.rs",
+    "default_config_enabled_false": true,
+    "template_enabled_false": true,
+    "outbound_telemetry_opt_in": true,
+    "event_fields": [
+      "event_type",
+      "tier",
+      "passed",
+      "score_avg",
+      "provider_type",
+      "timestamp"
+    ],
+    "anonymized_payload_fields": [
+      "event_type",
+      "tier",
+      "passed",
+      "score_avg",
+      "provider_type",
+      "timestamp"
+    ],
+    "anonymized_payload_exact_whitelist": true,
+    "compile_time_new_field_guard": true,
+    "tests_present": {
+      "anonymize_produces_separate_wire_type": true,
+      "anonymize_wire_format_is_distinct_from_event": true,
+      "jsonl_log_no_file_paths": true
+    },
+    "excludes": {
+      "code": true,
+      "prompts": true,
+      "paths": true,
+      "secrets": true,
+      "pii": true
+    }
+  },
+  "tables": {
+    "criteria_scores": "CREATE TABLE criteria_scores (                 id INTEGER PRIMARY KEY AUTOINCREMENT,                 evaluation_id INTEGER NOT NULL REFERENCES evaluations(id),                 name TEXT NOT NULL,                 score INTEGER NOT NULL,                 threshold INTEGER NOT NULL,                 passed INTEGER NOT NULL,                 findings TEXT             )",
+    "evaluations": "CREATE TABLE evaluations (                 id INTEGER PRIMARY KEY AUTOINCREMENT,                 plan_path TEXT NOT NULL,                 feature_name TEXT NOT NULL,                 tier INTEGER NOT NULL,                 passed INTEGER NOT NULL,                 primary_provider TEXT NOT NULL,                 primary_model TEXT NOT NULL,                 adversarial_provider TEXT,                 adversarial_model TEXT,                 summary TEXT,                 timestamp TEXT NOT NULL             , passes_used INTEGER, halted_by TEXT, adaptive_algorithm TEXT, final_confidence REAL, final_total_cost_usd REAL)",
+    "gate_decisions": "CREATE TABLE gate_decisions (                 id INTEGER PRIMARY KEY AUTOINCREMENT,                 gate_id TEXT NOT NULL UNIQUE,                 feature_id TEXT NOT NULL,                 layer TEXT NOT NULL,                 trigger_expression TEXT NOT NULL,                 decision TEXT NOT NULL CHECK(decision IN                     ('approve','reject','skip','timeout_reject','timeout_approve','timeout_skip')),                 reviewer TEXT,                 reason TEXT,                 requested_at TEXT NOT NULL,                 decided_at TEXT NOT NULL,                 elapsed_seconds INTEGER NOT NULL CHECK(elapsed_seconds >= 0)             )",
+    "layer_runs": "CREATE TABLE layer_runs (                 id INTEGER PRIMARY KEY AUTOINCREMENT,                 evaluation_id INTEGER REFERENCES evaluations(id) ON DELETE SET NULL,                 feature_id TEXT NOT NULL,                 layer TEXT NOT NULL,                 status TEXT NOT NULL CHECK(status IN                     ('pending','in-progress','passed','failed','skipped','pending-review')),                 contract_tier INTEGER NOT NULL,                 passes INTEGER NOT NULL CHECK(passes >= 0),                 final_confidence REAL,                 total_cost_usd REAL,                 halted_by TEXT,                 started_at TEXT NOT NULL,                 completed_at TEXT             )",
+    "loop_events": "CREATE TABLE loop_events (                 id INTEGER PRIMARY KEY AUTOINCREMENT,                 event_type TEXT NOT NULL,                 plan_path TEXT,                 timestamp TEXT NOT NULL,                 data_json TEXT             )",
+    "pass_events": "CREATE TABLE pass_events (                 id INTEGER PRIMARY KEY AUTOINCREMENT,                 evaluation_id INTEGER NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,                 pass_index INTEGER NOT NULL,                 model TEXT NOT NULL,                 score REAL,                 cost_usd REAL,                 timestamp TEXT NOT NULL             )",
+    "schema_version": "CREATE TABLE schema_version (version INTEGER NOT NULL)",
+    "seam_findings": "CREATE TABLE seam_findings (                 id INTEGER PRIMARY KEY AUTOINCREMENT,                 evaluation_id INTEGER NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,                 layer TEXT NOT NULL,                 boundary TEXT NOT NULL,                 check_id TEXT NOT NULL,                 category INTEGER NOT NULL CHECK(category BETWEEN 1 AND 12),                 status TEXT NOT NULL CHECK(status IN ('passed','warning','failed')),                 details TEXT,                 created_at TEXT NOT NULL             )",
+    "sqlite_sequence": "CREATE TABLE sqlite_sequence(name,seq)",
+    "telemetry_queue": "CREATE TABLE telemetry_queue (                 id INTEGER PRIMARY KEY AUTOINCREMENT,                 payload_json TEXT NOT NULL,                 created_at TEXT NOT NULL,                 sent INTEGER NOT NULL DEFAULT 0             )"
+  }
+}
