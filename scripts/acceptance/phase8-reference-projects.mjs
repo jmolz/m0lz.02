@@ -45,6 +45,7 @@ function run(cmd, args, options = {}) {
     cwd: options.cwd ?? repoRoot,
     env: { ...process.env, ...options.env },
     encoding: 'utf8',
+    stdio: options.stdio ?? 'pipe',
     timeout: options.timeout ?? 60_000,
   });
   if (result.error) {
@@ -250,7 +251,13 @@ function mutateFixture(project, name) {
 }
 
 function pice(bin, args, cwd, env = {}, options = {}) {
-  return run(bin, args, { cwd, env, timeout: options.timeout ?? 90_000, status: options.status ?? 0 });
+  return run(bin, args, {
+    cwd,
+    env,
+    timeout: options.timeout ?? 90_000,
+    status: options.status ?? 0,
+    stdio: options.stdio,
+  });
 }
 
 function socketPath(base, name) {
@@ -510,7 +517,13 @@ function runFixture(name, binaries, workRoot) {
     PICE_DAEMON_BIN: binaries.daemon,
     PATH: `${path.dirname(binaries.daemon)}${path.delimiter}${process.env.PATH ?? ''}`,
   };
-  pice(binaries.pice, ['daemon', 'start'], project, daemonEnv, { timeout: 60_000 });
+  pice(binaries.pice, ['daemon', 'start'], project, daemonEnv, {
+    timeout: 60_000,
+    // On Windows, the long-lived daemon can inherit handles that keep
+    // spawnSync's captured pipes open after `pice daemon start` exits.
+    // The harness does not inspect this command's text output.
+    stdio: process.platform === 'win32' ? 'ignore' : 'pipe',
+  });
   let featureId;
   let evaluateStatus;
   let evaluateWaitEvidence = null;
