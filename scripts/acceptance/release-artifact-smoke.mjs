@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const outPath =
@@ -73,15 +73,32 @@ function cleanupRetrySync(target, options = {}) {
   }
 }
 
-function stopDaemonAndWait(runner, cmd, cwd, env) {
-  runner(cmd, ['daemon', 'stop'], { cwd, env, timeout: daemonStopTimeout });
+function isWindowsDaemonStopDisconnect(err, platform = process.platform) {
+  return (
+    platform === 'win32' &&
+    /failed to send shutdown|daemon closed connection during shutdown|pipe is being closed|os error 232|transport write .*failed/i.test(
+      err?.message ?? ''
+    )
+  );
+}
+
+function stopDaemonAndWait(runner, cmd, cwd, env, platform = process.platform) {
+  let stopError = null;
+  try {
+    runner(cmd, ['daemon', 'stop'], { cwd, env, timeout: daemonStopTimeout });
+  } catch (err) {
+    if (!isWindowsDaemonStopDisconnect(err, platform)) {
+      throw err;
+    }
+    stopError = err;
+  }
 
   const deadline = Date.now() + daemonStopTimeout;
   let lastStatus = '';
   while (Date.now() < deadline) {
     lastStatus = runner(cmd, ['daemon', 'status'], { cwd, env, timeout: daemonCommandTimeout }).stdout.trim();
     if (/not running/i.test(lastStatus)) {
-      if (process.platform === 'win32') {
+      if (platform === 'win32') {
         sleepMs(500);
       }
       return;
@@ -89,7 +106,8 @@ function stopDaemonAndWait(runner, cmd, cwd, env) {
     sleepMs(250);
   }
 
-  throw new Error(`daemon did not stop within ${daemonStopTimeout / 1_000}s; last status: ${lastStatus}`);
+  const stopDetail = stopError ? `; stop error: ${stopError.message}` : '';
+  throw new Error(`daemon did not stop within ${daemonStopTimeout / 1_000}s; last status: ${lastStatus}${stopDetail}`);
 }
 
 function stopDaemonBestEffort(runner, cmd, cwd, env) {
@@ -420,24 +438,32 @@ function smokeNpmPackedInstall(artifactDirForBinaries) {
   }
 }
 
-const input = artifactInput();
-try {
-  const evidence = {
-    generated_at: new Date().toISOString(),
-    artifact_kind: input.kind,
-    artifact_archive: input.archive ? relativeOrAbsolute(input.archive) : null,
-    artifact_dir: relativeOrAbsolute(input.dir),
-    binaries: smokeBinaries(input.dir),
-    npm_pack_local_install: smokeNpmPackedInstall(input.dir),
-  };
+function main() {
+  const input = artifactInput();
+  try {
+    const evidence = {
+      generated_at: new Date().toISOString(),
+      artifact_kind: input.kind,
+      artifact_archive: input.archive ? relativeOrAbsolute(input.archive) : null,
+      artifact_dir: relativeOrAbsolute(input.dir),
+      binaries: smokeBinaries(input.dir),
+      npm_pack_local_install: smokeNpmPackedInstall(input.dir),
+    };
 
-  mkdirSync(path.dirname(outPath), { recursive: true });
-  writeFileSync(outPath, `${JSON.stringify(evidence, null, 2)}\n`);
-  console.log(
-    `release artifact smoke passed using ${
-      input.archive ? relativeOrAbsolute(input.archive) : relativeOrAbsolute(input.dir)
-    }`
-  );
-} finally {
-  input.cleanup();
+    mkdirSync(path.dirname(outPath), { recursive: true });
+    writeFileSync(outPath, `${JSON.stringify(evidence, null, 2)}\n`);
+    console.log(
+      `release artifact smoke passed using ${
+        input.archive ? relativeOrAbsolute(input.archive) : relativeOrAbsolute(input.dir)
+      }`
+    );
+  } finally {
+    input.cleanup();
+  }
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
+
+export { isWindowsDaemonStopDisconnect, stopDaemonAndWait };

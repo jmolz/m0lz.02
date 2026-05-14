@@ -27,6 +27,36 @@ cargo test
 pnpm test
 ```
 
+### Local CI Preflight
+
+For a Linux CI-equivalent run from macOS or Linux with Docker installed:
+
+```bash
+scripts/ci/local-linux.sh
+```
+
+The container uses Node 22, pnpm 9, Rust stable, `rustfmt`, and `clippy`.
+It bind-mounts the checkout, puts the local-CI debug binary directory on
+`PATH`, serializes daemon-spawning Rust tests with `RUST_TEST_THREADS=1`,
+mounts temporary host-owned `node_modules` directories so Linux optional
+dependencies do not overwrite the host install, writes Linux build artifacts
+under `target/local-ci-*`, and runs the Linux Rust, TypeScript, Phase 8
+acceptance, release-smoke, and README media gates. It defaults to `linux/amd64`
+to match GitHub's `linux-x64` runner. Set
+`PICE_LOCAL_CI_PLATFORM=linux/arm64` when local ARM speed matters more than
+x64 parity.
+
+Windows behavior cannot be reproduced by Linux Docker containers. To validate
+Windows named-pipe, `.cmd`, PowerShell, and path behavior before a release tag,
+run this script on a Windows VM, physical Windows host, or self-hosted runner:
+
+```powershell
+scripts/ci/windows-smoke.ps1
+```
+
+The same Windows smoke path is available as a manual GitHub Actions workflow:
+`Windows Smoke`.
+
 ## Project Structure
 
 ```

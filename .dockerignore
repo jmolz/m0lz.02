@@ -1,0 +1,11 @@
+# Keep local CI image builds small. The source tree is bind-mounted at runtime.
+.git/
+.worktrees/
+node_modules/
+.pnpm-store/
+target/
+dist/
+*.tsbuildinfo
+.DS_Store
+.pice/
+.remember/
