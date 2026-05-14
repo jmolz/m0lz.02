@@ -73,6 +73,19 @@ Seams run in the daemon. Provider support is optional; providers may ignore seam
 
 The default adaptive algorithm is Bayesian SPRT. It can halt on confidence, rejection, budget, review gate, cancellation, or max passes. Confidence reports must respect the correlated-evaluator ceiling described in `docs/research/convergence-analysis.md`.
 
+## Post-Merge Self-Heal
+
+Self-heal is a manual process-hardening step after a feature worktree has been
+merged into `main`. In Codex-primary projects, run `.codex/commands/self-heal.md`
+with the accepted plan or feature id to propose durable updates to project
+rules, command docs, regression tripwires, and operational notes. It is not part
+of Stack Loops execution, and PICE does not auto-run it during execute, evaluate,
+or merge.
+
+Self-heal proposals are still normal code changes: review them, run validation,
+and get explicit approval before any commit, push, deploy, publish, secret
+rotation, or production configuration change.
+
 ## Review Gates
 
 Review gates pause a layer and persist pending state in the manifest. Background mode returns a pending-review status; users decide gates with `pice review-gate`.

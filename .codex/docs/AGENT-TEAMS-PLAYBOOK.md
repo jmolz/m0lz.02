@@ -19,51 +19,51 @@ Prompts for orchestrating multi-agent parallel work in Claude Code. Each prompt 
 
 ### Dual-Model Adversarial Review (Tier 2)
 
-Use for Tier 2 contracts — new features, integrations, schema changes. Runs a Claude evaluator and a GPT-5.5 adversarial review in parallel for cross-model coverage.
+Use for Tier 2 contracts — new features, integrations, schema changes. Runs the configured primary evaluator and configured adversarial review in parallel for cross-model coverage.
 
 ```
 We just finished implementing [FEATURE]. The contract is in [PLAN PATH].
 
-Step 1: Launch the Codex adversarial review in the background first:
+Step 1: If `[evaluation.adversarial].enabled = true`, read `[evaluation.adversarial]` and launch the configured adversarial review in the background first:
 node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
-  task --background --model gpt-5.5 --effort xhigh \
-  "Adversarially evaluate against the contract in [PLAN PATH]. Use only the contract, diff, and CLAUDE.md."
+  task --background --model {model} --effort {effort} \
+  "Adversarially evaluate against the contract in [PLAN PATH]. Use only the contract, diff/status, and AGENTS.md."
 
-Step 2: While Codex runs, spawn a Claude sub-agent as the contract evaluator:
+Step 2: While the adversarial review runs, spawn the configured primary evaluator:
 Read the contract JSON from [PLAN PATH]. For EACH criterion, run the
 validation command, try to break the feature, and score 1-10. You are NOT
 the implementer. Do NOT be generous. A 7 means "meets the bar" — not
 "pretty good." Score lower when in doubt.
 
-Step 3: Collect the Codex task result
+Step 3: Collect the adversarial task result
 
 Step 4: Synthesize both into a single evaluation report:
-- Contract Evaluation (Claude): {N}/{total} criteria passed (list each with score)
-- Design Challenge (GPT-5.5): Critical / Consider / Acknowledged findings
+- Contract Evaluation (primary): {N}/{total} criteria passed (list each with score)
+- Design Challenge ({provider} {model} {effort}): Critical / Consider / Acknowledged findings
 - Overall: PASS / FAIL
 ```
 
 ### Contract-Based Adversarial Review (Tier 3)
 
-Use this for Tier 3 contracts — architectural changes, new pipeline phases, or complex features where maximum evaluation rigor is needed. Spawns separate Claude evaluators that challenge the implementation from different angles, **plus** a parallel GPT-5.5 adversarial review for cross-model coverage.
+Use this for Tier 3 contracts — architectural changes, new pipeline phases, or complex features where maximum evaluation rigor is needed. Spawns separate configured primary evaluators that challenge the implementation from different angles, **plus** a parallel configured adversarial review for cross-model coverage.
 
 ```
 We just finished implementing [FEATURE]. The contract is in [PLAN PATH].
 
-Step 1: Launch the Codex adversarial review in the background first:
+Step 1: If `[evaluation.adversarial].enabled = true`, read `[evaluation.adversarial]` and launch the configured adversarial review in the background first:
 node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
-  task --background --model gpt-5.5 --effort xhigh \
-  "Adversarially evaluate against the contract in [PLAN PATH]. Use only the contract, diff, and CLAUDE.md."
+  task --background --model {model} --effort {effort} \
+  "Adversarially evaluate against the contract in [PLAN PATH]. Use only the contract, diff/status, and AGENTS.md."
 
-Step 2: Create a Claude agent team to perform an adversarial evaluation.
+Step 2: Create a configured primary evaluator team to perform an adversarial evaluation.
 Spawn four teammates:
 
 1. Contract evaluator — read the contract JSON from the plan file. For EACH
    criterion, run the validation command, try to break the feature, and score
    1-10. You are NOT the implementer. Do NOT be generous. A 7 means "meets
    the bar" — not "pretty good." Score lower when in doubt.
-2. Convention auditor — read AGENTS.md and all .codex/rules/ files. Check
-   every changed file against project conventions. Flag pattern violations,
+2. Convention auditor — use AGENTS.md and the supplied diff/status. Check
+   changed files against project conventions. Flag pattern violations,
    naming inconsistencies, missing auth guards, and incorrect error handling.
    Do not report speculative issues — only real violations.
 3. Regression hunter — run the full test suite and regression tests. Check
@@ -83,20 +83,20 @@ Rules:
   read code and speculate
 - All evaluators share findings at the end for cross-referencing
 
-Step 3: Collect the Codex task result
+Step 3: Collect the adversarial task result
 
 Step 4: Synthesize ALL findings into a single evaluation report:
-- Contract Evaluation (Claude): {N}/{total} criteria passed (list each with score)
-- Convention Audit (Claude): {N} violations found (Critical/Warning/Suggestion)
-- Regression Status (Claude): {N} tests passing, {N} failing
-- Edge Cases (Claude): {N} failures found (with reproduction steps)
-- Design Challenge (GPT-5.5 xhigh): Critical / Consider / Acknowledged findings
+- Contract Evaluation (primary): {N}/{total} criteria passed (list each with score)
+- Convention Audit (primary): {N} violations found (Critical/Warning/Suggestion)
+- Regression Status (primary): {N} tests passing, {N} failing
+- Edge Cases (primary): {N} failures found (with reproduction steps)
+- Design Challenge ({provider} {model} {effort}): Critical / Consider / Acknowledged findings
 - Overall: PASS / FAIL
 
-Note: The Codex adversarial review challenges the APPROACH — was this the
+Note: The configured adversarial review challenges the APPROACH — was this the
 right design? What assumptions does it depend on? This is complementary to
-the Claude team's execution-level evaluation. A critical design challenge
-from Codex that cannot be justified = overall FAIL.
+the primary team's execution-level evaluation. A critical design challenge
+that cannot be justified = overall FAIL.
 ```
 
 ---
@@ -295,7 +295,7 @@ Create an agent team to scaffold a new [PROJECT TYPE] project. Spawn 3 teammates
 2. Infrastructure engineer — set up Docker, CI/CD (GitHub Actions),
    deployment config, database migrations, and environment variable management.
 3. Documentation writer — create README.md with setup instructions,
-   AGENTS.md with project conventions, and .codex/rules/ files for
+   AGENTS.md with project conventions, and scoped rule files for
    the major subsystems.
 
 Architect goes first. Infrastructure and docs teammates wait for the
@@ -465,7 +465,7 @@ Create an agent team to overhaul our project documentation. Spawn 4 teammates:
 3. API documenter — generate accurate API documentation from the actual
    route files. Include request/response examples, auth requirements,
    and error formats for every endpoint.
-4. Rules updater — update AGENTS.md and .codex/rules/ files to match
+4. Rules updater — update AGENTS.md and scoped rule files to match
    current codebase patterns. Remove outdated conventions and add any
    missing ones discovered during the audit.
 

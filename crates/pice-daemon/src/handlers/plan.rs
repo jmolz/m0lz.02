@@ -17,7 +17,8 @@ pub async fn run(
 ) -> Result<CommandResponse> {
     let project_root = ctx.project_root();
     let config = ctx.config();
-    let prompt = builders::build_plan_prompt(&req.description, project_root)?;
+    let prompt =
+        builders::build_plan_prompt(&req.description, project_root, &config.provider.name)?;
 
     let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, config).await?;
     if !req.json {

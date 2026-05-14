@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 280">
   <title>PICE Evaluation Tiers</title>
-  <desc>Evaluation tiers: Tier 1 uses single Claude Opus evaluator for minor changes; Tier 2 adds parallel GPT-5.5 adversarial review for new features; Tier 3 uses a Claude Opus agent team of 4 plus high-effort GPT-5.5 review for architectural changes</desc>
+  <desc>Evaluation tiers: Tier 1 uses a single primary evaluator for minor changes; Tier 2 adds a configured adversarial review for new features; Tier 3 uses a primary evaluator team plus configured adversarial review for architectural changes</desc>
 
   <!-- Arrow markers (must precede elements that reference them) -->
   <defs>
@@ -18,7 +18,7 @@
 
   <!-- Single evaluator box -->
   <rect x="55" y="70" width="150" height="70" rx="8" fill="#ddd6fe" stroke="#6d28d9" stroke-width="2"/>
-  <text x="130" y="101" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="15" font-weight="600" fill="#4c1d95">Claude Opus</text>
+  <text x="130" y="101" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="15" font-weight="600" fill="#4c1d95">Primary</text>
   <text x="130" y="120" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#6d28d9">Contract Grading</text>
 
   <text x="130" y="165" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#64748b">Single evaluator</text>
@@ -33,11 +33,11 @@
 
   <!-- Two parallel evaluators -->
   <rect x="320" y="70" width="120" height="70" rx="8" fill="#ddd6fe" stroke="#6d28d9" stroke-width="2"/>
-  <text x="380" y="98" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#4c1d95">Claude Opus</text>
+  <text x="380" y="98" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#4c1d95">Primary</text>
   <text x="380" y="117" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="10" fill="#6d28d9">Contract Grading</text>
 
   <rect x="460" y="70" width="120" height="70" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
-  <text x="520" y="98" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#92400e">GPT-5.5</text>
+  <text x="520" y="98" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#92400e">Adversarial</text>
   <text x="520" y="117" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="10" fill="#b45309">Adversarial Review</text>
 
   <!-- Parallel indicator -->
@@ -53,7 +53,7 @@
 
   <!-- Agent team container -->
   <rect x="670" y="65" width="130" height="130" rx="8" fill="#ede9fe" stroke="#6d28d9" stroke-width="2"/>
-  <text x="735" y="82" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" font-weight="600" fill="#6d28d9">Claude Opus x4</text>
+  <text x="735" y="82" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" font-weight="600" fill="#6d28d9">Primary x4</text>
 
   <!-- 4 agent boxes in 2x2 grid -->
   <rect x="685" y="90" width="42" height="36" rx="4" fill="#ddd6fe" stroke="#6d28d9" stroke-width="1"/>
@@ -61,10 +61,10 @@
   <rect x="685" y="134" width="42" height="36" rx="4" fill="#ddd6fe" stroke="#6d28d9" stroke-width="1"/>
   <rect x="735" y="134" width="42" height="36" rx="4" fill="#ddd6fe" stroke="#6d28d9" stroke-width="1"/>
 
-  <!-- GPT-5.5 xhigh -->
+  <!-- Configured adversarial review -->
   <rect x="815" y="80" width="105" height="80" rx="8" fill="#fef3c7" stroke="#b45309" stroke-width="2"/>
-  <text x="867" y="113" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="14" font-weight="600" fill="#92400e">GPT-5.5</text>
-  <text x="867" y="132" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="10" fill="#b45309">xhigh effort</text>
+  <text x="867" y="113" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="13" font-weight="600" fill="#92400e">Adversarial</text>
+  <text x="867" y="132" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="10" fill="#b45309">configured</text>
 
   <text x="790" y="220" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#64748b">Agent team + adversarial</text>
   <text x="790" y="235" text-anchor="middle" font-family="'Segoe UI', Roboto, 'Helvetica Neue', sans-serif" font-size="11" fill="#64748b">Architectural, breaking changes</text>

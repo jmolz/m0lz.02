@@ -18,7 +18,7 @@ use pice_core::layers::manifest::{
     VerificationManifest,
 };
 use pice_core::layers::{active_layers, LayersConfig};
-use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
+use pice_core::prompt::helpers::{get_git_diff, read_evaluation_guidance};
 use pice_core::seam::{default_registry, types::LayerBoundary, Registry};
 use pice_core::workflow::WorkflowConfig;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -225,7 +225,7 @@ pub async fn run_stack_loops_with_cancel(
     };
     let claude_md = match cfg.claude_md {
         Some(content) => content.to_string(),
-        None => read_claude_md(project_root)?,
+        None => read_evaluation_guidance(project_root)?,
     };
 
     // Extract changed file paths from the diff

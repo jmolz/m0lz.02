@@ -1,4 +1,4 @@
-//! `pice init` handler — scaffold `.claude/` and `.pice/` directories.
+//! `pice init` handler — scaffold developer commands and `.pice/` config.
 
 use anyhow::Result;
 use pice_core::cli::{CommandResponse, InitRequest};
@@ -11,9 +11,91 @@ use crate::orchestrator::StreamSink;
 use crate::server::router::DaemonContext;
 use crate::templates::extract_templates;
 
+fn developer_template(developer: &str) -> Option<(&'static str, &'static str)> {
+    match developer {
+        "claude-code" => Some((".claude", "claude/")),
+        "codex" => Some((".codex", "codex/")),
+        _ => None,
+    }
+}
+
+fn scaffold_codex_agents_md(
+    project_root: &std::path::Path,
+    force: bool,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let target = project_root.join("AGENTS.md");
+    if target.exists() && !force {
+        return Ok((Vec::new(), vec!["AGENTS.md".to_string()]));
+    }
+
+    let template = project_root.join(".codex/templates/AGENTS-template.md");
+    let content = std::fs::read_to_string(&template)?;
+    std::fs::write(target, content)?;
+    Ok((vec!["AGENTS.md".to_string()], Vec::new()))
+}
+
+fn configure_codex_primary_provider(config_path: &std::path::Path) -> Result<()> {
+    let content = std::fs::read_to_string(config_path)?;
+    let updated = set_provider_name(&content, "codex");
+    std::fs::write(config_path, updated)?;
+    Ok(())
+}
+
+fn set_provider_name(content: &str, provider: &str) -> String {
+    let mut output = Vec::new();
+    let mut in_provider = false;
+    let mut saw_provider_section = false;
+    let mut replaced = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_provider && !replaced {
+                output.push(format!("name = \"{provider}\""));
+                replaced = true;
+            }
+            in_provider = trimmed == "[provider]";
+            saw_provider_section |= in_provider;
+            output.push(line.to_string());
+            continue;
+        }
+
+        if in_provider && trimmed.starts_with("name") {
+            let indent_len = line.len() - trimmed.len();
+            let indent = &line[..indent_len];
+            output.push(format!("{indent}name = \"{provider}\""));
+            replaced = true;
+        } else {
+            output.push(line.to_string());
+        }
+    }
+
+    if in_provider && !replaced {
+        output.push(format!("name = \"{provider}\""));
+        replaced = true;
+    }
+
+    if !saw_provider_section {
+        let mut with_provider = vec!["[provider]".to_string(), format!("name = \"{provider}\"")];
+        if !content.is_empty() {
+            with_provider.push(String::new());
+        }
+        with_provider.extend(output);
+        output = with_provider;
+    } else if !replaced {
+        output.insert(0, format!("name = \"{provider}\""));
+    }
+
+    let mut result = output.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
 /// Initialize a project with PICE scaffolding.
 ///
-/// 1. Extracts templates to `.claude/` and `.pice/`
+/// 1. Extracts templates to `.claude/` or `.codex/` and `.pice/`
 /// 2. Validates the scaffolded config
 /// 3. Initializes (or migrates) the metrics database
 /// 4. Returns created/skipped file counts
@@ -23,8 +105,17 @@ pub async fn run(
     sink: &dyn StreamSink,
 ) -> Result<CommandResponse> {
     let project_root = ctx.project_root();
+    let Some((developer_dir_name, developer_prefix)) = developer_template(&req.developer) else {
+        return Ok(CommandResponse::Exit {
+            code: 1,
+            message: format!(
+                "unsupported developer '{}'; expected claude-code or codex",
+                req.developer
+            ),
+        });
+    };
 
-    let claude_dir = project_root.join(".claude");
+    let developer_dir = project_root.join(developer_dir_name);
     let pice_dir = project_root.join(".pice");
 
     // Handle --upgrade early: generate layers.toml + contract templates for v0.1 projects.
@@ -100,14 +191,23 @@ pub async fn run(
     }
 
     if !req.json {
-        sink.send_chunk("Scaffolding .claude/ directory...\n");
+        sink.send_chunk(&format!("Scaffolding {developer_dir_name}/ directory...\n"));
     }
-    let claude_result = extract_templates(&claude_dir, "claude/", req.force)?;
+    let developer_result = extract_templates(&developer_dir, developer_prefix, req.force)?;
+
+    let (extra_created, extra_skipped) = if req.developer == "codex" {
+        scaffold_codex_agents_md(project_root, req.force)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     if !req.json {
         sink.send_chunk("Scaffolding .pice/ directory...\n");
     }
     let pice_result = extract_templates(&pice_dir, "pice/", req.force)?;
+    if req.developer == "codex" {
+        configure_codex_primary_provider(&pice_dir.join("config.toml"))?;
+    }
 
     // Verify the scaffolded config is valid
     let config_path = pice_dir.join("config.toml");
@@ -140,21 +240,25 @@ pub async fn run(
         info!(path = %metrics_db_path.display(), "migrated existing metrics database");
     }
 
-    let total_created = claude_result.created.len() + pice_result.created.len();
-    let total_skipped = claude_result.skipped.len() + pice_result.skipped.len();
+    let total_created =
+        developer_result.created.len() + pice_result.created.len() + extra_created.len();
+    let total_skipped =
+        developer_result.skipped.len() + pice_result.skipped.len() + extra_skipped.len();
 
     if req.json {
-        let created: Vec<String> = claude_result
+        let created: Vec<String> = developer_result
             .created
             .iter()
-            .map(|f| format!(".claude/{f}"))
+            .map(|f| format!("{developer_dir_name}/{f}"))
             .chain(pice_result.created.iter().map(|f| format!(".pice/{f}")))
+            .chain(extra_created.iter().cloned())
             .collect();
-        let skipped: Vec<String> = claude_result
+        let skipped: Vec<String> = developer_result
             .skipped
             .iter()
-            .map(|f| format!(".claude/{f}"))
+            .map(|f| format!("{developer_dir_name}/{f}"))
             .chain(pice_result.skipped.iter().map(|f| format!(".pice/{f}")))
+            .chain(extra_skipped.iter().cloned())
             .collect();
         Ok(CommandResponse::Json {
             value: json!({
@@ -168,11 +272,14 @@ pub async fn run(
         let mut output = String::new();
         if total_created > 0 {
             output.push_str(&format!("\nCreated {} files:\n", total_created));
-            for f in &claude_result.created {
-                output.push_str(&format!("  .claude/{f}\n"));
+            for f in &developer_result.created {
+                output.push_str(&format!("  {developer_dir_name}/{f}\n"));
             }
             for f in &pice_result.created {
                 output.push_str(&format!("  .pice/{f}\n"));
+            }
+            for f in &extra_created {
+                output.push_str(&format!("  {f}\n"));
             }
         }
         if total_skipped > 0 {
@@ -200,6 +307,7 @@ mod tests {
             force: false,
             upgrade: false,
             json: false,
+            developer: "claude-code".to_string(),
         };
 
         let resp = run(req, &ctx, &NullSink).await.unwrap();
@@ -231,6 +339,7 @@ mod tests {
             force: false,
             upgrade: false,
             json: false,
+            developer: "claude-code".to_string(),
         };
 
         run(req.clone(), &ctx, &NullSink).await.unwrap();
@@ -256,6 +365,7 @@ mod tests {
             force: false,
             upgrade: false,
             json: false,
+            developer: "claude-code".to_string(),
         };
         run(req, &ctx, &NullSink).await.unwrap();
 
@@ -268,6 +378,7 @@ mod tests {
             force: true,
             upgrade: false,
             json: false,
+            developer: "claude-code".to_string(),
         };
         run(req, &ctx, &NullSink).await.unwrap();
 
@@ -283,6 +394,7 @@ mod tests {
             force: false,
             upgrade: false,
             json: true,
+            developer: "claude-code".to_string(),
         };
 
         let resp = run(req, &ctx, &NullSink).await.unwrap();
@@ -305,6 +417,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_codex_creates_codex_scaffold_agents_and_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
+        let req = InitRequest {
+            force: false,
+            upgrade: false,
+            json: true,
+            developer: "codex".to_string(),
+        };
+
+        let resp = run(req, &ctx, &NullSink).await.unwrap();
+        match &resp {
+            CommandResponse::Json { value } => {
+                let created = value["created"].as_array().unwrap();
+                assert!(created.iter().any(|v| v == "AGENTS.md"));
+                assert!(created.iter().any(|v| v == ".codex/commands/self-heal.md"));
+            }
+            other => panic!("expected Json response in json mode, got: {other:?}"),
+        }
+
+        assert!(dir.path().join(".codex/commands/plan-feature.md").exists());
+        assert!(dir.path().join(".codex/commands/self-heal.md").exists());
+        assert!(dir.path().join("AGENTS.md").exists());
+        let config = std::fs::read_to_string(dir.path().join(".pice/config.toml")).unwrap();
+        assert!(config.contains("name = \"codex\""));
+    }
+
+    #[tokio::test]
+    async fn init_codex_updates_existing_config_provider_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
+
+        run(
+            InitRequest {
+                force: false,
+                upgrade: false,
+                json: true,
+                developer: "claude-code".to_string(),
+            },
+            &ctx,
+            &NullSink,
+        )
+        .await
+        .unwrap();
+
+        run(
+            InitRequest {
+                force: false,
+                upgrade: false,
+                json: true,
+                developer: "codex".to_string(),
+            },
+            &ctx,
+            &NullSink,
+        )
+        .await
+        .unwrap();
+
+        let config = std::fs::read_to_string(dir.path().join(".pice/config.toml")).unwrap();
+        assert!(config.contains("[provider]"));
+        assert!(config.contains("name = \"codex\""));
+        let parsed = PiceConfig::load(&dir.path().join(".pice/config.toml")).unwrap();
+        assert_eq!(parsed.provider.name, "codex");
+    }
+
+    #[test]
+    fn set_provider_name_preserves_existing_config_shape() {
+        let updated = set_provider_name(
+            r#"[provider]
+# Keep custom comments.
+name = "claude-code"
+
+[evaluation.primary]
+provider = "claude-code"
+"#,
+            "codex",
+        );
+
+        assert!(updated.contains("# Keep custom comments."));
+        assert!(updated.contains("[provider]\n# Keep custom comments.\nname = \"codex\""));
+        assert!(updated.contains("[evaluation.primary]\nprovider = \"claude-code\""));
+    }
+
+    #[tokio::test]
     async fn init_second_run_reports_skipped_in_json() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = DaemonContext::new_for_test_with_root("test-token", dir.path().to_path_buf());
@@ -314,6 +510,7 @@ mod tests {
             force: false,
             upgrade: false,
             json: true,
+            developer: "claude-code".to_string(),
         };
         run(req.clone(), &ctx, &NullSink).await.unwrap();
 
@@ -384,6 +581,7 @@ db_path = ".pice/metrics.db"
             force: false,
             upgrade: true,
             json: false,
+            developer: "claude-code".to_string(),
         };
 
         let resp = run(req, &ctx, &NullSink).await.unwrap();
@@ -413,6 +611,7 @@ db_path = ".pice/metrics.db"
             force: false,
             upgrade: true,
             json: false,
+            developer: "claude-code".to_string(),
         };
 
         let resp = run(req, &ctx, &NullSink).await.unwrap();

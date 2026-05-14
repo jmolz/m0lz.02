@@ -440,6 +440,12 @@ pub struct InitRequest {
     #[serde(default)]
     pub upgrade: bool,
     pub json: bool,
+    #[serde(default = "default_developer")]
+    pub developer: String,
+}
+
+fn default_developer() -> String {
+    "claude-code".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -741,6 +747,7 @@ mod tests {
             force: true,
             upgrade: false,
             json: false,
+            developer: "claude-code".to_string(),
         });
         let wire = serde_json::to_string(&req).unwrap();
         // Tag-based serialization: {"command":"init",...}
@@ -762,6 +769,7 @@ mod tests {
             force: false,
             upgrade: true,
             json: false,
+            developer: "claude-code".to_string(),
         });
         let wire = serde_json::to_string(&req).unwrap();
         let parsed: CommandRequest = serde_json::from_str(&wire).unwrap();

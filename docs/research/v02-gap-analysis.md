@@ -260,7 +260,7 @@ Specmatic (using OpenAPI + AsyncAPI + gRPC proto as executable contracts, with a
 
 ### Gap 7.1: Dual-provider outage
 
-StatusGator has tracked 1,098+ Anthropic outages since June 2024. OpenAI has parallel outage history. Both providers experienced significant disruptions in the same weeks of March 2026. If Claude Code is the primary verifier and OpenAI the adversarial evaluator, a correlated outage blocks all verification.
+StatusGator has tracked 1,098+ Anthropic outages since June 2024. OpenAI has parallel outage history. Both providers experienced significant disruptions in the same weeks of March 2026. If one provider is the sole primary verifier and another is the sole adversarial evaluator, a correlated outage blocks all verification.
 
 **Resolution:** Four-tier graceful degradation:
 - Tier A: Full AI verification (normal)

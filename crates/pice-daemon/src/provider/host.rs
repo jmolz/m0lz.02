@@ -15,7 +15,7 @@ pub type NotificationHandler = Box<dyn Fn(String, Option<Value>) + Send>;
 /// Manages a single provider process lifecycle and JSON-RPC communication.
 pub struct ProviderHost {
     child: Child,
-    stdin: tokio::process::ChildStdin,
+    stdin: Option<tokio::process::ChildStdin>,
     reader: BufReader<tokio::process::ChildStdout>,
     next_id: u64,
     notification_handler: Option<NotificationHandler>,
@@ -24,22 +24,21 @@ pub struct ProviderHost {
 impl ProviderHost {
     /// Spawn a provider process with piped stdin/stdout and inherited stderr.
     ///
-    /// `kill_on_drop(true)` is load-bearing for Phase 5 cohort cancellation:
-    /// when a cohort task's future drops (e.g., `JoinSet::abort_all()` after
-    /// the cancellation token fires), the `Child` drops too, and without
-    /// `kill_on_drop` the provider process would keep running until its own
-    /// work completed — orphaning API quota and violating the contract's
-    /// zero-orphan-sessions invariant. See the Phase 5 cancellation
-    /// contract criterion and `tests/parallel_cohort_integration.rs::
-    /// cancellation_leaves_no_orphan_provider_processes`.
+    /// `kill_on_drop(true)` and this type's `Drop` impl are load-bearing for
+    /// cancellation: if a task is aborted while the provider is supervising a
+    /// CLI child, dropping `ProviderHost` must terminate both the provider and
+    /// its process group rather than leaving the child running.
     pub async fn spawn(command: &str, args: &[&str]) -> Result<Self> {
         debug!(command, ?args, "spawning provider process");
-        let mut child = Command::new(command)
-            .args(args)
+        let mut cmd = Command::new(command);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn provider: {command}"))?;
 
@@ -55,7 +54,7 @@ impl ProviderHost {
 
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             reader,
             next_id: 1,
             notification_handler: None,
@@ -98,9 +97,13 @@ impl ProviderHost {
         let notification = JsonRpcNotification::new(method, params);
         let json = serde_json::to_string(&notification)?;
         trace!(method, "sending notification");
-        self.stdin.write_all(json.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .context("provider stdin already closed")?;
+        stdin.write_all(json.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
         Ok(())
     }
 
@@ -119,7 +122,7 @@ impl ProviderHost {
         }
 
         // Close stdin to signal EOF
-        drop(self.stdin);
+        drop(self.stdin.take());
 
         // Wait for process to exit with remaining budget
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -134,8 +137,8 @@ impl ProviderHost {
                 Ok(())
             }
             Err(_) => {
-                warn!("provider did not exit within timeout, killing");
-                self.child.kill().await.ok();
+                warn!("provider did not exit within timeout, killing process tree");
+                terminate_child_process_tree(&mut self.child).await;
                 Ok(())
             }
         }
@@ -144,9 +147,13 @@ impl ProviderHost {
     async fn send_message<T: serde::Serialize>(&mut self, message: &T) -> Result<()> {
         let json = serde_json::to_string(message)?;
         trace!(json = %json, "sending message");
-        self.stdin.write_all(json.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        let stdin = self
+            .stdin
+            .as_mut()
+            .context("provider stdin already closed")?;
+        stdin.write_all(json.as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
         Ok(())
     }
 
@@ -199,4 +206,69 @@ impl ProviderHost {
             warn!(line = %trimmed, "unparseable message from provider");
         }
     }
+}
+
+impl Drop for ProviderHost {
+    fn drop(&mut self) {
+        terminate_child_process_tree_on_drop(&mut self.child);
+    }
+}
+
+#[cfg(unix)]
+async fn terminate_child_process_tree(child: &mut Child) {
+    let Some(pid) = child.id() else {
+        let _ = child.kill().await;
+        return;
+    };
+
+    let pgid = -(pid as libc::pid_t);
+    // Providers are spawned into their own process group. Terminating the
+    // group catches CLI subprocesses that the provider is supervising.
+    unsafe {
+        libc::kill(pgid, libc::SIGTERM);
+    }
+    if tokio::time::timeout(Duration::from_secs(2), child.wait())
+        .await
+        .is_ok()
+    {
+        return;
+    }
+
+    unsafe {
+        libc::kill(pgid, libc::SIGKILL);
+    }
+    let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+fn terminate_child_process_tree_on_drop(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+
+    let Some(pid) = child.id() else {
+        let _ = child.start_kill();
+        return;
+    };
+
+    let pgid = -(pid as libc::pid_t);
+    unsafe {
+        libc::kill(pgid, libc::SIGTERM);
+    }
+    let _ = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        unsafe {
+            libc::kill(pgid, libc::SIGKILL);
+        }
+    });
+}
+
+#[cfg(not(unix))]
+async fn terminate_child_process_tree(child: &mut Child) {
+    let _ = child.kill().await;
+}
+
+#[cfg(not(unix))]
+fn terminate_child_process_tree_on_drop(child: &mut Child) {
+    let _ = child.start_kill();
 }

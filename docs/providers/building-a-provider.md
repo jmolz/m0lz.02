@@ -18,7 +18,7 @@ A provider is a standalone process that:
 Reference implementations:
 
 - `packages/provider-claude-code/` -- Workflow + evaluation using the Claude Agent SDK
-- `packages/provider-codex/` -- Evaluation-only using the OpenAI SDK
+- `packages/provider-codex/` -- Workflow through the installed Codex CLI, plus adversarial evaluation using the OpenAI SDK
 - `packages/provider-stub/` -- Echo provider for testing (no AI SDK)
 
 ---
@@ -188,8 +188,8 @@ Key points:
 
 Set `evaluation: true` in capabilities and implement `evaluate/create` and `evaluate/score`.
 
-Evaluation sessions are context-isolated. They receive only contract JSON, filtered git diff, and project guidance text. Never include implementation conversation.
-The `claudeMd` wire field is retained for v0.1 compatibility. v0.7.0 callers may populate it with generated `CLAUDE.md` contents or equivalent project guidance; providers should treat it as opaque guidance text.
+Evaluation sessions are context-isolated. They receive only contract JSON, filtered git diff, and evaluation guidance text. Never include implementation conversation.
+The `claudeMd` wire field is retained for v0.1 compatibility. Current callers populate it with evaluation guidance such as `AGENTS.md` contents; providers should treat it as opaque guidance text.
 
 ```typescript
 import type { EvaluateCreateParams, EvaluateScoreParams, CriterionScore } from '@pice/provider-protocol';
@@ -350,6 +350,8 @@ Configure your provider in `.pice/config.toml`:
 name = "myai"
 ```
 
+`[provider].name` selects the primary developer for workflow commands: `prime`, `plan`, `execute`, `review`, `commit`, and `handoff`.
+
 For evaluation providers:
 
 ```toml
@@ -361,6 +363,8 @@ enabled = true
 ```
 
 The core resolves provider names to `pice-provider-{name}` binaries in the `packages/` directory relative to the PICE binary.
+
+Workflow and evaluation auth are provider-specific. The bundled Codex workflow provider shells out to `codex exec`, so users should run `codex login` or configure the auth mode their installed Codex CLI supports. The bundled Codex adversarial evaluator is OpenAI SDK-backed and uses `OPENAI_API_KEY`. The Claude Code provider uses the Claude Agent SDK and `ANTHROPIC_API_KEY`.
 
 ---
 
@@ -393,7 +397,7 @@ A provider can support workflow only, evaluation only, or both.
 - [ ] `response/chunk` notifications stream during `session/send`
 - [ ] `response/complete` sent before `session/send` returns
 - [ ] `evaluate/result` sent before `evaluate/score` returns
-- [ ] Evaluation sessions are context-isolated (contract + filtered diff + project guidance only)
+- [ ] Evaluation sessions are context-isolated (contract + filtered diff + evaluation guidance only)
 - [ ] Entry point starts provider with `provider.start()`
 - [ ] Tests cover happy path, edge cases, and error cases
 - [ ] No live API calls in default test suite

@@ -164,6 +164,7 @@ db_path = ".pice/metrics.db"
             force: false,
             upgrade: false,
             json: false,
+            developer: "claude-code".to_string(),
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
         match &resp {
@@ -550,6 +551,7 @@ db_path = ".pice/metrics.db"
             force: false,
             upgrade: false,
             json: true,
+            developer: "claude-code".to_string(),
         });
         let resp = dispatch(req, &ctx, &NullSink).await.expect("dispatch");
         match resp {

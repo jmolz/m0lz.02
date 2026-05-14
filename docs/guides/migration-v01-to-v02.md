@@ -6,7 +6,8 @@ v0.2 changes PICE from a single foreground loop into a daemon-backed, layer-awar
 
 `pice init` creates:
 
-- `.claude/` public workflow scaffold and command templates
+- `.claude/` public workflow scaffold and command templates by default
+- `.codex/` public workflow scaffold plus root `AGENTS.md` when run with `--developer codex`
 - `.pice/config.toml` provider, evaluation, telemetry, and metrics config
 - `.pice/workflow.yaml` Stack Loops defaults
 
@@ -15,12 +16,13 @@ v0.2 changes PICE from a single foreground loop into a daemon-backed, layer-awar
 - `.pice/layers.toml` detected layer configuration
 - `.pice/contracts/*.toml` layer contract templates
 
-This repository uses `.codex/` for maintainer-local plans and command wrappers. Fresh user projects should follow the `.claude/` scaffold emitted by `pice init`.
+`[provider].name` in `.pice/config.toml` selects the primary developer for workflow commands. `[evaluation.primary]` and `[evaluation.adversarial]` select evaluators and can be mixed independently.
 
 ## Upgrade Steps
 
 ```bash
-pice init
+pice init                    # default Claude Code scaffold
+# or: pice init --developer codex
 pice init --upgrade
 pice layers detect --json
 pice layers check --json

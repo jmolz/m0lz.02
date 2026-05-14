@@ -55,9 +55,9 @@ The evaluation tier, determining how many evaluators run and at what depth.
 
 | Tier | Scope | Evaluation |
 |------|-------|------------|
-| 1 | Bug fixes, config changes, simple refactors | Single Claude evaluator |
-| 2 | New features, integrations, multi-file changes | Claude + Codex in parallel |
-| 3 | Architectural changes, new subsystems, core refactors | Claude agent team (4) + Codex at maximum depth |
+| 1 | Bug fixes, config changes, simple refactors | Single primary evaluator |
+| 2 | New features, integrations, multi-file changes | Primary evaluator + configured adversarial provider |
+| 3 | Architectural changes, new subsystems, core refactors | Primary evaluator team + configured adversarial provider |
 
 When uncertain, tier up rather than down.
 

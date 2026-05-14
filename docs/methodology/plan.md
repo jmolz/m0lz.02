@@ -16,7 +16,7 @@ rationale instead of following the plan itself.
 ## What Makes a Good Plan
 
 A good plan is self-contained. A developer (or AI) reading only the plan file, the
-project's project guidance, and the codebase should have everything needed to implement the
+project's workflow guidance, and the codebase should have everything needed to implement the
 feature correctly. The plan should include:
 
 ### Research
@@ -67,9 +67,9 @@ in the contract and should match the scope of the change:
 
 | Tier | When to Use | Evaluation Depth |
 |------|-------------|------------------|
-| 1 | Bug fixes, config changes, simple refactors | Single Claude evaluator -- contract grading only |
-| 2 | New features, integrations, non-trivial changes | Claude evaluator + Codex adversarial review in parallel |
-| 3 | Architectural changes, core refactors, new subsystems | Claude agent team (4 evaluators) + Codex at maximum reasoning depth |
+| 1 | Bug fixes, config changes, simple refactors | Single primary evaluator -- contract grading only |
+| 2 | New features, integrations, non-trivial changes | Primary evaluator + configured adversarial review in parallel |
+| 3 | Architectural changes, core refactors, new subsystems | Primary evaluator team + configured adversarial review |
 
 Tier 1 is fast and cheap. Tier 3 is thorough and expensive. Most feature work is
 Tier 2. When in doubt, tier up rather than down -- under-evaluating a complex change

@@ -3,10 +3,24 @@ import type {
   EvaluateCreateParams,
   EvaluateScoreParams,
   CriterionScore,
+  SessionCreateParams,
+  SessionSendParams,
+  SessionDestroyParams,
 } from '@pice/provider-protocol';
-import { SESSION_NOT_FOUND, EVALUATE_RESULT } from '@pice/provider-protocol';
+import {
+  SESSION_NOT_FOUND,
+  EVALUATE_RESULT,
+  RESPONSE_CHUNK,
+  RESPONSE_COMPLETE,
+  RESPONSE_TOOL_USE,
+} from '@pice/provider-protocol';
 import { BaseProvider, StdioTransport } from '@pice/provider-base';
 import { runAdversarialEvaluation, type AdversarialResultType } from './evaluator.js';
+import {
+  runCodexWorkflowSession,
+  terminateAllCodexWorkflowSessions,
+  terminateCodexWorkflowSession,
+} from './workflow.js';
 
 interface CodexConfig {
   defaultModel?: string;
@@ -22,9 +36,17 @@ interface EvalSession {
   effort: string;
 }
 
+interface WorkflowSession {
+  id: string;
+  workingDirectory: string;
+  model?: string;
+  systemPrompt?: string;
+}
+
 let nextSessionId = 1;
 
 export class CodexProvider extends BaseProvider<CodexConfig> {
+  private workflowSessions = new Map<string, WorkflowSession>();
   private evalSessions = new Map<string, EvalSession>();
 
   constructor() {
@@ -33,7 +55,7 @@ export class CodexProvider extends BaseProvider<CodexConfig> {
 
   getCapabilities(): ProviderCapabilities {
     return {
-      workflow: false,
+      workflow: true,
       evaluation: true,
       agentTeams: false,
       models: ['gpt-5.5', 'gpt-4.1'],
@@ -42,6 +64,67 @@ export class CodexProvider extends BaseProvider<CodexConfig> {
   }
 
   protected registerHandlers(transport: StdioTransport): void {
+    transport.registerMethod('session/create', async (params: unknown) => {
+      this.requireInitialized();
+      const { workingDirectory, model, systemPrompt } = params as SessionCreateParams;
+      const id = `codex-session-${nextSessionId++}`;
+      this.workflowSessions.set(id, {
+        id,
+        workingDirectory,
+        model: model ?? this.config?.defaultModel,
+        systemPrompt,
+      });
+      return { sessionId: id };
+    });
+
+    transport.registerMethod('session/send', async (params: unknown) => {
+      this.requireInitialized();
+      const { sessionId, message } = params as SessionSendParams;
+      const session = this.workflowSessions.get(sessionId);
+      if (!session) {
+        throw Object.assign(new Error(`session not found: ${sessionId}`), {
+          code: SESSION_NOT_FOUND,
+        });
+      }
+
+      const result = await runCodexWorkflowSession(
+        {
+          sessionId,
+          message,
+          workingDirectory: session.workingDirectory,
+          model: session.model,
+          systemPrompt: session.systemPrompt,
+        },
+        {
+          onChunk: (text) => {
+            transport.sendNotification(RESPONSE_CHUNK, { sessionId, text });
+          },
+          onToolUse: (event) => {
+            transport.sendNotification(RESPONSE_TOOL_USE, {
+              sessionId,
+              toolName: event.toolName,
+              toolInput: event.toolInput,
+              ...(event.toolResult !== undefined ? { toolResult: event.toolResult } : {}),
+            });
+          },
+        },
+      );
+
+      transport.sendNotification(RESPONSE_COMPLETE, {
+        sessionId,
+        result: { finalText: result.finalText, oneShot: true },
+      });
+      return { ok: true };
+    });
+
+    transport.registerMethod('session/destroy', async (params: unknown) => {
+      this.requireInitialized();
+      const { sessionId } = params as SessionDestroyParams;
+      this.workflowSessions.delete(sessionId);
+      await terminateCodexWorkflowSession(sessionId);
+      return null;
+    });
+
     // evaluate/create — create an adversarial evaluation session
     transport.registerMethod('evaluate/create', async (params: unknown) => {
       this.requireInitialized();
@@ -88,6 +171,10 @@ export class CodexProvider extends BaseProvider<CodexConfig> {
 
       return { ok: true };
     });
+  }
+
+  protected override async onShutdown(): Promise<void> {
+    await terminateAllCodexWorkflowSessions();
   }
 }
 

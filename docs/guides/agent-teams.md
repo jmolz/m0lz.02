@@ -15,16 +15,16 @@ Prompts for orchestrating multi-agent parallel work. Each prompt creates a team 
 
 ### Tier 2: Dual-Model Adversarial Review
 
-Use for Tier 2 contracts -- new features, integrations, schema changes. Runs a Claude evaluator and a GPT-5.5 adversarial review in parallel. See [evaluation methodology](../methodology/evaluate.md) for details on the tier system.
+Use for Tier 2 contracts -- new features, integrations, schema changes. Runs the configured primary evaluator and configured adversarial review in parallel. See [evaluation methodology](../methodology/evaluate.md) for details on the tier system.
 
 ```
 We just finished implementing [FEATURE]. The contract is in [PLAN PATH].
 
 1. Launch the adversarial review in the background
-2. Spawn a Claude sub-agent as the contract evaluator:
+2. Spawn the configured primary evaluator as the contract evaluator:
    Read the contract JSON from [PLAN PATH]. For EACH criterion, run the
    validation command, try to break the feature, and score 1-10. You are NOT
-   the implementer. Do NOT be generous. A 7 means "meets the bar."
+   the implementer. Do NOT be generous. A 7 means functional but insufficient.
 3. Collect adversarial results
 4. Synthesize both into a single evaluation report
 ```
@@ -40,7 +40,7 @@ Spawn four teammates:
 3. **Regression hunter** -- run full test suite, check callers of changed files
 4. **Edge case breaker** -- find ways to break the feature with malformed inputs, missing auth, boundary values
 
-Rules: evaluators work independently, read only contract + diff + project guidance, and share findings at the end.
+Rules: evaluators work independently, read only contract + diff + evaluation guidance, and share findings at the end.
 
 ## Code Review
 

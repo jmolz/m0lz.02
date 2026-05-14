@@ -26,15 +26,15 @@ Print this. Pin it. Tape it to your monitor.
 
 ### Evaluation Tiers (Dual-Model Adversarial)
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 high) | Use When |
-|------|------------------|----------------------------------|----------|
+| Tier | Primary Evaluator | Configured Adversarial | Use When |
+|------|-------------------|--------------------------|----------|
 | 1 | 1 pass | — | Bug fixes, simple endpoints, UI tweaks |
-| 2 | 1 pass | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | New features, integrations, schema changes |
-| 3 | Claude agent team | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | Architectural changes, new pipeline phases |
+| 2 | 1 pass | 1 configured design challenge | New features, integrations, schema changes |
+| 3 | primary evaluator team | 1 configured design challenge | Architectural changes, new pipeline phases |
 
-**Dual-model rationale:** Claude evaluates contract criteria formally (scores, pass/fail). GPT-5.5 challenges whether the *approach itself* is right — questioning design tradeoffs, assumptions, and alternative approaches. Different model families have different blind spots, so running both in parallel maximizes coverage.
+**Dual-model rationale:** The configured primary evaluator scores contract criteria formally. The configured adversarial provider challenges whether the *approach itself* is right — questioning design tradeoffs, assumptions, and alternative approaches. Different model families have different blind spots, so running both in parallel maximizes coverage.
 
-Both evaluators are adversarial by design — they never see implementation reasoning, only the contract, code diff, and CLAUDE.md. This eliminates self-evaluation bias.
+Both evaluators are adversarial by design — they never see implementation reasoning, only the contract, code diff, and AGENTS.md. This eliminates self-evaluation bias.
 
 ## WISC Context Management
 

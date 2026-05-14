@@ -59,7 +59,7 @@ The entire verification tooling landscape is siloed:
 | Contract testing (Pact, Specmatic) | Structural compatibility — data shapes match | Behavioral correctness, ordering, timing, capacity |
 | Architecture analysis (ArchUnit, jQAssistant) | Static dependency rules | Runtime coupling, temporal dependencies, config drift |
 | Formal methods (session types, TLA+) | Mathematical protocol guarantees | Zero adoption in production microservices |
-| AI coding agents (Claude Code, Cursor) | Local code correctness | Integration assumptions, cross-component contracts |
+| AI coding agents (local assistants, IDE agents) | Local code correctness | Integration assumptions, cross-component contracts |
 
 **No tool in existence can automatically discover that Component A assumes something about Component B that Component B doesn't guarantee.** Garlan et al. identified this as the core problem of "architectural mismatch" in 1995 but proposed better documentation — not automated detection. Thirty years later, the gap remains open.
 
@@ -237,7 +237,7 @@ Feature: "Add user authentication"
 
 A core question for Stack Loops: how many evaluation passes does each layer need? The answer is mathematically grounded, not arbitrary.
 
-**The correlated evaluator ceiling.** The classical Condorcet Jury Theorem promises that majority-vote accuracy approaches 100% as evaluator count grows — but only when evaluators are independent. Kim et al. (ICML 2025) demonstrated across 350+ LLMs that models agree on ~60% of their errors, even across different providers. The effective sample size formula quantifies the damage: **n_eff = n / (1 + (n−1)ρ)**. With ρ ≈ 0.3 between Claude and GPT, the effective independent evaluator count caps at ~3.3 regardless of pass count. The practical ceiling is **~97% accuracy, reached by approximately 5 passes**.
+**The correlated evaluator ceiling.** The classical Condorcet Jury Theorem promises that majority-vote accuracy approaches 100% as evaluator count grows — but only when evaluators are independent. Kim et al. (ICML 2025) demonstrated across 350+ LLMs that models agree on ~60% of their errors, even across different providers. The effective sample size formula quantifies the damage: **n_eff = n / (1 + (n−1)ρ)**. With ρ ≈ 0.3 between default evaluator families, the effective independent evaluator count caps at ~3.3 regardless of pass count. The practical ceiling is **~97% accuracy, reached by approximately 5 passes**.
 
 | Passes | Effective N | Estimated confidence | Marginal gain |
 | ------ | ----------- | -------------------- | ------------- |
@@ -616,7 +616,7 @@ Spawned experts:
     └── Assumes: Build args present, registry auth configured, base image accessible
 ```
 
-**Adversarial assumption mining.** At Tier 3, the dual-model adversarial evaluation is repurposed for seam discovery. One model (Claude) infers what the consumer assumes. The other (GPT) independently infers what the provider guarantees. PICE compares the two sets. Any assumption in the consumer's list that's absent from the provider's guarantees is a **seam gap** — a latent integration failure waiting to happen.
+**Adversarial assumption mining.** At Tier 3, the dual-model adversarial evaluation is repurposed for seam discovery. One configured evaluator infers what the consumer assumes. The other independently infers what the provider guarantees. PICE compares the two sets. Any assumption in the consumer's list that's absent from the provider's guarantees is a **seam gap** — a latent integration failure waiting to happen.
 
 This is the capability that doesn't exist anywhere: **automated cross-component assumption asymmetry detection**. Garlan et al. identified it as the core problem in 1995. Thirty years later, PICE builds the automated detection.
 
@@ -640,7 +640,7 @@ Infrastructure contract criteria:
 
 ### Expert team sizing
 
-Community experience with Claude Code agent teams consistently shows diminishing returns beyond 3 teammates, with the official recommendation of 5–6 tasks per teammate. This is also supported by the ensemble theory underpinning the convergence analysis: the Krogh-Vedelsby decomposition shows **E_ensemble = E_avg − Ambiguity** — ensemble error improves only to the extent evaluators bring genuinely different perspectives. 2–3 specialists per review maximizes ambiguity (evaluator diversity) without hitting the correlated ceiling.
+Community experience with AI agent teams consistently shows diminishing returns beyond 3 teammates, with the common recommendation of 5–6 tasks per teammate. This is also supported by the ensemble theory underpinning the convergence analysis: the Krogh-Vedelsby decomposition shows **E_ensemble = E_avg − Ambiguity** — ensemble error improves only to the extent evaluators bring genuinely different perspectives. 2–3 specialists per review maximizes ambiguity (evaluator diversity) without hitting the correlated ceiling.
 
 ### The strategic pipeline use case
 
@@ -826,8 +826,8 @@ Over time, this correlation score becomes the tuning signal for the entire syste
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                    ADAPTIVE EVALUATION ENGINE                       │   │
 │  │                                                                     │   │
-│  │  Pass 1 → Claude evaluates → Update Beta posterior                  │   │
-│  │  Pass 2 → GPT evaluates   → Check SPRT boundaries                  │   │
+│  │  Pass 1 → Primary evaluates → Update Beta posterior                 │   │
+│  │  Pass 2 → Adversary evaluates → Check SPRT boundaries              │   │
 │  │                                                                     │   │
 │  │  ┌─ ADTS Decision ─────────────────────────────────────────────┐   │   │
 │  │  │                                                              │   │   │
@@ -929,7 +929,7 @@ Over time, this correlation score becomes the tuning signal for the entire syste
                            │
                            ▼
                ┌──────────────────────┐
-               │   PASS 1: Claude     │
+               │   PASS 1: Primary    │
                │   evaluates layer    │
                │                      │
                │   Update posterior:  │

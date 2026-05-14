@@ -26,7 +26,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Scaffold .claude/ and .pice/ directories with PICE framework files
+    /// Scaffold developer commands and .pice/ config
     Init(commands::init::InitArgs),
 
     /// Orient on the codebase and get recommended next actions

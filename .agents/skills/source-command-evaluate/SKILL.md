@@ -59,7 +59,6 @@ git status
 Also gather:
 
 - The project's AGENTS.md (for convention checking)
-- Any on-demand rules in `.codex/rules/` relevant to changed files
 
 If `AGENTS.md` is missing from the current git toplevel and the toplevel path contains `/.worktrees/`, use the sibling main checkout `AGENTS.md` above the `.worktrees` directory instead. Report the resolved AGENTS path in the evaluation output so a worktree cannot silently evaluate without project conventions.
 
@@ -67,29 +66,33 @@ If `AGENTS.md` is missing from the current git toplevel and the toplevel path co
 
 ## Step 3: Run Evaluation Pass(es)
 
-Evaluation uses a **dual-model adversarial** approach. The Claude evaluator grades contract criteria formally. For Tier 2+, a parallel GPT-5.5 adversarial review challenges the design approach itself.
+Evaluation uses a **dual-model adversarial** approach. The configured primary evaluator grades contract criteria formally. For Tier 2+, a parallel configured adversarial review challenges the design approach itself.
 
-### Step 3a: Launch Codex Adversarial Review (all tiers)
+### Step 3a: Launch Configured Adversarial Review (if enabled)
 
-For every tier (1, 2, and 3), launch a Codex adversarial review in the background **before** running the Claude evaluator. This runs GPT-5.5 xhigh in parallel.
+If `.pice/config.toml` has `[evaluation.adversarial].enabled = true`, read `[evaluation.adversarial]` and launch the configured `provider`, `model`, and `effort` in the background **before** running the configured primary evaluator. Do not substitute hard-coded defaults when the config names a different provider, model, or effort.
 
-Run the following via `Bash` with `run_in_background: true` (so Claude evaluation can proceed in parallel):
+If `[evaluation.adversarial].enabled = false`, do not launch the background review. Record `Adversarial review: NO (disabled in config)` in the final report and proceed with primary-only evaluation.
+
+Run the configured provider path via `Bash` with `run_in_background: true` (so primary evaluation can proceed in parallel). For the bundled Codex adversarial provider (`provider = "codex"`), run:
 
 ```bash
 node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
-  task --background --model gpt-5.5 --effort xhigh \
-  "Adversarially evaluate against this contract: {paste contract criteria names and thresholds}. Use only the contract JSON, git diff/status, AGENTS.md, and relevant .codex/rules. Challenge design assumptions, failure modes, and production risks; do not edit files."
+  task --background --model {model} --effort {effort} \
+  "Adversarially evaluate against this contract: {paste contract criteria names and thresholds}. Use only the contract JSON, git diff/status, and AGENTS.md. Challenge design assumptions, failure modes, and production risks; do not edit files."
 ```
 
-All tiers use `task --model gpt-5.5 --effort xhigh` for maximum reasoning depth. Do not use `adversarial-review --effort`; the installed companion does not parse effort flags for that subcommand.
+For the bundled Codex provider, do not use `adversarial-review --effort`; the installed companion does not parse effort flags for that subcommand.
 
-If the script fails (e.g., Codex not configured), note the error and continue with Claude-only evaluation — do not block the entire evaluation.
+If `provider` is not `codex`, invoke that provider's documented adversarial path with the configured model and effort. If the provider implementation is unavailable, record `Adversarial review: NO (configured provider unavailable: {provider})` and continue with primary-only evaluation.
 
-The Codex review challenges the *approach* — was this the right design? What assumptions does it depend on? Where could it fail under real-world conditions? This is complementary to the Claude evaluator's formal contract grading.
+If the adversarial provider fails, note the error and continue with primary-only evaluation — do not block the entire evaluation.
+
+The adversarial review challenges the *approach* — was this the right design? What assumptions does it depend on? Where could it fail under real-world conditions? This is complementary to formal contract grading.
 
 #### Rate-Limit Fallback (ChatGPT Team → OpenAI API key)
 
-The Codex CLI authenticates via the user's ChatGPT Team session by default. When that session hits its rate limit, fall back to a direct OpenAI Responses API call — do **not** run `codex login --api-key`, as that would overwrite the ChatGPT Team session (making recovery manual once the rate limit lifts).
+The Codex CLI authenticates via the user's ChatGPT Team session by default. When the configured adversarial provider is `codex` and that session hits its rate limit, fall back to a direct OpenAI Responses API call with the configured adversarial `model` and `effort` — do **not** run `codex login --api-key`, as that would overwrite the ChatGPT Team session (making recovery manual once the rate limit lifts).
 
 **Fallback key location**: `~/.codex/.openai-fallback-key` — single line containing an OpenAI API key, `chmod 600`. If absent, skip fallback and report the rate-limit error verbatim.
 
@@ -99,32 +102,33 @@ The Codex CLI authenticates via the user's ChatGPT Team session by default. When
 
 ```bash
 OPENAI_FALLBACK_KEY=$(cat "$HOME/.codex/.openai-fallback-key")
-EFFORT="xhigh"   # All tiers (Responses API supports xhigh for gpt-5.5)
+FALLBACK_MODEL="{model}"
+FALLBACK_EFFORT="{effort}"
 cat > /tmp/codex-fallback-request.json <<'JSON'
 {
-  "model": "gpt-5.5",
+  "model": "__MODEL__",
   "reasoning": { "effort": "__EFFORT__" },
   "input": "__PROMPT__"
 }
 JSON
-# Replace __EFFORT__ and __PROMPT__ with the actual values (jq or sed; escape JSON properly).
+# Replace __MODEL__, __EFFORT__, and __PROMPT__ with the configured values (jq or sed; escape JSON properly).
 curl -sS https://api.openai.com/v1/responses \
   -H "Authorization: Bearer $OPENAI_FALLBACK_KEY" \
   -H "Content-Type: application/json" \
   --data-binary @/tmp/codex-fallback-request.json
 ```
 
-Reserve sufficient output budget (OpenAI recommends ≥25k tokens for reasoning + output on gpt-5.5 at `xhigh`). Optionally pass `"max_output_tokens": 32000` and handle `status: "incomplete"` with `incomplete_details.reason === "max_output_tokens"` by retrying with a larger budget. Extract the visible answer from `response.output[].content[].text` (or `response.output_text`).
+Reserve sufficient output budget for the configured model and effort. Optionally pass `"max_output_tokens": 32000` and handle `status: "incomplete"` with `incomplete_details.reason === "max_output_tokens"` by retrying with a larger budget. Extract the visible answer from `response.output[].content[].text` (or `response.output_text`).
 
 The `__PROMPT__` must include: the same focus text passed to `codex-companion task`, the contract criteria JSON, the full diff, and AGENTS.md — i.e., the same context Codex would have received. Construct the prompt string explicitly rather than relying on Codex's internal prompt templates (which are not accessible outside the CLI).
 
-Treat the extracted text as the adversarial review output. Label it clearly in the final report as `Codex GPT-5.5 (OpenAI API fallback — ChatGPT Team rate-limited)`.
+Treat the extracted text as the adversarial review output. Label it clearly in the final report as `{provider} {model} {effort} (OpenAI API fallback — ChatGPT Team rate-limited)`.
 
 Once the ChatGPT Team rate limit lifts, no action is required: the primary Codex path resumes on the next invocation, and the fallback triggers only on failure.
 
-### Step 3b: Run Claude Evaluator Pass(es)
+### Step 3b: Run Configured Primary Evaluator Pass(es)
 
-For each Claude evaluation pass (1 for Tier 1, 1 for Tier 2, 3 for Tier 3 agent team), spawn a **fresh Claude opus 4.7 adaptive sub-agent** (`model: "opus"`) with the following prompt.
+For each primary evaluation pass (1 for Tier 1, 1 for Tier 2, 3 for Tier 3 agent team), spawn a **fresh evaluator session** using `[evaluation.primary]` provider/model from `.pice/config.toml` with the following prompt.
 
 ### Evaluator Sub-Agent Prompt
 
@@ -150,17 +154,17 @@ Contract:
 
 {paste the full git diff here}
 
-## Project Conventions
+## Evaluation Guidance
 
-{paste AGENTS.md contents here}
+{paste AGENTS.md contents here if present; otherwise state that no evaluator guidance file exists}
 
 ## Your Task
 
 For EACH criterion in the contract:
 
-1. **Read the relevant code** — find the files that implement this criterion
+1. **Inspect the supplied diff/status** — identify the changed files and hunks relevant to this criterion without opening additional repository files
 2. **Run the validation** — execute the validation command or check the observable behavior
-3. **Try to break it** — think of edge cases, malformed inputs, missing auth, concurrent access
+3. **Try to break it from the supplied evidence** — think of edge cases, malformed inputs, missing auth, concurrent access
 4. **Score it 1-10** with specific evidence:
    - 1-3: Fundamentally broken or missing
    - 4-5: Partially works but has significant gaps
@@ -219,19 +223,19 @@ The new evaluator does NOT see the implementation conversation — only prior ev
 
 ---
 
-## Step 4: Collect Codex Findings (all tiers)
+## Step 4: Collect Adversarial Findings
 
-A Codex adversarial review was launched in Step 3a regardless of tier; collect its results now. The background Bash task should have completed (or will complete shortly) — wait for the completion notification if it hasn't arrived yet, then read the full output.
+If a configured adversarial review was launched in Step 3a, collect its results now. The background Bash task should have completed (or will complete shortly) — wait for the completion notification if it hasn't arrived yet, then read the full output.
 
-If the background task is still running after all Claude evaluation passes are complete, wait up to 5 minutes. If it times out or errored, note this in the final report and proceed with Claude-only results.
+If the background task is still running after all primary evaluation passes are complete, wait up to 5 minutes. If it times out or errored, note this in the final report and proceed with primary-only results.
 
-**Before proceeding**, scan the collected Codex output for rate-limit markers (see Step 3a → Rate-Limit Fallback). If any are present:
+**Before proceeding**, if the configured provider was Codex, scan the collected Codex output for rate-limit markers (see Step 3a → Rate-Limit Fallback). If any are present:
 
 1. If `~/.codex/.openai-fallback-key` exists → run the fallback curl invocation from Step 3a and substitute the fallback output for the Codex output.
 2. If the key file is missing → report to the user:
-   `Codex adversarial review was rate-limited. Paste your OpenAI API key into ~/.codex/.openai-fallback-key (chmod 600) to enable fallback, then re-run /evaluate. Proceeding with Claude-only evaluation for now.`
+   `Codex adversarial review was rate-limited. Paste your OpenAI API key into ~/.codex/.openai-fallback-key (chmod 600) to enable fallback, then re-run /evaluate. Proceeding with primary-only evaluation for now.`
 
-The Codex review output challenges design decisions and assumptions — it does NOT score against the contract. Treat its findings as a separate evaluation dimension.
+The adversarial review output challenges design decisions and assumptions — it does NOT score against the contract. Treat its findings as a separate evaluation dimension.
 
 ---
 
@@ -245,19 +249,19 @@ After all passes complete (or the user stops early), output:
 ### Contract
 
 - Tier: {N}
-- Claude passes completed: {N}/{max}
-- Codex adversarial review: YES (all tiers — GPT-5.5 xhigh)
+- Primary evaluator passes completed: {N}/{max}
+- Adversarial review: YES ({provider} {model} {effort}) / NO ({reason})
 
-### Results by Criterion (Claude Evaluator)
+### Results by Criterion (Primary Evaluator)
 
 | Criterion | Threshold | Score  | Pass   |
 | --------- | --------- | ------ | ------ |
 | {name}    | {T}/10    | {S}/10 | YES/NO |
 | ...       | ...       | ...    | ...    |
 
-### Design Challenge Findings (Codex GPT-5.5 xhigh — all tiers)
+### Design Challenge Findings ({provider} {model} {effort})
 
-{Paste Codex adversarial review findings verbatim. These challenge the approach
+{Paste adversarial review findings verbatim. These challenge the approach
 itself — design tradeoffs, assumptions, and alternative approaches. Categorize as:}
 
 - **Critical** — design issues that could cause real-world failures
@@ -266,8 +270,8 @@ itself — design tradeoffs, assumptions, and alternative approaches. Categorize
 
 ### Overall: {PASS / FAIL}
 
-A FAIL from the Claude evaluator (any criterion below threshold) = overall FAIL.
-Critical design challenges from Codex that the team cannot justify = overall FAIL.
+A FAIL from the configured primary evaluator (any criterion below threshold) = overall FAIL.
+Critical design challenges from the configured adversarial review that the team cannot justify = overall FAIL.
 
 ### Issues to Address (if FAIL)
 

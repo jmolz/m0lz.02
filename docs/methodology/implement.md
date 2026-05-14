@@ -3,7 +3,7 @@
 ## Purpose
 
 The Implement phase turns an approved plan into working code. A fresh AI session
-receives the plan file, the project's project guidance, and access to the codebase. It does
+receives the plan file, the project's workflow guidance, and access to the codebase. It does
 not receive the planning conversation, the developer's rationale, or any other context
 from the Plan phase.
 
@@ -18,7 +18,7 @@ When `pice execute <plan-path>` runs, the CLI:
 
 1. Starts a new provider process (separate from any previous session)
 2. Creates a fresh AI session with no conversation history
-3. Sends the plan file content and project guidance as the initial context
+3. Sends the plan file content and workflow guidance as the initial context
 4. The AI reads the codebase directly through tool use
 
 The implementation session never sees:
@@ -61,9 +61,14 @@ The CLI parses the plan file, extracts the contract (to validate the file is a p
 PICE plan), and assembles the execution prompt. The prompt includes:
 
 - The full plan content (research, steps, contract)
-- The project's project guidance (coding standards, project structure, conventions)
+- The project's workflow guidance (coding standards, project structure, conventions)
 - Instructions to follow the plan steps sequentially
 - Instructions to run validation after each step
+
+The configured workflow provider controls which guidance file is preferred.
+`[provider].name = "claude-code"` prefers `CLAUDE.md`; `[provider].name = "codex"`
+prefers `AGENTS.md`. If the preferred file is absent, PICE falls back to the other
+file so existing projects continue to work.
 
 The AI then works through the plan, using its tools to read files, write code, and
 run commands. The developer watches the streaming output and can intervene if needed.
@@ -124,8 +129,9 @@ revision.
 Under the hood, `pice execute` follows the standard PICE session lifecycle managed by
 the Rust core:
 
-1. **Resolve provider** -- Look up the configured workflow provider (default:
-   Claude Code)
+1. **Resolve provider** -- Look up the configured workflow provider from
+   `[provider].name` (default: Claude Code; Codex is available with
+   `pice init --developer codex` or `name = "codex"`)
 2. **Spawn process** -- Start the provider as a child process communicating over
    JSON-RPC via stdio
 3. **Initialize** -- Send provider configuration
@@ -142,8 +148,8 @@ commands never duplicate this sequence.
 
 After implementation is complete, the developer runs `pice evaluate <plan-path>` to
 grade the work against the contract. The [Evaluation System](evaluate.md) uses
-context-isolated evaluators that see only the contract, the git diff, and project guidance --
-not the implementation session.
+context-isolated evaluators that see only the contract, the git diff, and evaluation
+guidance from `AGENTS.md` -- not the implementation session.
 
 ## Further Reading
 

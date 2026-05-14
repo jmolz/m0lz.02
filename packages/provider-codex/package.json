@@ -2,7 +2,7 @@
   "name": "@pice/provider-codex",
   "version": "0.7.0",
   "type": "module",
-  "description": "Codex/OpenAI adversarial evaluator provider for PICE",
+  "description": "Codex CLI workflow and OpenAI adversarial evaluator provider for PICE",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {

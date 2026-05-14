@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use pice_core::cli::{CommandResponse, EvaluateRequest, ExitJsonStatus};
 use pice_core::layers::manifest::ManifestStatus;
 use pice_core::plan_parser::ParsedPlan;
-use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
+use pice_core::prompt::helpers::{get_git_diff, read_evaluation_guidance};
 use pice_protocol::CriterionScore;
 use serde_json::json;
 
@@ -1690,10 +1690,10 @@ pub async fn run(
     let tier = contract.tier;
     let contract_json = serde_json::to_value(&contract).context("failed to serialize contract")?;
 
-    // Get diff and CLAUDE.md for evaluator context — evaluators see ONLY
-    // contract, diff, and CLAUDE.md. Never implementation context.
+    // Get diff and AGENTS.md for evaluator context — evaluators see ONLY
+    // contract, diff, and AGENTS.md. Never implementation context.
     let diff = get_git_diff(project_root)?;
-    let claude_md = read_claude_md(project_root)?;
+    let claude_md = read_evaluation_guidance(project_root)?;
 
     if !req.json {
         sink.send_chunk(&format!(

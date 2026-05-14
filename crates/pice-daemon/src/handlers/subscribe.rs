@@ -304,7 +304,9 @@ pub async fn logs(
         return Ok(());
     }
 
-    let mut rx = rx.expect("follow=true initializes log receiver");
+    let Some(mut rx) = rx else {
+        anyhow::bail!("logs/stream follow=true did not initialize log receiver");
+    };
 
     loop {
         tokio::select! {

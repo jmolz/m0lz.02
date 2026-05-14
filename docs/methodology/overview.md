@@ -56,7 +56,7 @@ See [Plan Phase](plan.md) for details.
 
 ### Implement
 
-A fresh AI session receives the plan file, the project's project guidance, and access to the
+A fresh AI session receives the plan file, the project's workflow guidance, and access to the
 codebase. It does not receive the planning conversation. This context isolation is
 deliberate -- implementation should follow the plan, not the reasoning that produced it.
 
@@ -79,12 +79,12 @@ See [Contract Format](contract.md) for details.
 ### Evaluate
 
 Evaluation runs one or more AI models against the implementation. The evaluators see
-only three things: the contract JSON, the git diff, and the project's project guidance. They
-never see the planning conversation or implementation session.
+only three things: the contract JSON, the git diff, and evaluation guidance from
+`AGENTS.md`. They never see the planning conversation or implementation session.
 
-PICE uses dual-model adversarial evaluation as a key differentiator. Claude grades each
-contract criterion on a 1-10 scale. A second model from a different family -- GPT-5.5
-by default -- challenges the approach itself: design tradeoffs, unstated assumptions,
+PICE uses dual-model adversarial evaluation as a key differentiator. The configured
+primary evaluator grades each contract criterion on a 1-10 scale. A configured
+adversarial provider challenges the approach itself: design tradeoffs, unstated assumptions,
 failure modes. Different model families have different blind spots, so cross-model
 evaluation catches issues that single-model review misses.
 
@@ -97,10 +97,10 @@ See [Evaluation System](evaluate.md) for details.
 
 This is the mechanism that distinguishes PICE from simple AI code review:
 
-- **Contract grading** (Claude): Formal, per-criterion scoring against the contract.
+- **Contract grading** (primary evaluator): Formal, per-criterion scoring against the contract.
   Each criterion gets a 1-10 score. The Rust core checks whether every score meets its
   threshold.
-- **Design challenge** (GPT-5.5 / Codex): An independent model critiques the approach
+- **Design challenge** (configured adversarial provider): An independent model critiques the approach
   itself. It looks for questionable design decisions, unstated assumptions, missed edge
   cases, and better alternatives. This is not scored against the contract -- it surfaces
   issues the contract might not cover.
@@ -118,7 +118,7 @@ PICE uses the WISC framework to manage AI context windows effectively:
 - **Isolate** -- Each phase runs in its own session. Planning context does not leak
   into implementation. Implementation context does not leak into evaluation.
 - **Select** -- Give each session only the context it needs. Evaluators get the
-  contract, diff, and project guidance -- nothing else.
+  contract, diff, and evaluation guidance -- nothing else.
 - **Compress** -- Handoff files capture session state in a compact form that the next
   session can consume without replaying the full conversation.
 
@@ -131,9 +131,9 @@ The tier system scales evaluation rigor to match the scope of the change:
 
 | Tier | Scope | Evaluation |
 |------|-------|------------|
-| 1 | Bug fixes, simple changes | Single Claude evaluator |
-| 2 | New features, integrations | Claude + Codex in parallel |
-| 3 | Architectural changes | Claude agent team (4 evaluators) + Codex at maximum depth |
+| 1 | Bug fixes, simple changes | Single primary evaluator |
+| 2 | New features, integrations | Primary evaluator + configured adversarial provider |
+| 3 | Architectural changes | Primary evaluator team + configured adversarial provider |
 
 Tiers are declared in the contract during planning. The developer and AI negotiate the
 appropriate tier based on the scope of the change.

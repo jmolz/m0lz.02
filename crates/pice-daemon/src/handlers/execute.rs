@@ -136,7 +136,8 @@ pub async fn run(
     }
 
     let plan = ParsedPlan::load(&plan_path)?;
-    let prompt = builders::build_execute_prompt(&plan.content, project_root)?;
+    let prompt =
+        builders::build_execute_prompt(&plan.content, project_root, &config.provider.name)?;
 
     let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, config).await?;
     if !req.json {
@@ -296,7 +297,7 @@ async fn run_execute_session(
         anyhow::bail!("cancelled before provider startup");
     }
 
-    let prompt = builders::build_execute_prompt(plan_content, project_root)?;
+    let prompt = builders::build_execute_prompt(plan_content, project_root, &config.provider.name)?;
 
     let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, config).await?;
 

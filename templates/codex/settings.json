@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .codex/hooks/vet-handoff.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

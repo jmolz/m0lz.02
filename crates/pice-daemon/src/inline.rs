@@ -108,6 +108,7 @@ mod tests {
             force: false,
             upgrade: false,
             json: false,
+            developer: "claude-code".to_string(),
         });
         let _resp = run_command(req, &sink).await.expect("run_command");
 
