@@ -110,8 +110,10 @@ cargo test -p pice-cli --test evaluate_review_gate_pending --test audit_gates_cs
 # TS provider stack
 pnpm test
 
-# Release workflow policy (NPM publish gate + tag/package alignment)
-pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs
+# Release and local-CI tripwires (NPM publish gate, artifact smoke, Docker/Windows harness policy)
+pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs \
+  scripts/acceptance/release-artifact-smoke.test.mjs \
+  scripts/acceptance/local-ci-policy.test.mjs
 ```
 
 ### What each test covers
@@ -151,6 +153,8 @@ pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs
 | `provider-claude-code/__tests__/claude-code.test.ts` (7 tests) | Codex SDK provider | Capability declaration, prompt assembly, error propagation |
 | `provider-codex/__tests__/codex.test.ts` (5 tests) | Codex/OpenAI evaluator provider | Adversarial review structuring, cost extraction |
 | `scripts/acceptance/release-workflow-policy.test.mjs` | Release publishing policy | Tag-triggered GitHub releases depend on `npm-publish`, tag releases fail closed on package-version mismatch, manual dry-runs do not publish, and every publishable package version stays aligned |
+| `scripts/acceptance/release-artifact-smoke.test.mjs` (3 tests) | Release artifact smoke hardening | Windows daemon-stop named-pipe disconnects are treated as shutdown races only after status polling confirms the daemon is stopped; non-Windows stop failures remain fatal |
+| `scripts/acceptance/local-ci-policy.test.mjs` (4 tests) | Local CI and Windows smoke policy | `Dockerfile.ci`, `scripts/ci/local-linux.sh`, `scripts/ci/windows-smoke.ps1`, and the manual `Windows Smoke` workflow keep Linux Docker preflight and Windows-specific validation discoverable |
 
 **Phase 5 cohort parallelism (commits 1f6424f..84aa43f)**
 
@@ -210,6 +214,9 @@ pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs
 - `packages/provider-claude-code/src/*.ts` — Codex SDK bridge
 - `packages/provider-codex/src/*.ts` — Codex/OpenAI bridge
 - `templates/pice/workflow.yaml` + `templates/pice/workflow-presets/*.yaml` — shipped defaults (capability-gate compatible)
+- `scripts/acceptance/release-artifact-smoke.mjs` — release archive smoke runner, including Windows daemon-stop disconnect recovery and npm pack smoke path
+- `Dockerfile.ci` + `scripts/ci/local-linux.sh` — local Linux CI-equivalent preflight with Node 22, pnpm 9, Rust stable, host-owned temporary dependency mounts, Phase 8 acceptance, and artifact smoke
+- `scripts/ci/windows-smoke.ps1` + `.github/workflows/windows-smoke.yml` — Windows-specific pre-release smoke path for named pipes, `.cmd`, PowerShell, and path behavior
 - `crates/pice-daemon/src/orchestrator/stack_loops.rs` — Phase 5 cohort parallel path: `MAX_PARALLELISM_HARD_CAP=16`, gate conjunction `parallel_configured && cohort_size>1 && max_parallelism>1`, `LayerInputs` owned-struct compile-time context-isolation boundary, `build_per_layer_inputs` single-threaded extractor, `tokio::JoinSet` + `Semaphore` dispatch, `biased` `tokio::select!` with `cancel_fired` gate, `CancellationToken` child-token propagation, `"cancelled:{pre_spawn,in_flight,join_aborted}"` halted_by markers, DAG-order manifest emission, `debug!(target: "pice.cohort", path=...)` gate observability
 - `crates/pice-daemon/src/orchestrator/adaptive_loop.rs` — Phase 5 `PassMetricsSink: Send + Sync` trait with `&self` `record_pass`, `NullPassSink` stateless, `RecordingPassSink` with `Mutex<Vec<_>>` + poison-safe `rows()` reader, task-local `CostStats` (no shared aggregator)
 - `crates/pice-daemon/src/provider/host.rs` — Phase 5 `tokio::process::Command::kill_on_drop(true)` on `ProviderHost::spawn` — load-bearing for zero-orphan-session invariant on cohort cancellation
@@ -240,7 +247,7 @@ pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs
 
 ### Expected results
 
-All tests should pass. Baseline: **1262 Rust tests (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs` line 5), 115 TypeScript tests, 0 lint errors, 0 warnings, clean release build.**
+All tests should pass. Baseline: **1262 Rust tests (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs` line 5), 123 TypeScript tests, 0 lint errors, 0 warnings, clean release build.**
 
 If any fail after your changes:
 
@@ -285,7 +292,13 @@ pnpm build
 cargo build --release
 ```
 
-Expected baseline: **1262 Rust tests passing (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs`), 115 TypeScript tests passing, 0 lint errors, 0 clippy warnings (workspace + lib unwrap/expect denies), clean release build.**
+For CI, release, publishing, or release-smoke changes, also run the Linux CI-equivalent Docker preflight when Docker is available:
+
+```bash
+scripts/ci/local-linux.sh
+```
+
+Expected baseline: **1262 Rust tests passing (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs`), 123 TypeScript tests passing, 0 lint errors, 0 clippy warnings (workspace + lib unwrap/expect denies), clean release build.**
 
 ## Phase 3: Code Review of Current Changes
 
@@ -382,7 +395,13 @@ Phase 6 review gates:
   - pice-core workflow/merge::tests retry_on_reject floor-merge: ✓ / ✗
   - clock.rs inline tests (MockClock gated `#[cfg(test)]`): ✓ / ✗
 
-Full Suite: 938 / 96 tests passing (Phase 6 ships at 931 Rust tests; 830 was pre-Phase-4 baseline)
+Release/CI tripwires:
+  - release-workflow-policy (6 tests — NPM publish gate + tag/package alignment): ✓ / ✗
+  - release-artifact-smoke unit tests (3 tests — Windows pipe disconnect recovery): ✓ / ✗
+  - local-ci-policy (4 tests — Dockerfile/local Linux/Windows smoke invariants): ✓ / ✗
+  - local Linux Docker preflight for CI/release changes: ✓ / ✗ / N/A
+
+Full Suite: 1262 / 123 tests passing
 Lint: 0 errors, 0 warnings (workspace + lib unwrap/expect denies)
 Build: PASS / FAIL
 ```

@@ -17,7 +17,7 @@
 
 ## What It Does
 
-m0lz.02 implements PICE: Plan, Implement, Contract-Evaluate. The v0.7.0 release line adds Stack Loops, which split a feature across technology layers, evaluate each layer against its own contract, run seam checks at integration boundaries, and keep background evaluations observable through status, logs, review gates, and audit data.
+m0lz.02 implements PICE: Plan, Implement, Contract-Evaluate. The current release line includes Stack Loops, which split a feature across technology layers, evaluate each layer against its own contract, run seam checks at integration boundaries, and keep background evaluations observable through status, logs, review gates, and audit data.
 
 The shipped architecture is a CLI adapter plus a headless `pice-daemon`. The CLI handles arguments and terminal rendering. The daemon owns orchestration, background jobs, provider sessions, manifests, metrics, templates, and audit state. AI providers run out of process over the provider JSON-RPC protocol.
 
@@ -237,37 +237,35 @@ For Codex-primary projects, the scaffold includes `.codex/commands/self-heal.md`
 
 ## Metrics And Telemetry
 
-Metrics are local SQLite data in `.pice/metrics.db`. v0.7.0 records evaluation rows, pass events with cost fields, seam findings, layer runs, and gate decisions. The release inventory script writes fresh schema evidence to `docs/releases/metrics-schema-evidence.json`; the Phase 8 reference harness writes runtime row-count evidence to `docs/releases/phase8-reference-evidence.json`.
+Metrics are local SQLite data in `.pice/metrics.db`. The current metrics schema records evaluation rows, pass events with cost fields, seam findings, layer runs, and gate decisions. The release inventory script writes fresh schema evidence to `docs/releases/metrics-schema-evidence.json`; the Phase 8 reference harness writes runtime row-count evidence to `docs/releases/phase8-reference-evidence.json`.
 
 Telemetry is opt-in and disabled by default. Public telemetry claims are limited to aggregate workflow events; local metrics can include project-specific identifiers, but outbound telemetry must not send code, prompts, file paths, secrets, or PII.
 
 ## Release Evidence
 
-Release evidence for v0.7.0 is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md). The npm release is published as version `0.7.0` for the resolver package and all platform binary packages.
+Latest release evidence for v0.8.2 was produced on May 14, 2026 from commit `cfcf954`. Historical v0.7.0 evidence is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
 
-Current release evidence through May 14, 2026:
+Current release evidence:
 
 | Check | Result |
 | --- | --- |
-| Rust tests | `cargo test --workspace --all-targets`: 1237 passed |
-| Rust doc tests | `cargo test --workspace --doc`: 1 ignored documentation example |
-| Rust docs | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`: passed |
-| TypeScript tests | `pnpm test`: 103 passed |
-| Release workflow policy | `pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs`: 6 passed |
-| Rust lint/format | `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings` |
-| TypeScript lint/typecheck/build | `pnpm lint`; `pnpm typecheck`; `pnpm build` |
-| Release build | `cargo build --release` |
-| Speedup gate | `parallel_cohort_speedup_assertion`: ratio `0.566`, target `<= 0.625` |
-| Criterion benchmark | Sequential `[586.49 ms, 593.39 ms]`; parallel `[347.03 ms, 350.09 ms]` |
-| Remote CI | `test(release): enforce npm publish policy` push run passed on `main` |
-| NPM publish | Manual `release.yml` run with `publish_npm=true` passed; `@jacobmolz/pice` and all five platform packages resolve at `0.7.0` |
+| Local Linux Docker preflight | `scripts/ci/local-linux.sh` passed end-to-end on `linux/amd64` with Rust, TypeScript, Phase 8 acceptance, release-smoke, and README media gates |
+| Rust lint/tests/build | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, and `cargo build --release` passed in CI and release validation |
+| TypeScript lint/typecheck/tests/build | `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build` passed; local `pnpm test` passed 123 tests |
+| Phase 8 acceptance | Metrics inventory, five-reference-project harness, release artifact smoke, npm pack smoke, and README media audit passed |
+| Windows validation | `Rust (windows-latest)` passed in main CI; `Smoke x86_64-pc-windows-msvc` passed in the release workflow |
+| Remote CI | GitHub Actions run `25886626891` passed on `main`; includes `Phase 8 acceptance (linux-x64)` and `Rust (windows-latest)` |
+| Release workflow | GitHub Actions run `25886626757` passed for tag `v0.8.2` |
+| NPM publish | `@jacobmolz/pice@0.8.2` and platform packages published from the release workflow |
+| GitHub release | [`v0.8.2`](https://github.com/jmolz/m0lz.02/releases/tag/v0.8.2) published with five platform archives and shell completions |
 
-Environment: local macOS arm64 development host for the Phase 8 validation
-pass, with remote CI and npm publication evidence added from the May 14, 2026
-release follow-up. The speedup assertion is the release gate; the Criterion
-numbers are informational benchmark output from the same validation pass.
+For a Linux CI-equivalent local preflight, run:
 
-The Phase 8 acceptance suite is:
+```bash
+scripts/ci/local-linux.sh
+```
+
+The Phase 8 acceptance suite inside that preflight is:
 
 ```bash
 node scripts/acceptance/metrics-schema-inventory.mjs
@@ -285,4 +283,4 @@ Read [building a provider](docs/providers/building-a-provider.md) and [the provi
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Full validation includes Rust format, clippy, tests, TypeScript lint/typecheck/tests/build, release build, Phase 8 acceptance harnesses, and artifact smoke.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Full validation includes Rust format, clippy, tests, TypeScript lint/typecheck/tests/build, release build, Phase 8 acceptance harnesses, artifact smoke, and the local Linux Docker preflight for CI or release changes.
