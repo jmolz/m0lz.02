@@ -232,6 +232,7 @@ When working on specific areas, read the corresponding reference:
 | Metrics & telemetry | `.claude/rules/metrics.md` | Working on metrics engine, audit trail, cost tracking |
 | Templates & scaffolding | `.claude/rules/templates.md` | Changing `pice init` output |
 | Visual assets & diagrams | `.claude/rules/docs-visual-assets.md` | Working on docs/images/, docs/diagrams/, or README visuals |
+| Release & publishing | `.claude/rules/release.md` | Changing release workflows, version manifests, npm packages, tags, or release command guidance |
 | **Daemon architecture (v0.2+)** | `.claude/rules/daemon.md` | Working on `pice-daemon`, `pice-core`, CLI adapter, socket transport, manifest |
 | **Stack Loops (v0.2+)** | `.claude/rules/stack-loops.md` | Working on layer detection, DAG orchestration, worktree isolation, seam checks, context isolation |
 | **Workflow YAML + adaptive + gates (v0.2+)** | `.claude/rules/workflow-yaml.md` | Working on `.pice/workflow.yaml`, SPRT/ADTS/VEC, approval gates |

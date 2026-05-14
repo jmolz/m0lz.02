@@ -7,6 +7,7 @@ export default defineConfig({
       'packages/*/src/**/*.test.ts',
       'packages/*/src/**/__tests__/**/*.ts',
       'npm/**/*.test.mjs',
+      'scripts/acceptance/**/*.test.mjs',
     ],
   },
 });

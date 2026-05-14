@@ -89,6 +89,9 @@ cargo test -p pice-cli --test evaluate_review_gate_pending --test audit_gates_cs
 
 # TS provider stack
 pnpm test
+
+# Release workflow policy (NPM publish gate + tag/package alignment)
+pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs
 ```
 
 ### What each test covers
@@ -127,6 +130,7 @@ pnpm test
 | `provider-base/__tests__/transport.test.ts` (11 tests) | stdio JSON-RPC transport | Framing, partial reads, error response shape |
 | `provider-claude-code/__tests__/claude-code.test.ts` (7 tests) | Claude Code SDK provider | Capability declaration, prompt assembly, error propagation |
 | `provider-codex/__tests__/codex.test.ts` (5 tests) | Codex/OpenAI evaluator provider | Adversarial review structuring, cost extraction |
+| `scripts/acceptance/release-workflow-policy.test.mjs` | Release publishing policy | Tag-triggered GitHub releases depend on `npm-publish`, tag releases fail closed on package-version mismatch, manual dry-runs do not publish, and every publishable package version stays aligned |
 
 **Phase 5 cohort parallelism (commits 1f6424f..84aa43f)**
 

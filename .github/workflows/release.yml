@@ -244,6 +244,15 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Assert release tag matches package version
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          expected_tag="v$(node -p "require('./npm/pice/package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "${expected_tag}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} must match npm package version ${expected_tag}" >&2
+            exit 1
+          fi
+
       - name: Assert NPM token is configured
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
