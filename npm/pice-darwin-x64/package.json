@@ -1,6 +1,6 @@
 {
   "name": "@pice/pice-darwin-x64",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "PICE CLI binary for macOS x64 (Intel)",
   "os": ["darwin"],
   "cpu": ["x64"],
