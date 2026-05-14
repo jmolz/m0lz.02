@@ -31,6 +31,28 @@ describe('release artifact smoke daemon teardown', () => {
     expect(calls).toEqual(['daemon stop', 'daemon status']);
   });
 
+  it('retries Windows stop after a shutdown disconnect if the daemon is still running', () => {
+    let stopAttempts = 0;
+    const runner = (_cmd, args) => {
+      if (args.join(' ') === 'daemon stop') {
+        stopAttempts += 1;
+        if (stopAttempts === 1) {
+          throw new Error(
+            'failed to send shutdown to daemon: transport write failed: The pipe is being closed. (os error 232)'
+          );
+        }
+        return { stdout: 'daemon stopped\n', stderr: '' };
+      }
+      return {
+        stdout: stopAttempts >= 2 ? 'daemon is not running\n' : 'daemon is running (v0.8.4)\n',
+        stderr: '',
+      };
+    };
+
+    expect(() => stopDaemonAndWait(runner, 'pice', '/tmp/work', {}, 'win32')).not.toThrow();
+    expect(stopAttempts).toBe(2);
+  });
+
   it('keeps non-Windows stop failures fatal', () => {
     const runner = (_cmd, args) => {
       if (args.join(' ') === 'daemon stop') {

@@ -84,18 +84,22 @@ function isWindowsDaemonStopDisconnect(err, platform = process.platform) {
 
 function stopDaemonAndWait(runner, cmd, cwd, env, platform = process.platform) {
   let stopError = null;
-  try {
-    runner(cmd, ['daemon', 'stop'], { cwd, env, timeout: daemonStopTimeout });
-  } catch (err) {
-    if (!isWindowsDaemonStopDisconnect(err, platform)) {
-      throw err;
-    }
-    stopError = err;
-  }
-
   const deadline = Date.now() + daemonStopTimeout;
+  let nextStopAttemptAt = 0;
   let lastStatus = '';
   while (Date.now() < deadline) {
+    if (Date.now() >= nextStopAttemptAt) {
+      try {
+        runner(cmd, ['daemon', 'stop'], { cwd, env, timeout: daemonStopTimeout });
+      } catch (err) {
+        if (!isWindowsDaemonStopDisconnect(err, platform)) {
+          throw err;
+        }
+        stopError = err;
+      }
+      nextStopAttemptAt = Date.now() + (platform === 'win32' ? 1_000 : daemonStopTimeout);
+    }
+
     lastStatus = runner(cmd, ['daemon', 'status'], { cwd, env, timeout: daemonCommandTimeout }).stdout.trim();
     if (/not running/i.test(lastStatus)) {
       if (platform === 'win32') {
