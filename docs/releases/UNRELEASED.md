@@ -5,9 +5,9 @@ broader v0.2 complete gates. It is intentionally an approval gate, not final
 release notes.
 
 This document records the implemented release-readiness decisions for the branch.
-It does not approve creating a git tag or publishing release artifacts by itself.
-Once tag creation is explicitly approved, the tag-triggered release is required
-to publish both GitHub release artifacts and npm packages after artifact smoke.
+After approval, the release workflow is required to publish both GitHub release
+artifacts and npm packages after artifact smoke; manual npm publication requires
+`dry_run=false` and `publish_npm=true`.
 
 ## Release Identity Approval Block
 
@@ -52,7 +52,7 @@ approval as approval to publish the matching GitHub release and npm packages.
 | CI passes full acceptance suite on macOS arm64/x64, Linux arm64/x64, Windows x64 | CI/release matrices target the required runners and archive smoke jobs. macOS x64 is pinned to the intended `macos-15-intel` label; macOS arm64 is pinned to `macos-15`. | Actual GitHub-hosted run evidence is required before tag approval; if the x64 label is unavailable, the release must record that runner gap and compensating artifact evidence before tagging. |
 | Release notes with breaking changes called out | `docs/releases/v0.7.0.md` exists. | It records migration notes, operational changes, validation evidence, known limitations, and approval boundaries. |
 | Telemetry schema extended for v0.2 metrics | Passed. | `docs/releases/metrics-schema-evidence.json` proves `gate_decisions`, `pass_events.cost_usd`, `seam_findings`, `layer_runs`, and adaptive halt fields. |
-| v0.7.0 tag + release | Version target is approved for implementation; actual tag/publish remains blocked. | Task 15 presents a separate tag/publish checklist after validation. |
+| v0.7.0 tag + release | Version target is approved for implementation; npm packages are published at `0.7.0`. | Future release tags must keep tag/package alignment and publish npm before GitHub Release creation. |
 
 ## v0.2 Complete Matrix
 
@@ -107,7 +107,7 @@ approval as approval to publish the matching GitHub release and npm packages.
 
 | v0.2 quality gate | Evidence state | Required release evidence |
 | --- | --- | --- |
-| Test count at least 400 | Passed. | Current validation recorded 1237 Rust tests and 97 TypeScript tests. |
+| Test count at least 400 | Passed. | Current validation recorded 1237 Rust tests and 103 TypeScript tests. |
 | Clippy, fmt, eslint, tsc clean | Passed. | Recorded in `docs/releases/v0.7.0.md`. |
 | End-to-end acceptance suite runs on required CI platforms | Workflow matrix targets Linux x64/arm64, macOS x64/arm64, and Windows x64. | Actual remote run evidence required before tag; this branch does not claim native runner proof from the local checkout alone. |
 | Fuzz tests for `workflow.yaml` parser and daemon RPC | Not added in this Phase 8 branch. | Known limitation; do not claim fuzz coverage in public release notes. |
@@ -155,5 +155,7 @@ Current Phase 8 evidence:
 - `node scripts/acceptance/metrics-schema-inventory.mjs` passed and wrote `docs/releases/metrics-schema-evidence.json`.
 - `node scripts/acceptance/phase8-reference-projects.mjs` passed for five fixtures, seven configured/runtime layers each, bounded status/log streams, background metrics rows, and one review-gate approve/resume path with audit id. The gated fixture records two append-only evaluation attempts; the latest evaluation has seven `layer_runs` rows and the feature has seven distinct `layer_runs` layers.
 - `PICE_ARTIFACT_ARCHIVE=/private/tmp/pice-release-smoke-local.tar.gz PICE_NPM_PACK_SMOKE=1 node scripts/acceptance/release-artifact-smoke.mjs` passed with an unpacked release archive and local npm pack/install daemon auto-start.
-- `node scripts/acceptance/readme-media-audit.mjs` passed with 7 README media references.
+- `node scripts/acceptance/readme-media-audit.mjs` passed with 8 README media references.
+- `pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs` passed with 6 release workflow policy tests.
+- Manual `release.yml` dispatch with `publish_npm=true` passed and published the resolver plus five platform packages at `0.7.0`.
 - Full Rust/TypeScript validation and benchmark evidence are recorded in `docs/releases/v0.7.0.md`.

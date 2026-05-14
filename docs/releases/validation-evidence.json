@@ -1,5 +1,7 @@
 {
   "generated_at": "2026-05-12T22:42:37Z",
+  "updated_at": "2026-05-14T13:26:35Z",
+  "follow_up_note": "Release workflow policy coverage, TypeScript test total, and README media audit were refreshed on main after npm publication.",
   "environment": {
     "host": "local macOS arm64 development host",
     "worktree": ".worktrees/phase-8-polish-documentation-release",
@@ -61,7 +63,11 @@
     },
     {
       "command": "pnpm test",
-      "result": "passed: 97 TypeScript tests"
+      "result": "passed: 103 TypeScript tests"
+    },
+    {
+      "command": "pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs",
+      "result": "passed: 6 release workflow policy tests"
     },
     {
       "command": "cargo build --release",
@@ -81,7 +87,7 @@
     },
     {
       "command": "node scripts/acceptance/readme-media-audit.mjs",
-      "result": "passed: 7 README media references"
+      "result": "passed: 8 README media references"
     }
   ]
 }

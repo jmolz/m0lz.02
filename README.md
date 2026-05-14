@@ -158,25 +158,29 @@ Telemetry is opt-in and disabled by default. Public telemetry claims are limited
 
 ## Release Evidence
 
-Release evidence for v0.7.0 is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
+Release evidence for v0.7.0 is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md). The npm release is published as version `0.7.0` for the resolver package and all platform binary packages.
 
-Current branch evidence from May 12, 2026:
+Current release evidence through May 14, 2026:
 
 | Check | Result |
 | --- | --- |
 | Rust tests | `cargo test --workspace --all-targets`: 1237 passed |
 | Rust doc tests | `cargo test --workspace --doc`: 1 ignored documentation example |
 | Rust docs | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`: passed |
-| TypeScript tests | `pnpm test`: 97 passed |
+| TypeScript tests | `pnpm test`: 103 passed |
+| Release workflow policy | `pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs`: 6 passed |
 | Rust lint/format | `cargo fmt --check`; `cargo clippy --workspace --all-targets -- -D warnings` |
 | TypeScript lint/typecheck/build | `pnpm lint`; `pnpm typecheck`; `pnpm build` |
 | Release build | `cargo build --release` |
 | Speedup gate | `parallel_cohort_speedup_assertion`: ratio `0.566`, target `<= 0.625` |
 | Criterion benchmark | Sequential `[586.49 ms, 593.39 ms]`; parallel `[347.03 ms, 350.09 ms]` |
+| Remote CI | `test(release): enforce npm publish policy` push run passed on `main` |
+| NPM publish | Manual `release.yml` run with `publish_npm=true` passed; `@jacobmolz/pice` and all five platform packages resolve at `0.7.0` |
 
-Environment: local macOS arm64 development host in the Phase 8 worktree on May
-12, 2026. The speedup assertion is the release gate; the Criterion numbers are
-informational benchmark output from the same validation pass.
+Environment: local macOS arm64 development host for the Phase 8 validation
+pass, with remote CI and npm publication evidence added from the May 14, 2026
+release follow-up. The speedup assertion is the release gate; the Criterion
+numbers are informational benchmark output from the same validation pass.
 
 The Phase 8 acceptance suite is:
 
