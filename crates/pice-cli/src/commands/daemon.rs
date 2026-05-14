@@ -346,6 +346,8 @@ mod tests {
         let sock_path = dir.path().join("daemon.sock");
         let token_path = dir.path().join("daemon.token");
         let socket_path = SocketPath::Unix(sock_path.clone());
+        let state_tmp = tempfile::tempdir().expect("state tempdir");
+        let _state_guard = pice_daemon::test_support::StateDirGuard::new(state_tmp.path());
 
         // Spawn daemon in background.
         let sp = socket_path.clone();
