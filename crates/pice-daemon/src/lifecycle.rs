@@ -332,7 +332,10 @@ async fn handle_connection_unix(
 
 // ─── Windows accept loop ───────────────────────────────────────────────────
 
+// Future Windows daemon tests can bind a pre-built context directly through
+// this helper; production Windows startup uses `run_windows_bound`.
 #[cfg(all(windows, test))]
+#[allow(dead_code)]
 async fn run_windows(name: &str, ctx: Arc<DaemonContext>) -> Result<()> {
     use crate::server::windows::WindowsPipeListener;
 

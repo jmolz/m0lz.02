@@ -233,7 +233,7 @@ pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs \
 
 ### Expected results
 
-All tests should pass. Baseline: **1262 Rust tests (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs` line 5), 123 TypeScript tests, 0 lint errors, 0 warnings, clean release build.**
+All tests should pass. Baseline: **1262 Rust tests (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs` line 5), 124 TypeScript tests, 0 lint errors, 0 warnings, clean release build.**
 
 If any fail after your changes:
 
@@ -284,7 +284,7 @@ For CI, release, publishing, or release-smoke changes, also run the Linux CI-equ
 scripts/ci/local-linux.sh
 ```
 
-Expected baseline: **1262 Rust tests passing (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs`), 123 TypeScript tests passing, 0 lint errors, 0 clippy warnings (workspace + lib unwrap/expect denies), clean release build.**
+Expected baseline: **1262 Rust tests passing (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs`), 124 TypeScript tests passing, 0 lint errors, 0 clippy warnings (workspace + lib unwrap/expect denies), clean release build.**
 
 ## Phase 3: Code Review of Current Changes
 

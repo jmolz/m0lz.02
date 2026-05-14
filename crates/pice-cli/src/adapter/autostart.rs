@@ -135,6 +135,7 @@ fn daemon_binary_path() -> PathBuf {
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
+    #[cfg(unix)]
     use std::time::Duration;
 
     fn env_lock() -> &'static Mutex<()> {

@@ -52,6 +52,14 @@ describe('local CI policy', () => {
     expect(workflow).toContain('scripts/ci/windows-smoke.ps1');
   });
 
+  it('keeps the wall-clock cohort speedup gate on Linux and out of Windows platform coverage', () => {
+    const workflow = read('.github/workflows/ci.yml');
+    expect(workflow).toContain('cargo test --workspace --all-targets');
+    expect(workflow).toContain('The Linux rust job is the authoritative gate for wall-clock');
+    expect(workflow).toContain("if: runner.os == 'Windows'");
+    expect(workflow).toContain('cargo test -- --skip parallel_cohort_meets_16x_speedup');
+  });
+
   it('keeps the native Windows smoke script focused on Windows-only release risks', () => {
     const script = read('scripts/ci/windows-smoke.ps1');
     expect(script).toContain('$env:PATH = "$DebugBin;$env:PATH"');

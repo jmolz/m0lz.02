@@ -418,7 +418,7 @@ impl SubscribeStreamHandle {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use pice_core::cli::StatusRequest;

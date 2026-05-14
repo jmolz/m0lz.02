@@ -99,7 +99,18 @@ jobs:
         run: Add-Content $env:GITHUB_PATH "$env:GITHUB_WORKSPACE\target\debug"
 
       - run: cargo clippy -- -D warnings
-      - run: cargo test
+      - name: Run cargo test
+        if: runner.os != 'Windows'
+        run: cargo test
+        env:
+          RUST_TEST_THREADS: "1"
+      - name: Run cargo test (Windows platform coverage)
+        if: runner.os == 'Windows'
+        # The Linux rust job is the authoritative gate for wall-clock
+        # performance assertions. This Windows matrix lane is platform
+        # coverage only; shared Windows runners add enough scheduler jitter to
+        # make the cohort speedup assertion measure runner contention.
+        run: cargo test -- --skip parallel_cohort_meets_16x_speedup
         env:
           RUST_TEST_THREADS: "1"
 
