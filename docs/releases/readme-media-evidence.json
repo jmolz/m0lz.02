@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-14T13:26:05.898Z",
+  "generated_at": "2026-05-14T18:32:27.205Z",
   "readme": "README.md",
   "checked": [
     {
@@ -39,7 +39,7 @@
       "kind": "html-img",
       "alt": "Evaluation tiers showing single-model contract grading, dual-model adversarial review, and higher-tier agent-team review",
       "src": "docs/images/evaluation-tiers-light.svg",
-      "size_bytes": 6285,
+      "size_bytes": 6287,
       "status": "ok"
     },
     {
@@ -53,7 +53,7 @@
       "kind": "html-source",
       "alt": "(source)",
       "src": "docs/images/evaluation-tiers-dark.svg",
-      "size_bytes": 6255,
+      "size_bytes": 6257,
       "status": "ok"
     }
   ],

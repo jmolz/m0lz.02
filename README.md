@@ -115,7 +115,7 @@ Provider failures are allowed to degrade evaluation, but they must not crash the
   <img alt="Evaluation tiers showing single-model contract grading, dual-model adversarial review, and higher-tier agent-team review" src="docs/images/evaluation-tiers-light.svg" width="800">
 </picture>
 
-Evaluators are context-isolated. A layer evaluator sees its layer contract, filtered diff, and evaluation guidance text carried on the compatibility `claudeMd` wire field. PICE reads `AGENTS.md` for evaluation guidance and does not pass `CLAUDE.md` into evaluator prompts. Evaluators do not receive implementation chat, plan rationale, sibling layer contracts, or unrelated findings.
+Evaluators are context-isolated. A layer evaluator sees its layer contract, filtered diff, and evaluation guidance text carried on the compatibility `claudeMd` wire field. PICE reads `AGENTS.md` for evaluation guidance and excludes alternate workflow-guidance files from evaluator prompts. Evaluators do not receive implementation chat, plan rationale, sibling layer contracts, or unrelated findings.
 
 Tier 2 runs primary contract grading plus adversarial review. Tier 3 adds agent-team evaluation. Adaptive evaluation respects the correlated-evaluator confidence ceiling documented in [convergence analysis](docs/research/convergence-analysis.md).
 

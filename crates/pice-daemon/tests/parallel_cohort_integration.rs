@@ -952,20 +952,22 @@ async fn adts_global_provider_capacity_below_pair_requirement_fails_fast() {
         layer_paths: None,
         seam_file_contents: None,
         manifest_path: None,
-        global_provider_semaphore: Some(provider_sem),
+        global_provider_semaphore: Some(Arc::clone(&provider_sem)),
         global_provider_capacity: Some(1),
         saver: &NULL_SAVER,
     };
 
+    let alive_path = dir.path().join("stub-adts-capacity-mismatch-sessions.log");
+    std::fs::write(&alive_path, "").unwrap();
     let _stub = ParallelStubGuard::new_with_adversarial(
         &[("backend", "9.0,0.01"), ("frontend", "9.0,0.01")],
         Some(500),
         Some("3.0,0.01"),
     );
+    let _alive = StubAliveFileGuard::new(&alive_path);
 
-    let started = Instant::now();
     let manifest = tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(2),
         run_stack_loops_with_cancel(
             &cfg,
             &NullSink,
@@ -978,9 +980,15 @@ async fn adts_global_provider_capacity_below_pair_requirement_fails_fast() {
     .expect("capacity mismatch must fail fast instead of deadlocking")
     .expect("stack loops should return a failed manifest");
 
-    assert!(
-        started.elapsed() < Duration::from_millis(500),
-        "capacity mismatch should fail before waiting on provider permits"
+    assert_eq!(
+        provider_sem.available_permits(),
+        1,
+        "capacity mismatch should return before acquiring provider permits"
+    );
+    assert_eq!(
+        active_stub_session_count(&alive_path),
+        0,
+        "capacity mismatch should return before starting provider sessions"
     );
     assert_eq!(manifest.layers.len(), 2);
     for layer in &manifest.layers {
