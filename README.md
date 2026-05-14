@@ -41,6 +41,7 @@ Prebuilt archives are published from GitHub Releases when a tag is approved.
 
 ```bash
 pice init
+pice init --developer codex
 pice init --upgrade
 pice layers detect --json
 pice layers check --json
@@ -53,7 +54,7 @@ pice logs <feature-id> --json
 pice review-gate --list --feature-id <feature-id> --json
 ```
 
-`pice init` scaffolds public workflow files under `.claude/` and project config under `.pice/`. This repo also uses `.codex/` for maintainer-local command and planning context; that namespace is not what fresh user projects receive from `pice init`.
+`pice init` scaffolds public workflow files under `.claude/` and project config under `.pice/` by default. Use `pice init --developer codex` to scaffold `.codex/`, create root `AGENTS.md`, and set Codex as the primary developer provider.
 
 ## Stack Loops
 
@@ -72,7 +73,7 @@ See [the Stack Loops guide](docs/guides/stack-loops.md) and [the v0.1 to v0.2 mi
 
 | Command | Purpose |
 | --- | --- |
-| `pice init` | Scaffold `.claude/` and `.pice/` files |
+| `pice init` | Scaffold `.claude/` or `.codex/` developer files and `.pice/` config |
 | `pice prime` | Orient on the current project |
 | `pice plan <description>` | Create a plan and contract |
 | `pice execute <plan>` | Implement from a plan in a fresh provider session |
@@ -114,13 +115,17 @@ Provider failures are allowed to degrade evaluation, but they must not crash the
   <img alt="Evaluation tiers showing single-model contract grading, dual-model adversarial review, and higher-tier agent-team review" src="docs/images/evaluation-tiers-light.svg" width="800">
 </picture>
 
-Evaluators are context-isolated. A layer evaluator sees its layer contract, filtered diff, and project guidance text carried on the compatibility `claudeMd` wire field. It does not receive implementation chat, plan rationale, sibling layer contracts, or unrelated findings.
+Evaluators are context-isolated. A layer evaluator sees its layer contract, filtered diff, and evaluation guidance text carried on the compatibility `claudeMd` wire field. PICE reads `AGENTS.md` for evaluation guidance and does not pass `CLAUDE.md` into evaluator prompts. Evaluators do not receive implementation chat, plan rationale, sibling layer contracts, or unrelated findings.
 
 Tier 2 runs primary contract grading plus adversarial review. Tier 3 adds agent-team evaluation. Adaptive evaluation respects the correlated-evaluator confidence ceiling documented in [convergence analysis](docs/research/convergence-analysis.md).
 
 ## Configuration
 
 Project config lives in `.pice/config.toml`; Stack Loops behavior lives in `.pice/workflow.yaml` and `.pice/layers.toml`.
+
+`[provider].name` selects the primary developer for workflow commands such as `prime`, `plan`, `execute`, `review`, `commit`, and `handoff`. `[evaluation.primary]` and `[evaluation.adversarial]` select the evaluators used by `pice evaluate`; they are independent of the workflow provider.
+
+Claude-primary complete config:
 
 ```toml
 [provider]
@@ -136,19 +141,99 @@ model = "gpt-5.5"
 effort = "xhigh"
 enabled = true
 
+[evaluation.tiers]
+tier1_models = ["claude-opus-4-6"]
+tier2_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_agent_team = true
+
 [telemetry]
 enabled = false
+endpoint = "https://telemetry.pice.dev/v1/events"
 
 [metrics]
 db_path = ".pice/metrics.db"
+
+[init]
+project_type = "auto"
+```
+
+Codex-primary with dual-model evaluation complete config:
+
+```toml
+[provider]
+name = "codex"
+
+[evaluation.primary]
+provider = "claude-code"
+model = "claude-opus-4-6"
+
+[evaluation.adversarial]
+provider = "codex"
+model = "gpt-5.5"
+effort = "xhigh"
+enabled = true
+
+[evaluation.tiers]
+tier1_models = ["claude-opus-4-6"]
+tier2_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_agent_team = true
+
+[telemetry]
+enabled = false
+endpoint = "https://telemetry.pice.dev/v1/events"
+
+[metrics]
+db_path = ".pice/metrics.db"
+
+[init]
+project_type = "auto"
+```
+
+Codex-primary workflow with Codex adversarial evaluation disabled complete config:
+
+```toml
+[provider]
+name = "codex"
+
+[evaluation.primary]
+provider = "claude-code"
+model = "claude-opus-4-6"
+
+[evaluation.adversarial]
+provider = "codex"
+model = "gpt-5.5"
+effort = "xhigh"
+enabled = false
+
+[evaluation.tiers]
+tier1_models = ["claude-opus-4-6"]
+tier2_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_agent_team = true
+
+[telemetry]
+enabled = false
+endpoint = "https://telemetry.pice.dev/v1/events"
+
+[metrics]
+db_path = ".pice/metrics.db"
+
+[init]
+project_type = "auto"
 ```
 
 Required environment variables depend on the providers you enable:
 
 | Variable | Used by |
 | --- | --- |
-| `ANTHROPIC_API_KEY` | Claude provider workflow and evaluation sessions |
-| `OPENAI_API_KEY` | Codex adversarial evaluation |
+| `ANTHROPIC_API_KEY` | Claude Code workflow and evaluation sessions through the Claude Agent SDK |
+| `OPENAI_API_KEY` | Codex adversarial evaluation through the OpenAI SDK |
+
+Codex workflow sessions use the installed Codex CLI through `codex exec`. Run `codex login` first, or otherwise configure the auth method supported by your Codex CLI. This is separate from `OPENAI_API_KEY`, which is only used by the OpenAI SDK-backed adversarial evaluator.
+
+For Codex-primary projects, the scaffold includes `.codex/commands/self-heal.md`. Run self-heal manually after a feature worktree has been merged into `main` to capture durable lessons into rules, docs, commands, and tripwires; it is not run automatically by execute, evaluate, or merge.
 
 ## Metrics And Telemetry
 

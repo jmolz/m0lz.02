@@ -12,6 +12,10 @@ pub struct InitArgs {
     #[arg(long)]
     pub upgrade: bool,
 
+    /// Developer provider scaffold to create
+    #[arg(long, default_value = "claude-code", value_parser = ["claude-code", "codex"])]
+    pub developer: String,
+
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
@@ -23,6 +27,7 @@ impl From<InitArgs> for InitRequest {
             force: args.force,
             upgrade: args.upgrade,
             json: args.json,
+            developer: args.developer.clone(),
         }
     }
 }

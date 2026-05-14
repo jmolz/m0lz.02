@@ -42,22 +42,19 @@ describe('CodexProvider', () => {
     provider = new CodexProvider();
   });
 
-  it('declares evaluation-only capabilities (workflow: false)', () => {
+  it('declares workflow and evaluation capabilities', () => {
     const caps = provider.getCapabilities();
-    expect(caps.workflow).toBe(false);
+    expect(caps.workflow).toBe(true);
     expect(caps.evaluation).toBe(true);
     expect(caps.agentTeams).toBe(false);
     expect(caps.models).toContain('gpt-5.5');
     expect(caps.defaultEvalModel).toBe('gpt-5.5');
   });
 
-  it('workflow methods are not registered (returns METHOD_NOT_FOUND)', () => {
-    // The CodexProvider only registers evaluate/* handlers.
-    // session/* methods are not registered, so StdioTransport returns METHOD_NOT_FOUND.
-    // We verify this by checking capabilities — workflow: false means no session handlers.
+  it('workflow support is advertised separately from evaluation support', () => {
     const caps = provider.getCapabilities();
-    expect(caps.workflow).toBe(false);
-    // The transport-level METHOD_NOT_FOUND behavior is tested by transport.test.ts
+    expect(caps.workflow).toBe(true);
+    expect(caps.evaluation).toBe(true);
   });
 
   it('runAdversarialEvaluation calls OpenAI with correct format', async () => {

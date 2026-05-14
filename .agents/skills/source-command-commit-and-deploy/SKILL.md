@@ -61,7 +61,7 @@ cargo build --release
 pnpm build
 ```
 
-**Expected baseline:** 811 Rust tests (1 ignored), 78 TypeScript tests, 0 lint errors, 0 warnings, clean release build. The 1 ignored test is the doc-test in `crates/pice-daemon/src/handlers/mod.rs` (line 5). When the baseline shifts, update both this file AND `AGENTS.md` in the same release.
+**Expected baseline:** 1262 Rust tests (1 ignored doc-test), 115 TypeScript tests, 0 lint errors, 0 warnings, clean release build. The 1 ignored test is the doc-test in `crates/pice-daemon/src/handlers/mod.rs` (line 5). When the baseline shifts, update both this file AND `AGENTS.md` in the same release.
 
 ## Determine Context (Worktree or Main)
 

@@ -104,6 +104,8 @@ Query capabilities without re-initializing. **Params:** None. **Result:** `Provi
 
 Create a new AI session.
 
+Workflow sessions are routed through the project primary developer provider, configured as `[provider].name` in `.pice/config.toml`. The selection is independent from `[evaluation.primary]` and `[evaluation.adversarial]`, which are only used by `pice evaluate`.
+
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `workingDirectory` | `string` | Yes | Absolute path to the project directory |
@@ -159,13 +161,13 @@ Destroy a session and release resources.
 
 ### `evaluate/create`
 
-Create an evaluation session. Evaluation sessions are context-isolated: they receive only the contract, filtered diff, and project guidance. The wire field is still named `claudeMd` for v0.1 compatibility; v0.7.0 callers populate it with project guidance text such as generated `CLAUDE.md` contents.
+Create an evaluation session. Evaluation sessions are context-isolated: they receive only the contract, filtered diff, and evaluation guidance. The wire field is still named `claudeMd` for v0.1 compatibility; current callers populate it with `AGENTS.md` contents when present. Providers must treat it as opaque guidance text and must not infer that Claude workflow guidance was included.
 
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `contract` | `object` | Yes | Contract JSON from the plan file |
 | `diff` | `string` | Yes | Git diff of changes to evaluate |
-| `claudeMd` | `string` | Yes | Project guidance contents; field name retained for compatibility |
+| `claudeMd` | `string` | Yes | Evaluation guidance contents; field name retained for compatibility |
 | `model` | `string` | No | Model override |
 | `effort` | `string` | No | Effort level (e.g., `"high"`, `"xhigh"`) |
 | `seamChecks` | `SeamCheckSpec[]` | No | Seam checks to run for this layer's boundaries (v0.2+) |

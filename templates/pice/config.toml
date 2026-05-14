@@ -1,7 +1,9 @@
 [provider]
+# Primary developer for workflow commands: "claude-code" or "codex".
 name = "claude-code"
 
 [evaluation.primary]
+# Evaluators are independent from the workflow provider.
 provider = "claude-code"
 model = "claude-opus-4-6"
 

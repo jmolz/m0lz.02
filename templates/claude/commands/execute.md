@@ -152,7 +152,7 @@ Next step: /evaluate {path-to-plan.md}
 
 This will spawn a fresh evaluator sub-agent that grades the implementation
 against the contract criteria. The evaluator does NOT see this conversation —
-only the contract, code diff, and CLAUDE.md.
+only the contract, code diff, and AGENTS.md.
 ```
 
 Do not run `/evaluate` automatically — the user may want to do manual testing first.

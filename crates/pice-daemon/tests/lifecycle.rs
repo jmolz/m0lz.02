@@ -241,6 +241,7 @@ async fn all_command_types_dispatch_successfully() {
                 force: false,
                 upgrade: false,
                 json: false,
+                developer: "claude-code".to_string(),
             }),
         ),
         (

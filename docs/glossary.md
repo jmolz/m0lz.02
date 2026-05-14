@@ -6,7 +6,7 @@ A comprehensive reference for every technical term, acronym, framework-specific 
 
 ## PICE Framework Concepts
 
-**ADTS (Adversarial Divergence-Triggered Scaling)** — A novel PICE algorithm that uses the degree of disagreement between evaluator models (e.g., Claude vs. GPT) to dynamically determine how many evaluation passes a piece of code needs. Low disagreement → stop early (2 passes). High disagreement → escalate to more passes or human review. See [Convergence Analysis](research/convergence-analysis.md).
+**ADTS (Adversarial Divergence-Triggered Scaling)** — A novel PICE algorithm that uses the degree of disagreement between configured evaluator models to dynamically determine how many evaluation passes a piece of code needs. Low disagreement → stop early (2 passes). High disagreement → escalate to more passes or human review. See [Convergence Analysis](research/convergence-analysis.md).
 
 **Arch Experts** — A novel concept coined in PICE (v0.3). Dynamically generated specialist AI agents inferred from a project's actual architecture files (package.json, Dockerfile, docker-compose.yml, etc.). Unlike pre-built agent libraries, Arch Experts emerge automatically from your configuration — no manual selection needed. Each expert owns both a component and the seams around it.
 

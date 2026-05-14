@@ -1,45 +1,57 @@
 //! Context-assembly prompt builders for PICE commands.
 //!
 //! These functions compose user-facing prompts by combining project context
-//! (CLAUDE.md, git state, project tree) with command-specific instructions.
+//! (workflow guidance, git state, project tree) with command-specific instructions.
 //! They depend on the pure helpers in `pice_core::prompt::helpers`.
 //!
 //! ## Architecture note
 //!
-//! In T6 of the Phase 0 refactor, the pure helpers (`read_claude_md`,
-//! `get_git_diff`, `get_git_log`, `get_git_status_summary`, `get_staged_diff`,
-//! `get_project_tree`) moved to `pice-core::prompt::helpers`. The builder
-//! functions remain here temporarily; T13 moves them to `pice-daemon::prompt`
-//! alongside the rest of the orchestration code.
+//! In T6 of the Phase 0 refactor, the pure helpers moved to
+//! `pice-core::prompt::helpers`. The builder functions remain here temporarily;
+//! T13 moves them to `pice-daemon::prompt` alongside the rest of the
+//! orchestration code.
 
 use anyhow::{Context, Result};
 use std::path::Path;
 
 use pice_core::prompt::helpers::{
     get_git_diff, get_git_log, get_git_status_summary, get_project_tree, get_staged_diff,
-    read_claude_md,
+    read_workflow_guidance,
 };
 
 /// Build the planning prompt from a user description.
-pub fn build_plan_prompt(description: &str, project_root: &Path) -> Result<String> {
-    let claude_md = read_claude_md(project_root)?;
+pub fn build_plan_prompt(
+    description: &str,
+    project_root: &Path,
+    provider_name: &str,
+) -> Result<String> {
+    let guidance = read_workflow_guidance(project_root, provider_name)?;
+    let plans_dir = if provider_name == "codex" {
+        ".codex/plans"
+    } else {
+        ".claude/plans"
+    };
     Ok(format!(
         "You are creating a detailed implementation plan.\n\n\
-         ## Project Context\n\n{claude_md}\n\n\
+         ## Project Context\n\n{guidance}\n\n\
          ## Task\n\n\
          Create a comprehensive plan for: {description}\n\n\
-         Write the plan to `.claude/plans/` following the plan template format.\n\
+         Write the plan to `{plans_dir}/` following the plan template format.\n\
          Include a ## Contract section with JSON criteria for adversarial evaluation.\n\
          Set the tier based on complexity (1=simple, 2=feature, 3=architectural)."
     ))
 }
 
 /// Build the execution prompt from a parsed plan.
-pub fn build_execute_prompt(plan_content: &str, project_root: &Path) -> Result<String> {
-    let claude_md = read_claude_md(project_root)?;
+pub fn build_execute_prompt(
+    plan_content: &str,
+    project_root: &Path,
+    provider_name: &str,
+) -> Result<String> {
+    let guidance = read_workflow_guidance(project_root, provider_name)?;
     Ok(format!(
         "You are implementing from an approved plan.\n\n\
-         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Project Conventions\n\n{guidance}\n\n\
          ## Plan\n\n{plan_content}\n\n\
          ## Instructions\n\n\
          Execute the plan tasks in order. After each task, run its validation command.\n\
@@ -47,14 +59,14 @@ pub fn build_execute_prompt(plan_content: &str, project_root: &Path) -> Result<S
     ))
 }
 
-/// Build the evaluation prompt from contract + diff + CLAUDE.md.
+/// Build the evaluation prompt from contract, diff, and evaluation guidance.
 /// This is the ONLY context evaluators see — no implementation rationale.
 /// Available for use when Rust-side prompt assembly is needed in Phase 3+.
 #[allow(dead_code)]
 pub fn build_evaluate_prompt(
     contract: &serde_json::Value,
     diff: &str,
-    claude_md: &str,
+    guidance: &str,
 ) -> Result<String> {
     let contract_str =
         serde_json::to_string_pretty(contract).context("failed to serialize contract")?;
@@ -62,7 +74,7 @@ pub fn build_evaluate_prompt(
         "You are an ADVERSARIAL EVALUATOR. Your job is to find failures, not confirm success.\n\n\
          ## Contract\n\n```json\n{contract_str}\n```\n\n\
          ## Code Changes\n\n```diff\n{diff}\n```\n\n\
-         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Evaluation Guidance\n\n{guidance}\n\n\
          ## Task\n\n\
          For EACH criterion: read the code, try to break it, score 1-10 with evidence.\n\
          Output structured JSON with scores for each criterion."
@@ -75,7 +87,7 @@ pub fn build_evaluate_prompt(
 pub fn build_adversarial_prompt(
     contract: &serde_json::Value,
     diff: &str,
-    claude_md: &str,
+    guidance: &str,
 ) -> Result<String> {
     let contract_str =
         serde_json::to_string_pretty(contract).context("failed to serialize contract")?;
@@ -83,7 +95,7 @@ pub fn build_adversarial_prompt(
         "You are a DESIGN CHALLENGER reviewing code changes.\n\n\
          ## Contract\n\n```json\n{contract_str}\n```\n\n\
          ## Code Changes\n\n```diff\n{diff}\n```\n\n\
-         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Evaluation Guidance\n\n{guidance}\n\n\
          ## Task\n\n\
          Challenge the APPROACH, not just correctness:\n\
          - Was this the right design? What assumptions does it depend on?\n\
@@ -94,8 +106,8 @@ pub fn build_adversarial_prompt(
 }
 
 /// Build the prime (codebase orientation) prompt.
-pub fn build_prime_prompt(project_root: &Path) -> Result<String> {
-    let claude_md = read_claude_md(project_root)?;
+pub fn build_prime_prompt(project_root: &Path, provider_name: &str) -> Result<String> {
+    let guidance = read_workflow_guidance(project_root, provider_name)?;
     let tree = get_project_tree(project_root)?;
     let git_log = get_git_log(project_root, 15)?;
     let git_status = get_git_status_summary(project_root)?;
@@ -119,7 +131,7 @@ pub fn build_prime_prompt(project_root: &Path) -> Result<String> {
 
     Ok(format!(
         "You are orienting on a codebase.\n\n\
-         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Project Conventions\n\n{guidance}\n\n\
          ## Project Structure\n\n```\n{tree}\n```\n\n\
          ## Recent Git History\n\n```\n{git_log}\n```\n\n\
          ## Git Status\n\n```\n{git_status}\n```\n\n\
@@ -135,14 +147,14 @@ pub fn build_prime_prompt(project_root: &Path) -> Result<String> {
 }
 
 /// Build the review (code review) prompt.
-pub fn build_review_prompt(project_root: &Path) -> Result<String> {
-    let claude_md = read_claude_md(project_root)?;
+pub fn build_review_prompt(project_root: &Path, provider_name: &str) -> Result<String> {
+    let guidance = read_workflow_guidance(project_root, provider_name)?;
     let diff = get_git_diff(project_root)?;
     let git_status = get_git_status_summary(project_root)?;
 
     Ok(format!(
         "You are reviewing code changes.\n\n\
-         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Project Conventions\n\n{guidance}\n\n\
          ## Code Changes\n\n```diff\n{diff}\n```\n\n\
          ## Git Status\n\n```\n{git_status}\n```\n\n\
          ## Instructions\n\n\
@@ -157,14 +169,14 @@ pub fn build_review_prompt(project_root: &Path) -> Result<String> {
 
 /// Build the commit message generation prompt.
 /// Uses only the staged diff so the message describes exactly what will be committed.
-pub fn build_commit_prompt(project_root: &Path) -> Result<String> {
-    let claude_md = read_claude_md(project_root)?;
+pub fn build_commit_prompt(project_root: &Path, provider_name: &str) -> Result<String> {
+    let guidance = read_workflow_guidance(project_root, provider_name)?;
     let diff = get_staged_diff(project_root)?;
     let git_log = get_git_log(project_root, 5)?;
 
     Ok(format!(
         "You are generating a commit message.\n\n\
-         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Project Conventions\n\n{guidance}\n\n\
          ## Changes to Commit\n\n```diff\n{diff}\n```\n\n\
          ## Recent Commits (for style reference)\n\n```\n{git_log}\n```\n\n\
          ## Instructions\n\n\
@@ -175,26 +187,31 @@ pub fn build_commit_prompt(project_root: &Path) -> Result<String> {
 }
 
 /// Build the session handoff prompt.
-pub fn build_handoff_prompt(project_root: &Path) -> Result<String> {
-    let claude_md = read_claude_md(project_root)?;
+pub fn build_handoff_prompt(project_root: &Path, provider_name: &str) -> Result<String> {
+    let guidance = read_workflow_guidance(project_root, provider_name)?;
     let git_log = get_git_log(project_root, 10)?;
     let git_status = get_git_status_summary(project_root)?;
 
     // Include existing HANDOFF.md so the new handoff can preserve unresolved items
     let existing_handoff = read_existing_handoff(project_root);
 
-    // List active plan files
-    let plans_dir = project_root.join(".claude/plans");
+    // List active plan files for the configured workflow provider.
+    let plans_prefix = if provider_name == "codex" {
+        ".codex/plans"
+    } else {
+        ".claude/plans"
+    };
+    let plans_dir = project_root.join(plans_prefix);
     let plans_list = if plans_dir.is_dir() {
         let mut plans = Vec::new();
-        for entry in
-            std::fs::read_dir(&plans_dir).context("failed to read .claude/plans directory")?
+        for entry in std::fs::read_dir(&plans_dir)
+            .with_context(|| format!("failed to read {plans_prefix} directory"))?
         {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("md") {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    plans.push(format!("- .claude/plans/{name}"));
+                    plans.push(format!("- {plans_prefix}/{name}"));
                 }
             }
         }
@@ -216,7 +233,7 @@ pub fn build_handoff_prompt(project_root: &Path) -> Result<String> {
 
     Ok(format!(
         "You are creating a session handoff summary.\n\n\
-         ## Project Conventions\n\n{claude_md}\n\n\
+         ## Project Conventions\n\n{guidance}\n\n\
          ## Recent Git History\n\n```\n{git_log}\n```\n\n\
          ## Git Status (uncommitted changes)\n\n```\n{git_status}\n```\n\n\
          ## Active Plans\n\n{plans_list}\n\n\
@@ -245,7 +262,7 @@ mod tests {
     fn build_plan_prompt_includes_description() {
         let dir = tempfile::tempdir().unwrap();
         // No CLAUDE.md — should still work
-        let prompt = build_plan_prompt("add user auth", dir.path()).unwrap();
+        let prompt = build_plan_prompt("add user auth", dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("add user auth"));
         assert!(prompt.contains("## Contract"));
     }
@@ -254,15 +271,41 @@ mod tests {
     fn build_plan_prompt_includes_claude_md() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("CLAUDE.md"), "# Project Rules\nUse Rust.").unwrap();
-        let prompt = build_plan_prompt("add tests", dir.path()).unwrap();
+        let prompt = build_plan_prompt("add tests", dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("# Project Rules"));
         assert!(prompt.contains("Use Rust."));
     }
 
     #[test]
+    fn workflow_prompt_selects_codex_agents_guidance() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "codex workflow rules").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude workflow rules").unwrap();
+
+        let prompt = build_plan_prompt("add tests", dir.path(), "codex").unwrap();
+        assert!(prompt.contains("codex workflow rules"));
+        assert!(prompt.contains("`.codex/plans/`"));
+        assert!(!prompt.contains("claude workflow rules"));
+    }
+
+    #[test]
+    fn evaluation_prompt_does_not_include_claude_md_when_agents_is_supplied() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "evaluation rules").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "must not leak").unwrap();
+        let guidance = pice_core::prompt::helpers::read_evaluation_guidance(dir.path()).unwrap();
+        let contract = serde_json::json!({"feature": "auth", "tier": 2});
+
+        let prompt = build_evaluate_prompt(&contract, "+added line", &guidance).unwrap();
+        assert!(prompt.contains("evaluation rules"));
+        assert!(!prompt.contains("must not leak"));
+    }
+
+    #[test]
     fn build_execute_prompt_includes_plan() {
         let dir = tempfile::tempdir().unwrap();
-        let prompt = build_execute_prompt("# My Plan\n\nDo stuff.", dir.path()).unwrap();
+        let prompt =
+            build_execute_prompt("# My Plan\n\nDo stuff.", dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("# My Plan"));
         assert!(prompt.contains("Do stuff."));
     }
@@ -291,7 +334,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
 
-        let prompt = build_prime_prompt(dir.path()).unwrap();
+        let prompt = build_prime_prompt(dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("src/lib.rs"));
         assert!(prompt.contains("Orient on this codebase"));
     }
@@ -320,7 +363,7 @@ mod tests {
             .output()
             .unwrap();
 
-        let prompt = build_prime_prompt(dir.path()).unwrap();
+        let prompt = build_prime_prompt(dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("test commit for history"));
     }
 
@@ -334,7 +377,7 @@ mod tests {
         )
         .unwrap();
 
-        let prompt = build_prime_prompt(dir.path()).unwrap();
+        let prompt = build_prime_prompt(dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("Prior Session Handoff"));
         assert!(prompt.contains("fix auth bug"));
     }
@@ -349,7 +392,7 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("changed.rs"), "fn changed() {}").unwrap();
 
-        let prompt = build_review_prompt(dir.path()).unwrap();
+        let prompt = build_review_prompt(dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("changed.rs"));
         assert!(prompt.contains("Review these code changes"));
     }
@@ -369,7 +412,7 @@ mod tests {
             .output()
             .unwrap();
 
-        let prompt = build_commit_prompt(dir.path()).unwrap();
+        let prompt = build_commit_prompt(dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("staged.rs"));
         assert!(prompt.contains("Generate a commit message"));
     }
@@ -385,7 +428,7 @@ mod tests {
         // Untracked file — not staged, should NOT appear in commit prompt
         std::fs::write(dir.path().join("unstaged.rs"), "fn unstaged() {}").unwrap();
 
-        let prompt = build_commit_prompt(dir.path()).unwrap();
+        let prompt = build_commit_prompt(dir.path(), "claude-code").unwrap();
         assert!(!prompt.contains("unstaged.rs"));
         assert!(prompt.contains("Generate a commit message"));
     }
@@ -413,7 +456,7 @@ mod tests {
             .output()
             .unwrap();
 
-        let prompt = build_handoff_prompt(dir.path()).unwrap();
+        let prompt = build_handoff_prompt(dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("handoff test commit"));
         assert!(prompt.contains("HANDOFF.md"));
     }
@@ -425,8 +468,19 @@ mod tests {
         std::fs::create_dir_all(&plans_dir).unwrap();
         std::fs::write(plans_dir.join("my-plan.md"), "# Plan").unwrap();
 
-        let prompt = build_handoff_prompt(dir.path()).unwrap();
+        let prompt = build_handoff_prompt(dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("my-plan.md"));
+    }
+
+    #[test]
+    fn build_handoff_prompt_lists_codex_plans_for_codex_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans_dir = dir.path().join(".codex/plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        std::fs::write(plans_dir.join("codex-plan.md"), "# Plan").unwrap();
+
+        let prompt = build_handoff_prompt(dir.path(), "codex").unwrap();
+        assert!(prompt.contains(".codex/plans/codex-plan.md"));
     }
 
     #[test]
@@ -438,7 +492,7 @@ mod tests {
         )
         .unwrap();
 
-        let prompt = build_handoff_prompt(dir.path()).unwrap();
+        let prompt = build_handoff_prompt(dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("Prior Handoff"));
         assert!(prompt.contains("fix the auth bug"));
         assert!(prompt.contains("carry forward any unresolved items"));
@@ -448,7 +502,7 @@ mod tests {
     fn build_handoff_prompt_no_prior_handoff() {
         let dir = tempfile::tempdir().unwrap();
         // No HANDOFF.md exists
-        let prompt = build_handoff_prompt(dir.path()).unwrap();
+        let prompt = build_handoff_prompt(dir.path(), "claude-code").unwrap();
         assert!(!prompt.contains("Prior Handoff"));
     }
 }

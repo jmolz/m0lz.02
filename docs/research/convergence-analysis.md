@@ -239,7 +239,7 @@ A fusion of Bayesian belief updating with Wald's Sequential Probability Ratio Te
 
 ### Prior art
 
-ConSol (Lee et al., March 2025) applied SPRT to single-model self-consistency for reasoning tasks. This is the closest precedent but differs critically: ConSol uses a single model's self-consistency (homogeneous samples), while PICE uses heterogeneous evaluators (Claude + GPT) with different error characteristics and model-specific reliability weights.
+ConSol (Lee et al., March 2025) applied SPRT to single-model self-consistency for reasoning tasks. This is the closest precedent but differs critically: ConSol uses a single model's self-consistency (homogeneous samples), while PICE uses configured heterogeneous evaluators with different error characteristics and model-specific reliability weights.
 
 ### How it works
 
@@ -300,7 +300,7 @@ Du et al. (2024) confirmed empirically that mixed-model debates outperform same-
 
 ### How it works
 
-**Step 1: Run initial evaluation.** Pass 1 (Claude) and Pass 2 (GPT) evaluate the same code against the same contract.
+**Step 1: Run initial evaluation.** Pass 1 (primary evaluator) and Pass 2 (adversarial evaluator) evaluate the same code against the same contract.
 
 **Step 2: Compute divergence.** Calculate consensus entropy:
 
@@ -404,11 +404,11 @@ Code change arrives
 └──────────────┬──────────────┘
                │
        ┌───────▼───────┐
-       │  Pass 1: Claude │──→ Update Beta posterior + compute Λ₁
+       │  Pass 1: Primary│──→ Update Beta posterior + compute Λ₁
        └───────┬────────┘
                │
        ┌───────▼───────┐
-       │  Pass 2: GPT   │──→ Update Beta posterior + compute Λ₂
+       │  Pass 2: Adv.  │──→ Update Beta posterior + compute Λ₂
        └───────┬────────┘
                │
        ┌───────▼───────┐

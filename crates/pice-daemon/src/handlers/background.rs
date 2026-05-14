@@ -43,7 +43,7 @@ use anyhow::{Context, Result};
 use pice_core::cli::{CommandResponse, ExitJsonStatus};
 use pice_core::jobs::JobEnv;
 use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
-use pice_core::prompt::helpers::{get_git_diff, read_claude_md};
+use pice_core::prompt::helpers::{get_git_diff, read_evaluation_guidance};
 use pice_core::workflow::WorkflowConfig;
 use serde_json::json;
 use tokio::sync::{oneshot, OwnedMutexGuard, OwnedSemaphorePermit};
@@ -249,7 +249,7 @@ pub fn collect_stack_loop_input_snapshot(
     workflow: &WorkflowConfig,
 ) -> Result<StackLoopInputSnapshot> {
     let full_diff = get_git_diff(project_root)?;
-    let claude_md = read_claude_md(project_root)?;
+    let claude_md = read_evaluation_guidance(project_root)?;
     let changed_files =
         crate::orchestrator::stack_loops::extract_changed_files_from_diff(&full_diff);
 
@@ -847,7 +847,7 @@ paths = ["src/frontend/**"]
             "fn original_snapshot() {}\n",
         )
         .unwrap();
-        std::fs::write(root.join("CLAUDE.md"), "original guidance").unwrap();
+        std::fs::write(root.join("AGENTS.md"), "original guidance").unwrap();
 
         let layers = pice_core::layers::LayersConfig {
             layers: pice_core::layers::LayersTable {
@@ -888,7 +888,7 @@ paths = ["src/frontend/**"]
 
         let snapshot = collect_stack_loop_input_snapshot(root, &layers, &workflow).unwrap();
         std::fs::write(root.join("src/backend/app.rs"), "fn late_mutation() {}\n").unwrap();
-        std::fs::write(root.join("CLAUDE.md"), "late guidance").unwrap();
+        std::fs::write(root.join("AGENTS.md"), "late guidance").unwrap();
 
         assert!(snapshot.full_diff.contains("original_snapshot"));
         assert!(!snapshot.full_diff.contains("late_mutation"));

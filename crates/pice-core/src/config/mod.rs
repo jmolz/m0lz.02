@@ -197,4 +197,33 @@ mod tests {
         let result = PiceConfig::load(&path);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn readme_configuration_examples_are_parseable() {
+        let readme_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+        let readme = std::fs::read_to_string(readme_path).unwrap();
+        let mut in_toml = false;
+        let mut block = String::new();
+        let mut parsed_blocks = 0;
+
+        for line in readme.lines() {
+            if line.trim() == "```toml" {
+                in_toml = true;
+                block.clear();
+                continue;
+            }
+            if in_toml && line.trim() == "```" {
+                let _: PiceConfig = toml::from_str(&block).unwrap();
+                parsed_blocks += 1;
+                in_toml = false;
+                continue;
+            }
+            if in_toml {
+                block.push_str(line);
+                block.push('\n');
+            }
+        }
+
+        assert_eq!(parsed_blocks, 3);
+    }
 }

@@ -17,23 +17,34 @@ A quick reference for running the PICE workflow. Print it, pin it, or keep it op
 6. pice review          Code review + regressions
 7. Human review         Manual testing
 8. pice commit          Standardized commit
+9. self-heal <feature>  Post-merge process hardening
 ```
 
 See [methodology overview](../methodology/overview.md) for a deeper explanation of each phase.
 
 ## Evaluation Tiers (Dual-Model Adversarial)
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5) | Use When |
-|------|------------------|------------------------------|----------|
+| Tier | Primary Evaluator | Configured Adversarial | Use When |
+|------|-------------------|--------------------------|----------|
 | 1 | 1 pass | -- | Bug fixes, simple endpoints, UI tweaks |
-| 2 | 1 pass | 1 design challenge (high) | New features, integrations, schema changes |
-| 3 | Claude agent team | 1 design challenge (xhigh) | Architectural changes, new pipeline phases |
+| 2 | 1 pass | 1 configured design challenge | New features, integrations, schema changes |
+| 3 | primary evaluator team | 1 configured design challenge | Architectural changes, new pipeline phases |
 
-Claude evaluates contract criteria formally (scores, pass/fail). GPT-5.5 challenges whether the approach itself is sound. Different model families have different blind spots, so running both in parallel maximizes coverage.
+The configured primary evaluator scores contract criteria formally. The configured adversarial provider challenges whether the approach itself is sound. Different model families have different blind spots, so running both in parallel maximizes coverage.
 
-Both evaluators are adversarial by design -- they never see implementation reasoning, only the contract, code diff, and project guidance.
+Both evaluators are adversarial by design -- they never see implementation reasoning, only the contract, code diff, and evaluation guidance from `AGENTS.md`.
 
 See [evaluation deep-dive](../methodology/evaluate.md) for details on the tier system and contract enforcement.
+
+## Primary Developer Provider
+
+`[provider].name` in `.pice/config.toml` selects the workflow provider used by
+`pice prime`, `pice plan`, `pice execute`, `pice review`, `pice commit`, and
+`pice handoff`. The default is `claude-code`; `pice init --developer codex`
+creates a Codex-oriented scaffold, root `AGENTS.md`, and `[provider].name = "codex"`.
+
+Evaluation provider settings are separate. `[evaluation.primary]` and
+`[evaluation.adversarial]` decide who grades the contract after implementation.
 
 ## WISC Context Management
 
@@ -88,6 +99,15 @@ See the [brownfield guide](brownfield.md) for a detailed walkthrough.
 | `pice status` | Check active plans and evaluation state |
 | `pice metrics` | View quality data across PICE loops |
 | `pice benchmark` | Before/after effectiveness comparison |
+
+## Post-Merge Self-Heal
+
+For Codex-primary projects, `.codex/commands/self-heal.md` is a manual
+retrospective command. Run it only after the feature worktree is merged into
+`main`, using the accepted plan or feature id as evidence. Its job is to propose
+durable rule, doc, command, and tripwire updates learned from the finished work.
+It must not commit, push, deploy, publish, rotate secrets, or mutate production
+configuration without explicit approval.
 
 ## Five Golden Rules
 

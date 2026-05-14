@@ -88,7 +88,7 @@ pub async fn run(
     let commit_message = if let Some(msg) = &req.message {
         msg.clone()
     } else {
-        let prompt = builders::build_commit_prompt(project_root)?;
+        let prompt = builders::build_commit_prompt(project_root, &config.provider.name)?;
         let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, config).await?;
         let captured = session::run_session_and_capture(
             &mut orchestrator,

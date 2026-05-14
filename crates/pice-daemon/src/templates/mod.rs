@@ -85,9 +85,27 @@ mod tests {
             "missing claude/ templates"
         );
         assert!(
+            files.iter().any(|f| f.starts_with("codex/")),
+            "missing codex/ templates"
+        );
+        assert!(
             files.iter().any(|f| f.starts_with("pice/")),
             "missing pice/ templates"
         );
+    }
+
+    #[test]
+    fn extract_codex_templates_to_tempdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join(".codex");
+
+        let result = extract_templates(&target, "codex/", false).unwrap();
+
+        assert!(!result.created.is_empty(), "nothing was extracted");
+        assert!(target.join("commands/plan-feature.md").exists());
+        assert!(target.join("commands/self-heal.md").exists());
+        assert!(target.join("templates/AGENTS-template.md").exists());
+        assert!(target.join("docs/PLAYBOOK.md").exists());
     }
 
     #[test]

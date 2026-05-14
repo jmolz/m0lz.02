@@ -14,14 +14,53 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
-/// Read CLAUDE.md from the project root, returning empty string if not found.
-pub fn read_claude_md(project_root: &Path) -> Result<String> {
-    let claude_md_path = project_root.join("CLAUDE.md");
-    match std::fs::read_to_string(&claude_md_path) {
+fn read_guidance_file(project_root: &Path, file_name: &str) -> Result<String> {
+    let path = project_root.join(file_name);
+    match std::fs::read_to_string(&path) {
         Ok(content) => Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(e).context("failed to read CLAUDE.md"),
+        Err(e) => Err(e).with_context(|| format!("failed to read {file_name}")),
     }
+}
+
+/// Read provider-appropriate workflow guidance from the project root.
+///
+/// Codex-primary workflows prefer `AGENTS.md`; Claude Code workflows prefer
+/// `CLAUDE.md`. Each falls back to the other file when the preferred surface is
+/// absent so existing projects keep working during migration.
+pub fn read_workflow_guidance(project_root: &Path, provider_name: &str) -> Result<String> {
+    let preferred = if provider_name == "codex" {
+        "AGENTS.md"
+    } else {
+        "CLAUDE.md"
+    };
+    let fallback = if preferred == "AGENTS.md" {
+        "CLAUDE.md"
+    } else {
+        "AGENTS.md"
+    };
+
+    let primary = read_guidance_file(project_root, preferred)?;
+    if primary.is_empty() {
+        read_guidance_file(project_root, fallback)
+    } else {
+        Ok(primary)
+    }
+}
+
+/// Read evaluation guidance. Evaluators remain context-isolated and only see
+/// `AGENTS.md` guidance, never `CLAUDE.md` fallback content.
+pub fn read_evaluation_guidance(project_root: &Path) -> Result<String> {
+    read_guidance_file(project_root, "AGENTS.md")
+}
+
+/// Read CLAUDE.md from the project root, returning empty string if not found.
+///
+/// Compatibility wrapper for older call sites. New workflow code should call
+/// [`read_workflow_guidance`]; evaluator code should call
+/// [`read_evaluation_guidance`].
+pub fn read_claude_md(project_root: &Path) -> Result<String> {
+    read_guidance_file(project_root, "CLAUDE.md")
 }
 
 /// Get the git diff for evaluation context.
@@ -203,6 +242,46 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = read_claude_md(dir.path()).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn read_workflow_guidance_codex_prefers_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "codex rules").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude rules").unwrap();
+
+        let result = read_workflow_guidance(dir.path(), "codex").unwrap();
+        assert_eq!(result, "codex rules");
+    }
+
+    #[test]
+    fn read_workflow_guidance_claude_prefers_claude_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "codex rules").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude rules").unwrap();
+
+        let result = read_workflow_guidance(dir.path(), "claude-code").unwrap();
+        assert_eq!(result, "claude rules");
+    }
+
+    #[test]
+    fn read_workflow_guidance_falls_back_to_other_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "codex rules").unwrap();
+
+        let result = read_workflow_guidance(dir.path(), "claude-code").unwrap();
+        assert_eq!(result, "codex rules");
+    }
+
+    #[test]
+    fn read_evaluation_guidance_uses_agents_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "evaluation rules").unwrap();
+        std::fs::write(dir.path().join("CLAUDE.md"), "must not leak").unwrap();
+
+        let result = read_evaluation_guidance(dir.path()).unwrap();
+        assert_eq!(result, "evaluation rules");
+        assert!(!result.contains("must not leak"));
     }
 
     #[test]

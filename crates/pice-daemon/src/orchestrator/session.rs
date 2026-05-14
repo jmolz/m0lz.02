@@ -1,11 +1,30 @@
 use anyhow::{Context, Result};
-use pice_protocol::{methods, SessionCreateParams, SessionDestroyParams, SessionSendParams};
+use pice_protocol::{
+    methods, ProviderCapabilities, SessionCreateParams, SessionDestroyParams, SessionSendParams,
+};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use super::stream::SharedSink;
 use super::ProviderOrchestrator;
 use crate::provider::host::NotificationHandler;
+
+fn ensure_workflow_capable(provider_name: &str, capabilities: &ProviderCapabilities) -> Result<()> {
+    if capabilities.workflow {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "provider '{provider_name}' does not support workflow sessions; choose a provider with workflow=true for prime/plan/execute/review/commit/handoff"
+        )
+    }
+}
+
+/// Workflow sessions can legitimately run for a long time because the provider
+/// may be driving an external coding CLI. Keep the Rust-side request deadline
+/// above normal human coding-session duration so it does not fire while the
+/// provider is still supervising its child process.
+const WORKFLOW_SESSION_SEND_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// Create a notification handler that forwards response chunks to a [`SharedSink`].
 ///
@@ -40,6 +59,8 @@ pub async fn run_session(
     project_root: &Path,
     prompt: String,
 ) -> Result<()> {
+    ensure_workflow_capable(orchestrator.provider_name(), orchestrator.capabilities())?;
+
     let create_params = serde_json::to_value(SessionCreateParams {
         working_directory: project_root.to_string_lossy().to_string(),
         model: None,
@@ -60,16 +81,29 @@ pub async fn run_session(
         session_id: session_id.clone(),
         message: prompt,
     })?;
-    orchestrator
-        .request(methods::SESSION_SEND, Some(send_params))
-        .await?;
+    let send_result = orchestrator
+        .request_with_timeout(
+            methods::SESSION_SEND,
+            Some(send_params),
+            WORKFLOW_SESSION_SEND_TIMEOUT,
+        )
+        .await;
 
     let destroy_params = serde_json::to_value(SessionDestroyParams {
         session_id: session_id.clone(),
     })?;
-    orchestrator
+    let destroy_result = orchestrator
         .request(methods::SESSION_DESTROY, Some(destroy_params))
-        .await?;
+        .await;
+
+    match (send_result, destroy_result) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Err(send_err), Ok(_)) => Err(send_err),
+        (Ok(_), Err(destroy_err)) => Err(destroy_err),
+        (Err(send_err), Err(destroy_err)) => Err(send_err).context(format!(
+            "also failed to destroy workflow session: {destroy_err}"
+        )),
+    }?;
 
     Ok(())
 }
@@ -91,22 +125,46 @@ pub async fn run_session_and_capture(
     sink: SharedSink,
 ) -> Result<String> {
     let chunks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let final_text: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let chunks_clone = Arc::clone(&chunks);
+    let final_text_clone = Arc::clone(&final_text);
 
     orchestrator.on_notification(Box::new(move |method, params| {
-        if method == methods::RESPONSE_CHUNK {
-            if let Some(params) = params {
-                if let Some(text) = params.get("text").and_then(|t| t.as_str()) {
-                    sink.send_chunk(text);
-                    if let Ok(mut guard) = chunks_clone.lock() {
-                        guard.push(text.to_string());
+        if let Some(params) = params {
+            match method.as_str() {
+                methods::RESPONSE_CHUNK => {
+                    if let Some(text) = params.get("text").and_then(|t| t.as_str()) {
+                        sink.send_chunk(text);
+                        if let Ok(mut guard) = chunks_clone.lock() {
+                            guard.push(text.to_string());
+                        }
                     }
                 }
+                methods::RESPONSE_COMPLETE => {
+                    if let Some(text) = params
+                        .get("result")
+                        .and_then(|result| result.get("finalText"))
+                        .and_then(|text| text.as_str())
+                    {
+                        if let Ok(mut guard) = final_text_clone.lock() {
+                            *guard = Some(text.to_string());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }));
 
     run_session(orchestrator, project_root, prompt).await?;
+
+    if let Some(captured) = final_text
+        .lock()
+        .map_err(|_| anyhow::anyhow!("failed to acquire final-text lock"))?
+        .clone()
+    {
+        return Ok(captured);
+    }
 
     let captured = chunks
         .lock()
@@ -114,4 +172,38 @@ pub async fn run_session_and_capture(
         .join("");
 
     Ok(captured)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(workflow: bool) -> ProviderCapabilities {
+        ProviderCapabilities {
+            workflow,
+            evaluation: true,
+            agent_teams: false,
+            models: vec!["test".to_string()],
+            default_eval_model: None,
+            cost_telemetry: false,
+        }
+    }
+
+    #[test]
+    fn workflow_capability_guard_allows_workflow_provider() {
+        ensure_workflow_capable("stub", &caps(true)).unwrap();
+    }
+
+    #[test]
+    fn workflow_capability_guard_rejects_evaluation_only_provider() {
+        let err = ensure_workflow_capable("eval-only", &caps(false)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("eval-only"));
+        assert!(msg.contains("workflow sessions"));
+    }
+
+    #[test]
+    fn workflow_session_send_timeout_allows_long_running_cli_work() {
+        assert!(WORKFLOW_SESSION_SEND_TIMEOUT >= Duration::from_secs(60 * 60));
+    }
 }

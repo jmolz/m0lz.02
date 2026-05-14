@@ -4,7 +4,7 @@
 
 The Evaluate phase grades an implementation against its plan's contract using
 context-isolated AI evaluators. Evaluators see only three things: the contract JSON,
-the git diff, and the project's project guidance. They never see the planning conversation,
+the git diff, and evaluation guidance from `AGENTS.md`. They never see the planning conversation,
 implementation session, or any other context.
 
 This isolation eliminates self-evaluation bias. The evaluator cannot rationalize a
@@ -20,24 +20,21 @@ overlook the same design flaws.
 
 Dual-model evaluation addresses this with two distinct roles:
 
-### Contract Grading (Claude)
+### Contract Grading (Configured Primary Evaluator)
 
-The primary evaluator is Claude. It performs formal, per-criterion scoring against the
-contract:
+The primary evaluator is configured through `[evaluation.primary]`. It performs formal, per-criterion scoring against the contract:
 
 - Reads each criterion's name, threshold, and validation command
 - Examines the git diff for evidence of implementation
 - Assigns a score (1-10) to each criterion
 - Provides a brief justification for each score
 
-Claude's output is structured: an array of `{ criterion, score, justification }`
+The primary evaluator's output is structured: an array of `{ criterion, score, justification }`
 objects. The Rust core consumes this structure directly.
 
-### Design Challenge (GPT-5.5 / Codex)
+### Design Challenge (Configured Adversarial Provider)
 
-The adversarial evaluator is a model from a different family -- GPT-5.5 via the Codex
-provider by default. Its role is fundamentally different from contract grading. It
-challenges the approach itself:
+The adversarial evaluator is configured through `[evaluation.adversarial]`. Its role is fundamentally different from contract grading. It challenges the approach itself:
 
 - Are there design tradeoffs the implementation did not consider?
 - Does the code make unstated assumptions that could break under different conditions?
@@ -64,7 +61,7 @@ Evaluator sessions receive a controlled, minimal context:
 |-------|-------------|
 | Contract JSON | The criteria, thresholds, and validation commands from the plan |
 | Git diff | The actual code changes produced by implementation |
-| project guidance | The project's coding standards, patterns, and conventions |
+| evaluation guidance | The project's evaluator-facing standards, patterns, and conventions from `AGENTS.md` |
 
 Evaluators do not receive:
 
@@ -75,11 +72,10 @@ Evaluators do not receive:
 - Any explanation of why the code looks the way it does
 
 This is enforced at the protocol level. The `evaluate/create` JSON-RPC method accepts
-only the contract, diff, project-guidance text on the compatibility `claudeMd`
-field, optional model/effort controls, seam-check specs, and adaptive pass
-controls. Layer scoping lives on the provider session created by
-`session/create`; there is no mechanism for passing implementation conversation
-even if a provider wanted to.
+only the contract, diff, evaluation-guidance text on the compatibility `claudeMd`
+field, optional model/effort controls, seam-check specs, and adaptive pass controls.
+Layer scoping lives on the provider session created by `session/create`; there is no
+mechanism for passing implementation conversation even if a provider wanted to.
 
 In Stack Loops, the daemon filters contract and diff context per layer. A layer
 evaluator does not see sibling layer contracts or another layer's evaluation
@@ -92,19 +88,19 @@ configuration:
 
 ### Tier 1: Single Evaluator
 
-For bug fixes, configuration changes, and simple refactors. One Claude evaluator
+For bug fixes, configuration changes, and simple refactors. One primary evaluator
 session performs contract grading only -- no adversarial review. Fast and inexpensive.
 
 ### Tier 2: Dual-Model Parallel
 
 For new features, integrations, and multi-file changes. This is the most common tier.
-One Claude evaluator for contract grading and one Codex evaluator for adversarial
-design review run in parallel via `tokio::join!`. Results are synthesized into a
-unified report. If Codex fails, evaluation falls back to Tier 1 with a warning.
+One configured primary evaluator for contract grading and one configured adversarial
+provider for design review run in parallel. Results are synthesized into a
+unified report. If the adversarial provider fails, evaluation falls back to primary-only results with a warning.
 
 ### Tier 3: Full Team
 
-For architectural changes, new subsystems, and core refactors. Maximum rigor. A Claude
+For architectural changes, new subsystems, and core refactors. Maximum rigor. A configured primary
 agent team runs four specialized evaluators in parallel:
 
 - **Contract evaluator** -- scores each criterion (same as Tier 1/2)
@@ -112,8 +108,8 @@ agent team runs four specialized evaluators in parallel:
 - **Regression hunter** -- looks for unintended side effects in the diff
 - **Edge case breaker** -- probes for boundary conditions and failure modes
 
-Additionally, a Codex evaluator runs at maximum reasoning depth (`xhigh` effort). All
-five evaluators execute in parallel and results are synthesized into a comprehensive
+Additionally, the configured adversarial evaluator runs in parallel. All
+evaluators execute concurrently and results are synthesized into a comprehensive
 report.
 
 ## Contract Enforcement
@@ -142,7 +138,7 @@ Contract: API Rate Limiting (Tier 2)
 
 Contract: PASS (3/3 criteria met)
 
-Adversarial Review (GPT-5.5):
+Adversarial Review (configured provider):
   - Consider: Token bucket refill rate is hardcoded; configuration would
     improve flexibility
   - Consider: No test for concurrent request handling under rate limit
@@ -155,13 +151,13 @@ Exit code: 0
 Evaluation must not fail because an optional evaluator is unavailable. The degradation
 rules are:
 
-- **No Codex API key configured**: Tier 2/3 evaluations run as Tier 1 (Claude only)
+- **No adversarial provider credentials configured**: Tier 2/3 evaluations run as primary-only
   with a warning message
-- **Codex provider times out**: The Claude evaluation result is used alone; the
+- **Adversarial provider times out**: The primary evaluation result is used alone; the
   adversarial section of the report notes the timeout
-- **Codex provider crashes**: Same as timeout -- Claude results are used, crash is
+- **Adversarial provider crashes**: Same as timeout -- primary results are used, crash is
   logged
-- **Claude provider fails**: This is a hard failure -- evaluation cannot proceed
+- **Primary evaluator provider fails**: This is a hard failure -- evaluation cannot proceed
   without contract grading. The CLI exits with code 1.
 
 The principle is: adversarial review enhances evaluation but is not required. Contract
@@ -294,7 +290,7 @@ phases:
 
 ### Confidence ceiling
 
-For dual-model correlated evaluators (`ρ ≈ 0.35` between Claude and Codex),
+For dual-model correlated evaluators (`ρ ≈ 0.35` between the default evaluator families),
 reported confidence never exceeds **~96.6%**. This is a derivation of the
 correlated Condorcet Jury Theorem (Kim et al., ICML 2025; full proof in
 `docs/research/convergence-analysis.md`). Adaptive algorithms halt at the

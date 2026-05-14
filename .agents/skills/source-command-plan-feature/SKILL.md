@@ -124,7 +124,7 @@ Plans suffer the same confirmation bias that `/evaluate` was built to break: whe
 
 ### The Critique Prompt
 
-The same prompt is used by all adversaries — every tier (Tier 1, Tier 2, Tier 3) runs both adversaries in parallel: a fresh Claude opus 4.7 adaptive sub-agent AND a Codex GPT-5.5 xhigh task. It must attack six dimensions:
+The same prompt is used by all adversaries. Tier 2+ runs the configured primary evaluator path and the configured adversarial provider in parallel; Tier 3 uses the configured primary evaluator team. It must attack six dimensions:
 
 ```
 You are reviewing an implementation plan BEFORE code is written. You did NOT write this plan and have no stake in its approval. Your job is to find weaknesses along six dimensions. Be specific. Cite plan sections by heading. Reject generic concerns.
@@ -159,19 +159,19 @@ The adversary receives: the plan file, `AGENTS.md`, and `git log --oneline -15` 
 
 ### All Tiers: Parallel Adversarial Streams
 
-Run two independent adversaries **in parallel** (not sequentially) for every tier — Tier 1, Tier 2, and Tier 3. Self-critique by the planning agent is no longer sufficient at any tier; bias from the planner is too strong. Tier only changes the Claude sub-agent type and the refinement-cycle ceiling — both adversaries always run.
+Run independent adversaries **in parallel** (not sequentially) according to the configured evaluation tier. Self-critique by the planning agent is no longer sufficient; bias from the planner is too strong. Tier changes the primary evaluator shape and refinement-cycle ceiling.
 
-**Stream A — Fresh Claude opus 4.7 adaptive sub-agent.** Spawn via `Task` tool with `model: "opus"` (Claude opus 4.7 adaptive):
+**Stream A — Configured primary evaluator.** Spawn a fresh evaluator session with the configured primary model:
 - Tier 1 → `subagent_type: "general-purpose"`
 - Tier 2 → `subagent_type: "general-purpose"`
 - Tier 3 → `subagent_type: "architect"`
 - Pass the critique prompt with plan + AGENTS.md + git log appended.
 
-**Stream B — Codex GPT-5.5 xhigh task** (runs in background via `Bash` with `run_in_background: true`). Always `--model gpt-5.5 --effort xhigh` regardless of tier:
+**Stream B — Configured adversarial provider** (runs in background via `Bash` with `run_in_background: true`). Read `[evaluation.adversarial]` from `.pice/config.toml`; for the bundled Codex provider, use its configured `model` and `effort`:
 
 ```bash
 node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
-  task --background --model gpt-5.5 --effort xhigh \
+  task --background --model {model} --effort {effort} \
   "{the critique prompt above, with plan + AGENTS.md + git log appended}"
 ```
 
@@ -179,7 +179,7 @@ node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companio
 
 Inherits the fallback from `/evaluate`. If Stream B output contains rate-limit markers (`rate limit`, `rate_limit_exceeded`, `429`, `too many requests`, `usage cap`, `quota exceeded`), read `~/.codex/.openai-fallback-key` and retry via direct OpenAI Responses API:
 
-- `model: "gpt-5.5"`, `reasoning.effort: "xhigh"` (all tiers)
+- Use the configured adversarial `model` and `reasoning.effort`
 - `max_output_tokens: 32000`; on `status: "incomplete"` with `reason: "max_output_tokens"`, retry with larger budget
 - Do NOT run `codex login --api-key` (overwrites ChatGPT Team session)
 
@@ -220,7 +220,7 @@ Append findings to the plan file under a new `## Adversarial Review` section (th
 ## Adversarial Review
 
 **Tier**: {N}
-**Reviewers**: Claude opus 4.7 adaptive sub-agent + Codex GPT-5.5 xhigh
+**Reviewers**: configured primary evaluator + configured adversarial provider
 **Refinement cycles**: {N}
 **Attack framework**: Karpathy four principles + PoetiQ cross-model verification
 
@@ -255,10 +255,10 @@ This keeps the contract honest: it grades against the plan as challenged, not th
 
 Based on the plan's success criteria and implementation tasks, write a JSON contract block in the plan file's `## Contract` section:
 
-1. **Set the tier** based on scope (determines Claude evaluator passes; the dual Claude opus 4.7 adaptive + GPT-5.5 xhigh adversarial review runs at every tier):
-   - **Tier 1** (1 Claude pass + Claude opus 4.7 adaptive sub-agent + GPT-5.5 xhigh adversarial review): Bug fixes, simple endpoints, UI tweaks
-   - **Tier 2** (1 Claude pass + Claude opus 4.7 adaptive sub-agent + GPT-5.5 xhigh adversarial review): New features touching multiple domains, integrations, schema changes
-   - **Tier 3** (Claude agent team + Claude opus 4.7 adaptive architect sub-agent + GPT-5.5 xhigh adversarial review): New pipeline phases, agent types, architectural changes
+1. **Set the tier** based on scope (determines configured primary evaluator passes and configured adversarial review depth):
+   - **Tier 1** (1 primary evaluator pass): Bug fixes, simple endpoints, UI tweaks
+   - **Tier 2** (1 primary evaluator pass + configured adversarial review): New features touching multiple domains, integrations, schema changes
+   - **Tier 3** (primary evaluator agent team + configured adversarial review): New pipeline phases, agent types, architectural changes
 
 2. **Write criteria** — each must be:
    - Independently testable (no "works well" or "looks good")

@@ -15,16 +15,17 @@ Status: APPROVED FOR IMPLEMENTATION by the 2026-05-12 instruction to fix the
 evaluation issues and continue until the contract passes.
 
 Approved policy: `v0.7.0` release tag, npm package version `0.7.0`, final notes
-path `docs/releases/v0.7.0.md`, keep `.claude` as the public scaffold while
-documenting `.codex` as repo-local maintainer context, and treat explicit tag
-approval as approval to publish the matching GitHub release and npm packages.
+path `docs/releases/v0.7.0.md`, ship `.claude` as the default public scaffold,
+and treat explicit tag approval as approval to publish the matching GitHub
+release and npm packages. Later Codex-primary work adds an opt-in public
+`.codex` scaffold through `pice init --developer codex`.
 
 | Decision | Current evidence | Approval required |
 | --- | --- | --- |
 | release version/tag | PRDv2 Phase 8 targets `v0.7.0`; manifests and docs use `0.7.0` / `v0.7.0`. | Approved for implementation: use `v0.7.0`. |
 | npm package version | Cargo, `npm/*/package.json`, and `packages/*/package.json` use `0.7.0`. | Approved: npm packages match `0.7.0`. |
 | release notes path | Final draft exists at `docs/releases/v0.7.0.md`. | Approved for implementation: final path is `docs/releases/v0.7.0.md`. |
-| namespace policy | Current code scaffolds `.claude/`; this repo uses `.codex/` for local commands and rules. | Approved: keep `.claude` public scaffold; document `.codex` as repo-local maintainer context. |
+| namespace policy | Current code scaffolds `.claude/` by default and can scaffold `.codex/` with `--developer codex`. This repo also uses `.codex/` for local commands and rules. | Approved: keep `.claude` as the default public scaffold; document Codex as an opt-in developer scaffold. |
 | publish approval | `release.yml` requires tag-triggered releases to run npm publish before GitHub Release creation; manual dry-runs remain non-publishing. | Approved for implementation: tag approval includes npm publish for the same version. |
 
 ## Current Snapshot
@@ -123,7 +124,7 @@ approval as approval to publish the matching GitHub release and npm packages.
 | Template drift between repo-local `.codex` and shipped `templates/claude` must be resolved or documented. | Complete: documented in `docs/releases/template-drift-inventory.md`. |
 | Public docs must distinguish local SQLite metrics from opt-in outbound telemetry and must not claim code, prompts, paths, secrets, or PII are sent. | Complete: README/release notes/provider docs distinguish local and outbound telemetry. |
 | Release dry-run and publish boundaries must be explicit before tag. | Complete: manual dry-run stays non-publishing; tag-triggered release publishes npm before GitHub Release creation. |
-| `.codex/rules/templates.md` currently says `templates/claude` scaffolds into `.codex`, while `pice init` scaffolds `.claude`. | Complete: `.codex/rules/templates.md` and template-drift inventory document the approved namespace policy. |
+| `.codex/rules/templates.md` previously said `templates/claude` scaffolds into `.codex`, while `pice init` scaffolded only `.claude`. | Complete: `.codex/rules/templates.md` and template-drift inventory document the default Claude scaffold plus opt-in Codex scaffold policy. |
 
 ## Known Limitation And Signoff Register
 
