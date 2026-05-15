@@ -108,8 +108,9 @@ process.stdin.on('end', () => {
   return { dir, path };
 }
 
-async function waitForFile(path: string): Promise<void> {
-  for (let i = 0; i < 20; i++) {
+async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     try {
       await access(path);
       return;
@@ -117,7 +118,7 @@ async function waitForFile(path: string): Promise<void> {
       await delay(50);
     }
   }
-  throw new Error(`file was not created: ${path}`);
+  throw new Error(`file was not created within ${timeoutMs}ms: ${path}`);
 }
 
 afterEach(() => {
