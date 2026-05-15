@@ -159,13 +159,26 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn normalized_plan_path(plan_path: &str, project_root: &Path) -> String {
+    let slash_path = plan_path.replace('\\', "/");
+
+    for marker in [".claude/plans/", ".codex/plans/"] {
+        if let Some(idx) = slash_path.find(marker) {
+            return slash_path[idx..].to_string();
+        }
+    }
+
     let path = Path::new(plan_path);
     if path.is_absolute() {
         if let Ok(rel) = path.strip_prefix(project_root) {
             return normalize_components(rel);
         }
-        return plan_path.replace('\\', "/");
+        return slash_path;
     }
+
+    if slash_path.starts_with('/') {
+        return slash_path;
+    }
+
     normalize_components(path)
 }
 
@@ -417,6 +430,14 @@ Some follow-up notes.
         assert!(!has_spec_traceability_heading(
             "# Plan\n\nSee ## Spec Traceability in prose.\n"
         ));
+    }
+
+    #[test]
+    fn normalized_plan_path_extracts_suffix_from_windows_style_codex_path() {
+        assert_eq!(
+            normalized_plan_path(r"D:\a\repo\.codex\plans\trace.md", Path::new(r"D:\a\repo")),
+            ".codex/plans/trace.md"
+        );
     }
 
     #[test]
