@@ -1,16 +1,16 @@
 {
   "name": "@jacobmolz/pice",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "description": "PICE CLI — structured AI coding workflow orchestrator",
   "bin": { "pice": "bin/pice" },
   "main": "index.js",
   "files": ["bin", "index.js"],
   "optionalDependencies": {
-    "@pice/pice-darwin-arm64": "0.8.5",
-    "@pice/pice-darwin-x64": "0.8.5",
-    "@pice/pice-linux-arm64": "0.8.5",
-    "@pice/pice-linux-x64": "0.8.5",
-    "@pice/pice-win32-x64": "0.8.5"
+    "@pice/pice-darwin-arm64": "0.8.6",
+    "@pice/pice-darwin-x64": "0.8.6",
+    "@pice/pice-linux-arm64": "0.8.6",
+    "@pice/pice-linux-x64": "0.8.6",
+    "@pice/pice-win32-x64": "0.8.6"
   },
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/jacobmolz/pice" },
