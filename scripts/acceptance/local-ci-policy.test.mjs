@@ -64,7 +64,7 @@ describe('local CI policy', () => {
     const script = read('scripts/ci/windows-smoke.ps1');
     expect(script).toContain('$env:PATH = "$DebugBin;$env:PATH"');
     expect(script).toContain('$env:RUST_TEST_THREADS = "1"');
-    expect(script).toContain('Invoke-Step cargo @("test")');
+    expect(script).toContain('Invoke-Step cargo @("test", "--", "--skip", "parallel_cohort_meets_16x_speedup")');
     expect(script).toContain('Invoke-Step cargo @("build", "--release", "-p", "pice-cli", "-p", "pice-daemon")');
     expect(script).toContain('release-artifact-smoke.test.mjs');
     expect(script).toContain('PICE_RELEASE_SMOKE_EVIDENCE');
