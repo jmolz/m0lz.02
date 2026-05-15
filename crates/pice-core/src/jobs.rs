@@ -16,6 +16,7 @@
 //! or the daemon's live `PiceConfig`. This is load-bearing for contract
 //! criterion #16 (`job_env_snapshot_integration.rs`).
 
+use crate::plan_parser::PlanTrace;
 use crate::workflow::schema::WorkflowConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -50,6 +51,12 @@ pub struct JobEnv {
     /// dispatch. Resolved against the project root so the spawned
     /// future can load contracts without re-running path discovery.
     pub contracts: BTreeMap<String, PathBuf>,
+
+    /// Plan/contract trace metadata captured at dispatch time. Optional
+    /// for backwards compatibility with older jobs/tests and for future
+    /// non-plan background jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_trace: Option<PlanTrace>,
 
     /// Captured value of `PICE_STATE_DIR` env var at dispatch time (or
     /// `None` if unset). Distinct from [`Self::state_dir`] which is the
@@ -102,6 +109,7 @@ mod tests {
             project_root: PathBuf::from("/home/u/code/foo"),
             workflow_snapshot: stub_workflow(),
             contracts: BTreeMap::new(),
+            plan_trace: None,
             pice_state_dir_override: None,
             pice_user_workflow_file: None,
         };
@@ -132,6 +140,14 @@ mod tests {
             project_root: PathBuf::from("/repo"),
             workflow_snapshot: stub_workflow(),
             contracts,
+            plan_trace: Some(PlanTrace {
+                plan_path: ".codex/plans/trace.md".to_string(),
+                plan_sha256: "a".repeat(64),
+                contract_sha256: "b".repeat(64),
+                contract_feature: "Trace".to_string(),
+                contract_tier: 2,
+                has_spec_traceability: true,
+            }),
             pice_state_dir_override: Some(PathBuf::from("/tmp/a")),
             pice_user_workflow_file: Some(PathBuf::from("/home/u/.pice/workflow.yaml")),
         };
@@ -143,6 +159,12 @@ mod tests {
             &PathBuf::from("/repo/.pice/contracts/backend.toml")
         );
         assert_eq!(back.pice_state_dir_override, Some(PathBuf::from("/tmp/a")));
+        assert_eq!(
+            back.plan_trace
+                .as_ref()
+                .map(|t| t.contract_feature.as_str()),
+            Some("Trace")
+        );
     }
 
     #[test]
@@ -160,6 +182,7 @@ mod tests {
             project_root: PathBuf::from("/p"),
             workflow_snapshot: stub_workflow(),
             contracts,
+            plan_trace: None,
             pice_state_dir_override: None,
             pice_user_workflow_file: None,
         };

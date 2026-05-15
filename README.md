@@ -32,6 +32,12 @@ m0lz.02 implements PICE: Plan, Implement, Contract-Evaluate. The current release
 
 The shipped architecture is a CLI adapter plus a headless `pice-daemon`. The CLI handles arguments and terminal rendering. The daemon owns orchestration, background jobs, provider sessions, manifests, metrics, templates, and audit state. AI providers run out of process over the provider JSON-RPC protocol.
 
+## How Work Stays Tied To The Spec
+
+`prime` orients on the repository and recent state; it does not tie implementation back to a spec. `plan` turns the original request, supplied spec, or stable reference into an approved plan, a `## Spec Traceability` mapping, and a JSON contract. `execute` starts a fresh provider session from the approved plan and refuses contract-free plans before provider startup. `evaluate` grades the produced diff against the contract with isolated evaluators that see only the contract, filtered diff, and `AGENTS.md`.
+
+Stack Loops extend the chain with per-layer contracts, seam checks, manifest state, trace metadata for the approved plan and contract, and review gates when the workflow requires human approval.
+
 ## Install
 
 ```bash

@@ -121,21 +121,21 @@ algorithm. Rate limits are defined per-endpoint in the configuration file.
 {
   "feature": "API Rate Limiting",
   "tier": 2,
-  "pass_threshold": 7,
+  "pass_threshold": 8,
   "criteria": [
     {
       "name": "Tests pass",
-      "threshold": 7,
+      "threshold": 8,
       "validation": "cargo test"
     },
     {
       "name": "Rate limit middleware exists",
-      "threshold": 7,
+      "threshold": 8,
       "validation": "test -f src/server/rate_limit.rs"
     },
     {
       "name": "Configuration support",
-      "threshold": 7,
+      "threshold": 8,
       "validation": "cargo test config::tests::rate_limit"
     },
     {

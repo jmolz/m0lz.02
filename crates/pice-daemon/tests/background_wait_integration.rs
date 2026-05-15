@@ -278,6 +278,7 @@ async fn wait_exit_4_timeout_feature_still_running() {
         contracts: BTreeMap::new(),
         pice_state_dir_override: None,
         pice_user_workflow_file: None,
+        plan_trace: None,
     });
     let _run_id = mgr
         .spawn(

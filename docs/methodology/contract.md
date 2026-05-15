@@ -21,16 +21,16 @@ structure -- `### Contract` or other heading levels will not be recognized.
 {
   "feature": "API Rate Limiting",
   "tier": 2,
-  "pass_threshold": 7,
+  "pass_threshold": 8,
   "criteria": [
     {
       "name": "Tests pass",
-      "threshold": 7,
+      "threshold": 8,
       "validation": "cargo test"
     },
     {
       "name": "Rate limit middleware exists",
-      "threshold": 7,
+      "threshold": 8,
       "validation": "test -f src/server/rate_limit.rs"
     },
     {
@@ -65,7 +65,7 @@ When uncertain, tier up rather than down.
 
 The minimum aggregate score (1-10) for the contract to pass overall. Currently,
 pass/fail is computed per-criterion (all must meet their individual threshold). This
-field exists for future weighted scoring. Set to 7 for most contracts.
+field exists for future weighted scoring. Set to 8 or higher for current contracts.
 
 ### `criteria` (array, required)
 
@@ -90,13 +90,14 @@ Threshold guidelines:
 |-------|---------|
 | 1-3 | Fundamentally broken or missing |
 | 4-6 | Partial implementation, significant issues |
-| 7 | Meets the bar -- functional, correct, follows conventions |
-| 8 | Good -- clean implementation, handles edge cases |
+| 7 | Legacy floor -- older plans may use this, but new contracts should not |
+| 8 | Meets the bar -- functional, correct, follows conventions |
 | 9-10 | Excellent -- exceeds expectations, exemplary code |
 
-Most criteria should use threshold 7. Use 8 or higher for critical requirements where
-"good enough" is not good enough (security, data integrity, public API design). Use
-lower thresholds only when a criterion is aspirational rather than required.
+Most new criteria should use threshold 8. Use 9 or higher for critical requirements
+where "good enough" is not good enough (security, data integrity, public API design).
+Avoid lower thresholds in new plans; if a criterion feels like threshold 7, it is
+usually too vague or not contract-critical.
 
 **`validation`** (string, required)
 
@@ -161,7 +162,18 @@ The PICE CLI parser looks for a level-2 `## Contract` heading (not `###` or deep
 finds the ` ```json ` fenced code block within it, and parses the JSON as a
 `PlanContract` struct. If `## Contract` exists but the JSON fence is missing or
 malformed, the parser returns an error -- half-written contracts are surfaced, not
-silently ignored. Plans without a `## Contract` heading are treated as contract-free.
+silently ignored. Plans without a `## Contract` heading are treated as contract-free;
+`pice execute` refuses them before provider startup and `pice evaluate` refuses them
+because there is no contract to grade.
+
+## Spec Traceability
+
+New PICE plans include a `## Spec Traceability` section before the contract. That
+section records the original request or supplied reference, maps source requirements
+to implementation tasks, and maps those requirements to contract criteria. PICE
+records references supplied during planning; it does not automatically discover
+external PRDs, issues, emails, or customer systems. `prime` orients, but the approved
+plan and contract are the traceability mechanism.
 
 ## Example: Tier 1 Contract (Bug Fix)
 
@@ -169,16 +181,16 @@ silently ignored. Plans without a `## Contract` heading are treated as contract-
 {
   "feature": "Fix login redirect bug",
   "tier": 1,
-  "pass_threshold": 7,
+  "pass_threshold": 8,
   "criteria": [
     {
       "name": "Tests pass",
-      "threshold": 7,
+      "threshold": 8,
       "validation": "cargo test"
     },
     {
       "name": "Redirect works",
-      "threshold": 7,
+      "threshold": 8,
       "validation": "cargo test auth::tests::login_redirect"
     }
   ]
@@ -196,7 +208,7 @@ full evaluator team:
   "tier": 3,
   "pass_threshold": 8,
   "criteria": [
-    { "name": "All tests pass", "threshold": 7, "validation": "cargo test" },
+    { "name": "All tests pass", "threshold": 8, "validation": "cargo test" },
     { "name": "Lifecycle tests", "threshold": 8, "validation": "cargo test websocket::tests" },
     { "name": "No lint warnings", "threshold": 8, "validation": "cargo clippy -- -D warnings" },
     { "name": "Graceful disconnect", "threshold": 8, "validation": "cargo test websocket::tests::disconnect" }

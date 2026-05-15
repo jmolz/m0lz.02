@@ -170,6 +170,8 @@ async fn run_once(parallel: bool, latency_ms: u64) {
         workflow: &wf,
         merged_seams: &seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,

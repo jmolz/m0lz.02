@@ -87,6 +87,17 @@ Use this template as the output structure — fill in every section with real da
 
 @.claude/templates/plan-template.md
 
+### Spec Traceability (REQUIRED)
+
+The plan must include `## Spec Traceability` with:
+
+- original request or supplied stable reference
+- source excerpts or links only when supplied during planning
+- source requirement -> implementation task mapping
+- source requirement -> contract criteria mapping
+- an explicit note that `prime` orients only; the approved plan and contract are the traceability mechanism
+- an explicit boundary that PICE records supplied references and does not discover external PRDs, issues, emails, or source systems automatically
+
 ### Worktree Execution (REQUIRED)
 
 All new features MUST be executed in a git worktree to isolate work from main. The plan must include a `## Worktree` section specifying:

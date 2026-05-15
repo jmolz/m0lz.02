@@ -676,6 +676,7 @@ mod tests {
             gates: vec![gate.clone()],
             overall_status: MS::PendingReview,
             run_id: None,
+            plan_trace: None,
         };
         // Test fixture: route through `NullSaver` so this file contains
         // zero raw low-level save call sites (Task 9 grep-coverage

@@ -33,6 +33,7 @@ fn sample_manifest(feature_id: &str) -> VerificationManifest {
         gates: Vec::new(),
         overall_status: ManifestStatus::InProgress,
         run_id: Some("run-coverage".to_string()),
+        plan_trace: None,
     }
 }
 

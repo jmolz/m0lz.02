@@ -661,6 +661,7 @@ mod tests {
             contracts: Default::default(),
             pice_state_dir_override: None,
             pice_user_workflow_file: None,
+            plan_trace: None,
         })
     }
 
@@ -1074,6 +1075,7 @@ mod tests {
             contracts: Default::default(),
             pice_state_dir_override: None,
             pice_user_workflow_file: None,
+            plan_trace: None,
         });
         let events = EventBus::new();
         let mut rx = events.subscribe_feature("feat-waiting");
@@ -1172,6 +1174,7 @@ mod tests {
             contracts: Default::default(),
             pice_state_dir_override: None,
             pice_user_workflow_file: None,
+            plan_trace: None,
         });
         let events = EventBus::new();
         let mut rx = events.subscribe_feature("feat-stuck");

@@ -14,7 +14,7 @@ validation = "Check that staging/production configs are correct and environment-
 
 [[contract.criteria]]
 name = "Rollback strategy exists and is tested"
-threshold = 7
+threshold = 8
 validation = "Verify deployment can be reverted to the previous version without manual intervention"
 
 [[contract.criteria]]

@@ -14,10 +14,10 @@ validation = "Check that errors are caught, logged, and surfaced appropriately"
 
 [[contract.criteria]]
 name = "Unit tests cover critical paths"
-threshold = 7
+threshold = 8
 validation = "Verify test coverage for new and modified functions"
 
 [[contract.criteria]]
 name = "No performance regressions in hot paths"
-threshold = 7
+threshold = 8
 validation = "Check for O(n^2) loops, unnecessary allocations, blocking calls"

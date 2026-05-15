@@ -14,10 +14,10 @@ validation = "Verify protected endpoints reject unauthenticated requests and enf
 
 [[contract.criteria]]
 name = "Response format is consistent and documented"
-threshold = 7
+threshold = 8
 validation = "Check that responses follow the API schema, include correct status codes, and match documented types"
 
 [[contract.criteria]]
 name = "Error responses are structured and actionable"
-threshold = 7
+threshold = 8
 validation = "Verify error responses use consistent format with error codes, messages, and no leaked internals"

@@ -772,6 +772,7 @@ mod tests {
             contracts: Default::default(),
             pice_state_dir_override: None,
             pice_user_workflow_file: None,
+            plan_trace: None,
         })
     }
 

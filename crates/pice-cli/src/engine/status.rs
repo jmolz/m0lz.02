@@ -65,12 +65,26 @@ pub fn scan_project_with_metrics(
 }
 
 fn scan_plans(project_root: &Path, metrics_db: Option<&MetricsDb>) -> Result<Vec<PlanStatus>> {
-    let plans_dir = project_root.join(".claude/plans");
-    if !plans_dir.is_dir() {
-        return Ok(Vec::new());
+    let mut plans = Vec::new();
+    for relative_dir in [".claude/plans", ".codex/plans"] {
+        scan_plan_dir(project_root, relative_dir, metrics_db, &mut plans)?;
     }
 
-    let mut plans = Vec::new();
+    plans.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(plans)
+}
+
+fn scan_plan_dir(
+    project_root: &Path,
+    relative_dir: &str,
+    metrics_db: Option<&MetricsDb>,
+    plans: &mut Vec<PlanStatus>,
+) -> Result<()> {
+    let plans_dir = project_root.join(relative_dir);
+    if !plans_dir.is_dir() {
+        return Ok(());
+    }
+
     for entry in std::fs::read_dir(&plans_dir)
         .with_context(|| format!("failed to read {}", plans_dir.display()))?
     {
@@ -87,7 +101,8 @@ fn scan_plans(project_root: &Path, metrics_db: Option<&MetricsDb>) -> Result<Vec
                     None => (None, 0, false),
                 };
                 let plan_path = format!(
-                    ".claude/plans/{}",
+                    "{}/{}",
+                    relative_dir,
                     path.file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown")
@@ -113,7 +128,8 @@ fn scan_plans(project_root: &Path, metrics_db: Option<&MetricsDb>) -> Result<Vec
             }
             Err(e) => {
                 let plan_path = format!(
-                    ".claude/plans/{}",
+                    "{}/{}",
+                    relative_dir,
                     path.file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown")
@@ -139,9 +155,7 @@ fn scan_plans(project_root: &Path, metrics_db: Option<&MetricsDb>) -> Result<Vec
             }
         }
     }
-
-    plans.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(plans)
+    Ok(())
 }
 
 fn get_branch_name(project_root: &Path) -> String {
@@ -215,6 +229,23 @@ mod tests {
     }
 
     #[test]
+    fn scan_project_with_codex_plans() {
+        let dir = tempfile::tempdir().unwrap();
+        let plans_dir = dir.path().join(".codex/plans");
+        std::fs::create_dir_all(&plans_dir).unwrap();
+        std::fs::write(
+            plans_dir.join("codex-plan.md"),
+            "# Feature: Codex Plan\n\n## Overview\nA test.\n",
+        )
+        .unwrap();
+
+        let status = scan_project(dir.path()).unwrap();
+        assert_eq!(status.plans.len(), 1);
+        assert_eq!(status.plans[0].path, ".codex/plans/codex-plan.md");
+        assert_eq!(status.plans[0].title, "Feature: Codex Plan");
+    }
+
+    #[test]
     fn scan_project_with_contract() {
         let dir = tempfile::tempdir().unwrap();
         let plans_dir = dir.path().join(".claude/plans");
@@ -229,9 +260,9 @@ mod tests {
 {
   "feature": "Test",
   "tier": 2,
-  "pass_threshold": 7,
+  "pass_threshold": 8,
   "criteria": [
-    { "name": "Tests pass", "threshold": 7, "validation": "cargo test" },
+    { "name": "Tests pass", "threshold": 8, "validation": "cargo test" },
     { "name": "Lint clean", "threshold": 8, "validation": "cargo clippy" }
   ]
 }

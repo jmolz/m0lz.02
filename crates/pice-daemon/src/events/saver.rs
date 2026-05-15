@@ -343,6 +343,7 @@ mod tests {
             gates: Vec::new(),
             overall_status: ManifestStatus::InProgress,
             run_id: run_id.map(|s| s.to_string()),
+            plan_trace: None,
         }
     }
 

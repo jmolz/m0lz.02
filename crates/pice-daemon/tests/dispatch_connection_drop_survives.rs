@@ -104,6 +104,7 @@ fn stub_env(state_dir: &std::path::Path, project: &std::path::Path) -> Arc<JobEn
         contracts: Default::default(),
         pice_state_dir_override: None,
         pice_user_workflow_file: None,
+        plan_trace: None,
     })
 }
 

@@ -50,6 +50,7 @@ fn test_env(state_dir: &std::path::Path, project_root: &std::path::Path) -> Arc<
         contracts: BTreeMap::new(),
         pice_state_dir_override: None,
         pice_user_workflow_file: None,
+        plan_trace: None,
     })
 }
 

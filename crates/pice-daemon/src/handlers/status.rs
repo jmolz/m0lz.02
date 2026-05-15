@@ -2,7 +2,7 @@
 //!
 //! Phase 7 Task 12 extends the handler to branch on [`StatusMode`]:
 //!
-//! - [`StatusMode::List`] (default): scans `.claude/plans/` for plan files,
+//! - [`StatusMode::List`] (default): scans `.claude/plans/` and `.codex/plans/` for plan files,
 //!   decorates each with the latest evaluation + verification manifest
 //!   snapshot. Historical behavior — unchanged so existing tests pass.
 //! - [`StatusMode::Detail`]: looks up a single feature's
@@ -155,84 +155,22 @@ async fn run_list(req: StatusRequest, ctx: &DaemonContext) -> Result<CommandResp
 
     let project_root = ctx.project_root();
 
-    // Scan .claude/plans/ for plan files
-    let plans_dir = project_root.join(".claude/plans");
     let mut plans = Vec::new();
+    let mut seen_paths = std::collections::BTreeSet::new();
 
-    if plans_dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(&plans_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                    continue;
-                }
-
-                let plan_info = match ParsedPlan::load(&path) {
-                    Ok(plan) => {
-                        let normalized = metrics::normalize_plan_path(&plan.path, project_root);
-                        // Look up latest evaluation (non-fatal)
-                        let eval = metrics::open_metrics_db(project_root)
-                            .ok()
-                            .flatten()
-                            .and_then(|db| {
-                                metrics::store::get_latest_evaluation(&db, &normalized)
-                                    .ok()
-                                    .flatten()
-                            });
-
-                        let mut info = json!({
-                            "title": plan.title,
-                            "path": normalized,
-                            "has_contract": plan.contract.is_some(),
-                            "tier": plan.tier(),
-                        });
-
-                        if let Some(eval) = eval {
-                            info["last_eval"] = json!({
-                                "passed": eval.passed,
-                                "avg_score": eval.avg_score,
-                                "timestamp": eval.timestamp,
-                            });
-                        }
-
-                        // Phase 4: surface per-layer adaptive fields when a
-                        // verification manifest exists for this plan. Best-effort:
-                        // a missing or malformed manifest is silently skipped.
-                        if let Some(snapshot) = load_manifest_snapshot(&path, project_root) {
-                            if let Some(layers) = snapshot.layers {
-                                info["layers"] = layers;
-                            }
-                            // Phase 6: surface pending gates so the
-                            // CLI can advise the user to run
-                            // `pice review-gate --list`.
-                            if !snapshot.gates.is_empty() {
-                                info["gates"] = serde_json::Value::Array(snapshot.gates);
-                            }
-                            if let Some(ms) = snapshot.overall_status {
-                                info["overall_status"] = serde_json::Value::String(ms);
-                            }
-                        }
-
-                        info
-                    }
-                    Err(e) => {
-                        // Malformed plans surface with parse_error (per rust-core.md)
-                        let name = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        json!({
-                            "title": name,
-                            "path": path.to_string_lossy(),
-                            "has_contract": false,
-                            "parse_error": e.to_string(),
-                        })
-                    }
-                };
-                plans.push(plan_info);
-            }
-        }
+    for plans_dir in [
+        project_root.join(".claude/plans"),
+        project_root.join(".codex/plans"),
+    ] {
+        scan_plans_dir(project_root, &plans_dir, &mut seen_paths, &mut plans);
     }
+
+    plans.sort_by(|a, b| {
+        a.get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("path").and_then(|v| v.as_str()).unwrap_or(""))
+    });
 
     // Git info (non-fatal)
     let git_info = get_git_info(project_root);
@@ -318,6 +256,96 @@ async fn run_list(req: StatusRequest, ctx: &DaemonContext) -> Result<CommandResp
         }
 
         Ok(CommandResponse::Text { content: output })
+    }
+}
+
+fn scan_plans_dir(
+    project_root: &std::path::Path,
+    plans_dir: &std::path::Path,
+    seen_paths: &mut std::collections::BTreeSet<String>,
+    plans: &mut Vec<Value>,
+) {
+    if plans_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(plans_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+
+                let plan_info = match ParsedPlan::load(&path) {
+                    Ok(plan) => {
+                        let normalized = metrics::normalize_plan_path(&plan.path, project_root);
+                        if !seen_paths.insert(normalized.clone()) {
+                            continue;
+                        }
+                        // Look up latest evaluation (non-fatal)
+                        let eval = metrics::open_metrics_db(project_root)
+                            .ok()
+                            .flatten()
+                            .and_then(|db| {
+                                metrics::store::get_latest_evaluation(&db, &normalized)
+                                    .ok()
+                                    .flatten()
+                            });
+
+                        let mut info = json!({
+                            "title": plan.title,
+                            "path": normalized,
+                            "has_contract": plan.contract.is_some(),
+                            "tier": plan.tier(),
+                        });
+
+                        if let Some(eval) = eval {
+                            info["last_eval"] = json!({
+                                "passed": eval.passed,
+                                "avg_score": eval.avg_score,
+                                "timestamp": eval.timestamp,
+                            });
+                        }
+
+                        // Phase 4: surface per-layer adaptive fields when a
+                        // verification manifest exists for this plan. Best-effort:
+                        // a missing or malformed manifest is silently skipped.
+                        if let Some(snapshot) = load_manifest_snapshot(&path, project_root) {
+                            if let Some(layers) = snapshot.layers {
+                                info["layers"] = layers;
+                            }
+                            // Phase 6: surface pending gates so the
+                            // CLI can advise the user to run
+                            // `pice review-gate --list`.
+                            if !snapshot.gates.is_empty() {
+                                info["gates"] = serde_json::Value::Array(snapshot.gates);
+                            }
+                            if let Some(ms) = snapshot.overall_status {
+                                info["overall_status"] = serde_json::Value::String(ms);
+                            }
+                        }
+
+                        info
+                    }
+                    Err(e) => {
+                        // Malformed plans surface with parse_error (per rust-core.md)
+                        let normalized =
+                            metrics::normalize_plan_path(&path.to_string_lossy(), project_root);
+                        if !seen_paths.insert(normalized.clone()) {
+                            continue;
+                        }
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        json!({
+                            "title": name,
+                            "path": normalized,
+                            "has_contract": false,
+                            "parse_error": e.to_string(),
+                        })
+                    }
+                };
+                plans.push(plan_info);
+            }
+        }
     }
 }
 

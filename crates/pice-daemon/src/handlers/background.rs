@@ -43,6 +43,7 @@ use anyhow::{Context, Result};
 use pice_core::cli::{CommandResponse, ExitJsonStatus};
 use pice_core::jobs::JobEnv;
 use pice_core::layers::manifest::{ManifestStatus, VerificationManifest};
+use pice_core::plan_parser::PlanTrace;
 use pice_core::prompt::helpers::{get_git_diff, read_evaluation_guidance};
 use pice_core::workflow::WorkflowConfig;
 use serde_json::json;
@@ -168,6 +169,7 @@ fn build_job_env(
     project_root: &Path,
     workflow_snapshot: WorkflowConfig,
     contract_paths: BTreeMap<String, PathBuf>,
+    plan_trace: Option<PlanTrace>,
 ) -> Result<JobEnv> {
     let state_dir = VerificationManifest::state_dir()
         .context("resolving ~/.pice/state directory for JobEnv snapshot")?;
@@ -183,9 +185,22 @@ fn build_job_env(
         project_root: project_root.to_path_buf(),
         workflow_snapshot,
         contracts: contract_paths,
+        plan_trace,
         pice_state_dir_override,
         pice_user_workflow_file,
     })
+}
+
+#[derive(Clone)]
+pub struct PlanDispatchSnapshot {
+    pub content: String,
+    pub trace: Option<PlanTrace>,
+}
+
+pub struct BackgroundDispatchInputs {
+    pub workflow_snapshot: WorkflowConfig,
+    pub plan_snapshot: Option<PlanDispatchSnapshot>,
+    pub layers_config: Option<pice_core::layers::LayersConfig>,
 }
 
 /// Resolve layer contract paths at dispatch time so the spawned job
@@ -311,6 +326,7 @@ pub fn write_queued_manifest(
     run_id: &str,
     project_root: &Path,
     manifest_path: &Path,
+    plan_trace: Option<&PlanTrace>,
 ) -> Result<PathBuf> {
     let existing_manifest = manifest_path.exists();
     let mut manifest = if existing_manifest {
@@ -323,6 +339,19 @@ pub fn write_queued_manifest(
     } else {
         VerificationManifest::new(feature_id, project_root)
     };
+    if let Some(trace) = plan_trace {
+        if let Some(existing) = manifest.plan_trace.as_ref() {
+            if existing != trace {
+                anyhow::bail!(
+                    "existing manifest plan trace does not match dispatch plan: {} != {}",
+                    existing.plan_sha256,
+                    trace.plan_sha256
+                );
+            }
+        } else {
+            manifest.plan_trace = Some(trace.clone());
+        }
+    }
     manifest.overall_status = if existing_manifest {
         ManifestStatus::Pending
     } else {
@@ -345,6 +374,7 @@ pub struct OrchestratorSpawnArgs {
     pub manifest_path: PathBuf,
     pub env: Arc<JobEnv>,
     pub plan_content: String,
+    pub plan_trace: Option<PlanTrace>,
     pub layers_config: Option<pice_core::layers::LayersConfig>,
     pub contract_contents: BTreeMap<String, String>,
     pub stack_loop_snapshot: Option<StackLoopInputSnapshot>,
@@ -418,8 +448,7 @@ pub async fn dispatch_background<F, Fut>(
     json_mode: bool,
     plan_path: &Path,
     ctx: &DaemonContext,
-    workflow_snapshot: WorkflowConfig,
-    layers_config: Option<pice_core::layers::LayersConfig>,
+    inputs: BackgroundDispatchInputs,
     future_builder: F,
 ) -> Result<CommandResponse>
 where
@@ -463,13 +492,26 @@ where
     // Step 4: allocate a fresh run_id.
     let run_id = ctx.jobs().next_run_id();
 
-    // Step 5: snapshot env and dispatch-time file content.
-    let plan_content = std::fs::read_to_string(plan_path).with_context(|| {
-        format!(
-            "reading plan content at dispatch from {}",
-            plan_path.display()
-        )
-    })?;
+    // Step 5: snapshot env and dispatch-time file content. Execute/evaluate
+    // callers that have already parsed a contract pass that exact content
+    // here to close the read-validate-dispatch TOCTOU window.
+    let BackgroundDispatchInputs {
+        workflow_snapshot,
+        plan_snapshot,
+        layers_config,
+    } = inputs;
+    let (plan_content, plan_trace) = match plan_snapshot {
+        Some(snapshot) => (snapshot.content, snapshot.trace),
+        None => {
+            let content = std::fs::read_to_string(plan_path).with_context(|| {
+                format!(
+                    "reading plan content at dispatch from {}",
+                    plan_path.display()
+                )
+            })?;
+            (content, None)
+        }
+    };
     let contract_paths = layers_config
         .as_ref()
         .map(|layers| collect_contract_paths_from_layers(ctx.project_root(), layers))
@@ -488,6 +530,7 @@ where
         ctx.project_root(),
         workflow_snapshot,
         contract_paths,
+        plan_trace.clone(),
     )?);
 
     // Step 6: derive the manifest path and durably write Queued before
@@ -500,7 +543,13 @@ where
     ctx.logs().reset_feature(&feature_id).await;
     let manifest_locks =
         acquire_background_manifest_locks(ctx, &feature_id, &manifest_path).await?;
-    write_queued_manifest(&feature_id, &run_id, ctx.project_root(), &manifest_path)?;
+    write_queued_manifest(
+        &feature_id,
+        &run_id,
+        ctx.project_root(),
+        &manifest_path,
+        plan_trace.as_ref(),
+    )?;
 
     let (start_tx, start_rx) = oneshot::channel::<()>();
     let manifest_locks_slot: Arc<StdMutex<Option<BackgroundManifestLocks>>> =
@@ -514,6 +563,7 @@ where
         manifest_path: manifest_path.clone(),
         env: Arc::clone(&env),
         plan_content,
+        plan_trace,
         layers_config,
         contract_contents,
         stack_loop_snapshot,
@@ -604,6 +654,9 @@ async fn fail_closed_after_background_error(
         }
     };
     manifest.run_id = Some(args.run_id.clone());
+    if manifest.plan_trace.is_none() {
+        manifest.plan_trace = args.plan_trace.clone();
+    }
     manifest.overall_status = ManifestStatus::Failed;
     manifest
         .layers
@@ -655,6 +708,9 @@ pub fn transition_queued_to_in_progress(
     })?;
     manifest.overall_status = ManifestStatus::InProgress;
     manifest.run_id = Some(args.run_id.clone());
+    if manifest.plan_trace.is_none() {
+        manifest.plan_trace = args.plan_trace.clone();
+    }
     crate::events::NullSaver.save_and_emit(
         &manifest,
         &args.manifest_path,
@@ -944,7 +1000,8 @@ paths = ["src/frontend/**"]
             project_tmp.path(),
             state_tmp.path(),
         );
-        let path = write_queued_manifest("feat-queued", "r-1", project_tmp.path(), &path).unwrap();
+        let path =
+            write_queued_manifest("feat-queued", "r-1", project_tmp.path(), &path, None).unwrap();
         let loaded = VerificationManifest::load(&path).unwrap();
         assert_eq!(loaded.overall_status, ManifestStatus::Queued);
         assert_eq!(loaded.run_id.as_deref(), Some("r-1"));
@@ -985,7 +1042,8 @@ paths = ["src/frontend/**"]
         });
         existing.save(&path).unwrap();
 
-        let path = write_queued_manifest("feat-resume", "r-2", project_tmp.path(), &path).unwrap();
+        let path =
+            write_queued_manifest("feat-resume", "r-2", project_tmp.path(), &path, None).unwrap();
         let loaded = VerificationManifest::load(&path).unwrap();
         assert_eq!(loaded.overall_status, ManifestStatus::Pending);
         assert_eq!(loaded.run_id.as_deref(), Some("r-2"));
@@ -1013,6 +1071,7 @@ paths = ["src/frontend/**"]
             "r-xyz",
             project_tmp.path(),
             &manifest_path,
+            None,
         )
         .unwrap();
 
@@ -1031,8 +1090,10 @@ paths = ["src/frontend/**"]
                 contracts: BTreeMap::new(),
                 pice_state_dir_override: None,
                 pice_user_workflow_file: None,
+                plan_trace: None,
             }),
             plan_content: "# Plan\n".to_string(),
+            plan_trace: None,
             layers_config: None,
             contract_contents: BTreeMap::new(),
             stack_loop_snapshot: None,
@@ -1075,6 +1136,14 @@ paths = ["src/**"]
         .unwrap();
         let layers_snapshot = pice_core::layers::LayersConfig::load(&pice_dir.join("layers.toml"))
             .expect("layers load");
+        let plan_trace = PlanTrace {
+            plan_path: "plan.md".to_string(),
+            plan_sha256: "original-plan-sha".to_string(),
+            contract_sha256: "original-contract-sha".to_string(),
+            contract_feature: "Snapshot Feature".to_string(),
+            contract_tier: 2,
+            has_spec_traceability: true,
+        };
         let ctx = DaemonContext::new("tok".to_string(), project_root.to_path_buf());
 
         let held = ctx
@@ -1089,11 +1158,19 @@ paths = ["src/**"]
             true,
             &plan_path,
             &ctx,
-            pice_core::workflow::loader::embedded_defaults(),
-            Some(layers_snapshot),
+            BackgroundDispatchInputs {
+                workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+                plan_snapshot: Some(PlanDispatchSnapshot {
+                    content: "# Original\n".to_string(),
+                    trace: Some(plan_trace.clone()),
+                }),
+                layers_config: Some(layers_snapshot),
+            },
             move |args, _permit, _cancel| async move {
                 let observed = (
                     args.plan_content.clone(),
+                    args.plan_trace.clone(),
+                    args.env.plan_trace.clone(),
                     args.layers_config
                         .as_ref()
                         .map(|layers| layers.layers.order.clone())
@@ -1112,6 +1189,13 @@ paths = ["src/**"]
         .expect("dispatch");
         assert!(matches!(resp, CommandResponse::Json { .. }));
         let run_id = json_response_run_id(&resp);
+        let queued_manifest_path = VerificationManifest::manifest_path_in_state_dir(
+            "snapshot-feature",
+            project_root,
+            state_tmp.path(),
+        );
+        let queued = VerificationManifest::load(&queued_manifest_path).unwrap();
+        assert_eq!(queued.plan_trace.as_ref(), Some(&plan_trace));
 
         std::fs::write(&plan_path, "# Mutated\n").unwrap();
         std::fs::write(
@@ -1129,12 +1213,20 @@ paths = ["web/**"]
         drop(held);
         assert!(ctx.release_background_start("snapshot-feature", &run_id));
 
-        let (plan_content, layer_order, contract_content, has_stack_snapshot) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), obs_rx)
-                .await
-                .expect("worker observed snapshots")
-                .expect("snapshot sender");
+        let (
+            plan_content,
+            args_trace,
+            env_trace,
+            layer_order,
+            contract_content,
+            has_stack_snapshot,
+        ) = tokio::time::timeout(std::time::Duration::from_secs(2), obs_rx)
+            .await
+            .expect("worker observed snapshots")
+            .expect("snapshot sender");
         assert_eq!(plan_content, "# Original\n");
+        assert_eq!(args_trace.as_ref(), Some(&plan_trace));
+        assert_eq!(env_trace.as_ref(), Some(&plan_trace));
         assert_eq!(layer_order, vec!["backend".to_string()]);
         assert_eq!(contract_content.as_deref(), Some("contract-original"));
         assert!(has_stack_snapshot);
@@ -1171,8 +1263,11 @@ paths = ["src/**"]
             true,
             &plan_path,
             &ctx,
-            pice_core::workflow::loader::embedded_defaults(),
-            Some(layers_snapshot),
+            BackgroundDispatchInputs {
+                workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+                plan_snapshot: None,
+                layers_config: Some(layers_snapshot),
+            },
             move |args, _permit, _cancel| async move {
                 started_tx.send(args.run_id.clone()).await.unwrap();
                 Ok(VerificationManifest::new(
@@ -1249,8 +1344,11 @@ paths = ["src/**"]
                 true,
                 &plan_for_task,
                 ctx_for_task.as_ref(),
-                pice_core::workflow::loader::embedded_defaults(),
-                Some(layers_snapshot),
+                BackgroundDispatchInputs {
+                    workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+                    plan_snapshot: None,
+                    layers_config: Some(layers_snapshot),
+                },
                 move |args, _permit, _cancel| async move {
                     Ok(VerificationManifest::new(
                         &args.feature_id,
@@ -1341,8 +1439,11 @@ paths = ["src/**"]
                         true,
                         &plan_path,
                         ctx.as_ref(),
-                        pice_core::workflow::loader::embedded_defaults(),
-                        Some(layers_snapshot),
+                        BackgroundDispatchInputs {
+                            workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+                            plan_snapshot: None,
+                            layers_config: Some(layers_snapshot),
+                        },
                         move |args, _permit, _cancel| async move {
                             Ok(VerificationManifest::new(
                                 &args.feature_id,
@@ -1445,8 +1546,11 @@ paths = ["src/**"]
             true,
             &plan_path,
             &ctx,
-            pice_core::workflow::loader::embedded_defaults(),
-            Some(layers_snapshot),
+            BackgroundDispatchInputs {
+                workflow_snapshot: pice_core::workflow::loader::embedded_defaults(),
+                plan_snapshot: None,
+                layers_config: Some(layers_snapshot),
+            },
             move |args, _permit, _cancel| async move {
                 let _ = started_tx.send(());
                 finish_rx.await.expect("test releases background worker");
@@ -1493,9 +1597,14 @@ paths = ["src/**"]
             project_tmp.path(),
             state_tmp.path(),
         );
-        let manifest_path =
-            write_queued_manifest("feat-error", "r-error", project_tmp.path(), &manifest_path)
-                .unwrap();
+        let manifest_path = write_queued_manifest(
+            "feat-error",
+            "r-error",
+            project_tmp.path(),
+            &manifest_path,
+            None,
+        )
+        .unwrap();
         let events = EventBus::new();
         let mut rx = events.subscribe_feature("feat-error");
         let logs = crate::logs::LogStore::new();
@@ -1511,8 +1620,10 @@ paths = ["src/**"]
                 contracts: BTreeMap::new(),
                 pice_state_dir_override: None,
                 pice_user_workflow_file: None,
+                plan_trace: None,
             }),
             plan_content: "# Plan\n".to_string(),
+            plan_trace: None,
             layers_config: None,
             contract_contents: BTreeMap::new(),
             stack_loop_snapshot: None,
@@ -1570,8 +1681,10 @@ paths = ["src/**"]
                 contracts: BTreeMap::new(),
                 pice_state_dir_override: None,
                 pice_user_workflow_file: None,
+                plan_trace: None,
             }),
             plan_content: "# Plan\n".to_string(),
+            plan_trace: None,
             layers_config: None,
             contract_contents: BTreeMap::new(),
             stack_loop_snapshot: None,

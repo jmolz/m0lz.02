@@ -8,6 +8,7 @@
 //! Writes are atomic: write to `.tmp` then `std::fs::rename()`.
 
 use crate::adaptive::EscalationEvent;
+use crate::plan_parser::PlanTrace;
 use crate::workflow::schema::OnTimeout;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,8 @@ pub struct VerificationManifest {
     pub layers: Vec<LayerResult>,
     pub gates: Vec<GateEntry>,
     pub overall_status: ManifestStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_trace: Option<PlanTrace>,
     /// Phase 7: daemon-allocated run identifier. Written on the
     /// `Queued → InProgress` transition inside the spawned orchestrator
     /// future (never at `Pending`-creation time for inline mode).
@@ -269,6 +272,7 @@ impl VerificationManifest {
             layers: Vec::new(),
             gates: Vec::new(),
             overall_status: ManifestStatus::Pending,
+            plan_trace: None,
             run_id: None,
         }
     }
@@ -616,6 +620,30 @@ mod tests {
         assert_eq!(loaded.gates.len(), 1);
         assert_eq!(loaded.gates[0].status, GateStatus::Approved);
         assert_eq!(loaded.overall_status, ManifestStatus::Pending);
+        assert!(loaded.plan_trace.is_none());
+    }
+
+    #[test]
+    fn plan_trace_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trace.manifest.json");
+        let mut manifest = VerificationManifest::new("feat-trace", Path::new("/project"));
+        manifest.plan_trace = Some(crate::plan_parser::PlanTrace {
+            plan_path: ".codex/plans/trace.md".to_string(),
+            plan_sha256: "a".repeat(64),
+            contract_sha256: "b".repeat(64),
+            contract_feature: "Trace".to_string(),
+            contract_tier: 2,
+            has_spec_traceability: true,
+        });
+
+        manifest.save(&path).unwrap();
+        let loaded = VerificationManifest::load(&path).unwrap();
+        let trace = loaded.plan_trace.expect("plan trace");
+        assert_eq!(trace.plan_path, ".codex/plans/trace.md");
+        assert_eq!(trace.contract_feature, "Trace");
+        assert_eq!(trace.contract_tier, 2);
+        assert!(trace.has_spec_traceability);
     }
 
     #[test]
@@ -897,6 +925,20 @@ mod tests {
         }"#;
         let back: LayerResult = serde_json::from_str(legacy).unwrap();
         assert!(back.escalation_events.is_none());
+    }
+
+    #[test]
+    fn plan_trace_absent_from_legacy_manifests() {
+        let legacy = r#"{
+            "schema_version": "0.3",
+            "feature_id": "legacy",
+            "project_root_hash": "abc",
+            "layers": [],
+            "gates": [],
+            "overall_status": "pending"
+        }"#;
+        let back: VerificationManifest = serde_json::from_str(legacy).unwrap();
+        assert!(back.plan_trace.is_none());
     }
 
     #[test]

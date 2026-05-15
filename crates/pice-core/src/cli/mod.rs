@@ -112,6 +112,10 @@ pub enum ExitJsonStatus {
     PlanParseFailed,
     /// `pice evaluate <plan> --json` — plan parsed but has no `## Contract` section.
     NoContractSection,
+    /// `pice execute <plan> --json` — plan parsed but has no `## Contract` section.
+    /// This is an execute precondition failure (exit 1), not an evaluation
+    /// grading failure (exit 2).
+    PlanContractRequired,
     /// `pice evaluate <plan> --json` — workflow.yaml has validation errors
     /// (bad triggers, unknown layer overrides, unknown seam boundaries, etc.).
     WorkflowValidationFailed,
@@ -298,6 +302,7 @@ impl ExitJsonStatus {
             Self::PlanNotFound => "plan-not-found",
             Self::PlanParseFailed => "plan-parse-failed",
             Self::NoContractSection => "no-contract-section",
+            Self::PlanContractRequired => "plan-contract-required",
             Self::WorkflowValidationFailed => "workflow-validation-failed",
             Self::SeamFloorViolation => "seam-floor-violation",
             Self::MergedSeamValidationFailed => "merged-seam-validation-failed",
@@ -355,6 +360,7 @@ impl ExitJsonStatus {
             // Operational failure family (everything else).
             Self::PlanNotFound
             | Self::PlanParseFailed
+            | Self::PlanContractRequired
             | Self::WorkflowValidationFailed
             | Self::SeamFloorViolation
             | Self::MergedSeamValidationFailed
@@ -1172,6 +1178,7 @@ mod tests {
             ExitJsonStatus::PlanNotFound,
             ExitJsonStatus::PlanParseFailed,
             ExitJsonStatus::NoContractSection,
+            ExitJsonStatus::PlanContractRequired,
             ExitJsonStatus::WorkflowValidationFailed,
             ExitJsonStatus::SeamFloorViolation,
             ExitJsonStatus::MergedSeamValidationFailed,
@@ -1226,6 +1233,7 @@ mod tests {
         assert_eq!(ExitJsonStatus::LogsStreamEnded.exit_code(), 0);
         // Operational family → 1
         assert_eq!(ExitJsonStatus::PlanNotFound.exit_code(), 1);
+        assert_eq!(ExitJsonStatus::PlanContractRequired.exit_code(), 1);
         assert_eq!(ExitJsonStatus::LayersTomlMissing.exit_code(), 1);
         assert_eq!(ExitJsonStatus::ReviewGateConflict.exit_code(), 1);
         assert_eq!(ExitJsonStatus::MissingDecision.exit_code(), 1);
@@ -1241,6 +1249,7 @@ mod tests {
             ExitJsonStatus::PlanNotFound,
             ExitJsonStatus::PlanParseFailed,
             ExitJsonStatus::NoContractSection,
+            ExitJsonStatus::PlanContractRequired,
             ExitJsonStatus::WorkflowValidationFailed,
             ExitJsonStatus::SeamFloorViolation,
             ExitJsonStatus::MergedSeamValidationFailed,

@@ -85,6 +85,7 @@ fn seed_pending_gate_fixture(
         }],
         overall_status: ManifestStatus::PendingReview,
         run_id: None,
+        plan_trace: None,
     };
     manifest.save(&manifest_path).unwrap();
     let ctx = DaemonContext::new("tok".to_string(), project_root);
@@ -546,6 +547,8 @@ async fn scenario_8_cancellation_during_pending_review() {
         workflow: &workflow,
         merged_seams: &merged_seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,

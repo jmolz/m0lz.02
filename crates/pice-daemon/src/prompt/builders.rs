@@ -37,6 +37,12 @@ pub fn build_plan_prompt(
          ## Task\n\n\
          Create a comprehensive plan for: {description}\n\n\
          Write the plan to `{plans_dir}/` following the plan template format.\n\
+         Include a ## Spec Traceability section that records the original request, \
+         any supplied stable references or excerpts, the mapping from source requirements \
+         to implementation tasks, and the mapping from source requirements to contract criteria.\n\
+         State that prime only orients on the repository; the approved plan and contract are \
+         the traceability mechanism. Do not claim PICE discovered external PRDs, issues, \
+         emails, or source systems unless the planning prompt supplied those references.\n\
          Include a ## Contract section with JSON criteria for adversarial evaluation.\n\
          Set the tier based on complexity (1=simple, 2=feature, 3=architectural)."
     ))
@@ -54,6 +60,12 @@ pub fn build_execute_prompt(
          ## Project Conventions\n\n{guidance}\n\n\
          ## Plan\n\n{plan_content}\n\n\
          ## Instructions\n\n\
+         The approved plan and its embedded contract are the source of truth for this \
+         implementation session. Execute only the plan's scope and do not silently \
+         change scope or substitute a different design. If implementation reveals a \
+         gap or ambiguity, surface it and make the smallest plan-consistent interpretation.\n\
+         Run contract validation commands during implementation when relevant.\n\
+         Do not modify the plan file unless the user explicitly instructs you to.\n\
          Execute the plan tasks in order. After each task, run its validation command.\n\
          Fix errors immediately before proceeding to the next task."
     ))
@@ -265,6 +277,9 @@ mod tests {
         let prompt = build_plan_prompt("add user auth", dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("add user auth"));
         assert!(prompt.contains("## Contract"));
+        assert!(prompt.contains("## Spec Traceability"));
+        assert!(prompt.contains("original request"));
+        assert!(prompt.contains("contract criteria"));
     }
 
     #[test]
@@ -308,6 +323,9 @@ mod tests {
             build_execute_prompt("# My Plan\n\nDo stuff.", dir.path(), "claude-code").unwrap();
         assert!(prompt.contains("# My Plan"));
         assert!(prompt.contains("Do stuff."));
+        assert!(prompt.contains("source of truth"));
+        assert!(prompt.contains("contract"));
+        assert!(prompt.contains("do not silently"));
     }
 
     #[test]

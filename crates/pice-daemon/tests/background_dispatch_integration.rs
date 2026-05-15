@@ -248,6 +248,7 @@ async fn second_dispatch_for_live_feature_surfaces_feature_already_running() {
                 contracts: std::collections::BTreeMap::new(),
                 pice_state_dir_override: None,
                 pice_user_workflow_file: None,
+                plan_trace: None,
             }),
             move |_env, _permit, _cancel| async move {
                 gate_clone.notified().await;

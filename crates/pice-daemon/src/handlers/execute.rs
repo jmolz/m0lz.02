@@ -5,12 +5,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use pice_core::cli::{CancelledReason, CommandResponse, ExecuteRequest, ExitJsonStatus};
 use pice_core::layers::manifest::ManifestStatus;
-use pice_core::plan_parser::ParsedPlan;
+use pice_core::plan_parser::{ParsedPlan, PlanTrace};
 use serde_json::json;
 
 use super::background::{
     dispatch_background, feature_id_from_plan_path, finalize_terminal_manifest,
-    transition_queued_to_in_progress,
+    transition_queued_to_in_progress, BackgroundDispatchInputs, PlanDispatchSnapshot,
 };
 use super::to_shared_sink;
 use crate::orchestrator::session::{self, streaming_handler};
@@ -98,6 +98,91 @@ fn resolve_background_workflow_snapshot(
     Ok(Ok(workflow))
 }
 
+struct PreparedExecutePlan {
+    plan: ParsedPlan,
+    trace: PlanTrace,
+}
+
+fn plan_not_found_response(plan_path: &std::path::Path, json_mode: bool) -> CommandResponse {
+    if json_mode {
+        return CommandResponse::ExitJson {
+            code: ExitJsonStatus::PlanNotFound.exit_code(),
+            value: json!({
+                "status": ExitJsonStatus::PlanNotFound.as_str(),
+                "plan_path": plan_path.display().to_string(),
+            }),
+        };
+    }
+    CommandResponse::Exit {
+        code: ExitJsonStatus::PlanNotFound.exit_code(),
+        message: format!("plan file not found: {}", plan_path.display()),
+    }
+}
+
+fn plan_parse_failed_response(
+    plan_path: &std::path::Path,
+    error: &anyhow::Error,
+    json_mode: bool,
+) -> CommandResponse {
+    if json_mode {
+        return CommandResponse::ExitJson {
+            code: ExitJsonStatus::PlanParseFailed.exit_code(),
+            value: json!({
+                "status": ExitJsonStatus::PlanParseFailed.as_str(),
+                "plan_path": plan_path.display().to_string(),
+                "error": error.to_string(),
+            }),
+        };
+    }
+    CommandResponse::Exit {
+        code: ExitJsonStatus::PlanParseFailed.exit_code(),
+        message: format!("failed to parse plan: {error}"),
+    }
+}
+
+fn plan_contract_required_response(
+    plan_path: &std::path::Path,
+    json_mode: bool,
+) -> CommandResponse {
+    let status = ExitJsonStatus::PlanContractRequired;
+    if json_mode {
+        return CommandResponse::ExitJson {
+            code: status.exit_code(),
+            value: json!({
+                "status": status.as_str(),
+                "plan_path": plan_path.display().to_string(),
+                "hint": "`pice execute` requires a parseable ## Contract so implementation can stay tied to the approved plan.",
+            }),
+        };
+    }
+    CommandResponse::Exit {
+        code: status.exit_code(),
+        message: format!(
+            "plan contract required: {} has no parseable ## Contract section",
+            plan_path.display()
+        ),
+    }
+}
+
+fn load_execute_plan(
+    plan_path: &std::path::Path,
+    project_root: &std::path::Path,
+    json_mode: bool,
+) -> Result<std::result::Result<PreparedExecutePlan, CommandResponse>> {
+    if !plan_path.exists() {
+        return Ok(Err(plan_not_found_response(plan_path, json_mode)));
+    }
+    let plan = match ParsedPlan::load(plan_path) {
+        Ok(plan) => plan,
+        Err(e) => return Ok(Err(plan_parse_failed_response(plan_path, &e, json_mode))),
+    };
+    let Some(contract) = plan.contract.as_ref() else {
+        return Ok(Err(plan_contract_required_response(plan_path, json_mode)));
+    };
+    let trace = plan.derive_trace(project_root, contract)?;
+    Ok(Ok(PreparedExecutePlan { plan, trace }))
+}
+
 pub async fn run(
     req: ExecuteRequest,
     ctx: &DaemonContext,
@@ -113,29 +198,24 @@ pub async fn run(
         project_root.join(&req.plan_path)
     };
 
-    if !plan_path.exists() {
-        if req.json {
-            return Ok(CommandResponse::ExitJson {
-                code: 1,
-                value: json!({
-                    "status": ExitJsonStatus::PlanNotFound.as_str(),
-                    "plan_path": plan_path.display().to_string(),
-                }),
-            });
-        }
-        return Ok(CommandResponse::Exit {
-            code: 1,
-            message: format!("plan file not found: {}", plan_path.display()),
-        });
-    }
-
-    // Phase 7 Task 10: background dispatch branch. Foreground path below
-    // is unchanged from v0.6.
     if req.background {
-        return run_background(req, ctx, &plan_path).await;
+        if let Some(resp) =
+            super::background::reject_inline_background_if_active(&plan_path, req.json)
+        {
+            return Ok(resp);
+        }
+        let prepared = match load_execute_plan(&plan_path, project_root, req.json)? {
+            Ok(prepared) => prepared,
+            Err(resp) => return Ok(resp),
+        };
+        return run_background(req, ctx, &plan_path, prepared).await;
     }
 
-    let plan = ParsedPlan::load(&plan_path)?;
+    let prepared = match load_execute_plan(&plan_path, project_root, req.json)? {
+        Ok(prepared) => prepared,
+        Err(resp) => return Ok(resp),
+    };
+    let plan = prepared.plan;
     let prompt =
         builders::build_execute_prompt(&plan.content, project_root, &config.provider.name)?;
 
@@ -173,11 +253,9 @@ async fn run_background(
     req: ExecuteRequest,
     ctx: &DaemonContext,
     plan_path: &std::path::Path,
+    prepared: PreparedExecutePlan,
 ) -> Result<CommandResponse> {
     let feature_id = feature_id_from_plan_path(plan_path);
-    if let Some(resp) = super::background::reject_inline_background_if_active(plan_path, req.json) {
-        return Ok(resp);
-    }
 
     // Resolve the workflow snapshot for the JobEnv. `execute` does not
     // consult workflow directly, but the snapshot is part of the
@@ -202,8 +280,14 @@ async fn run_background(
         req.json,
         plan_path,
         ctx,
-        workflow_snapshot,
-        None,
+        BackgroundDispatchInputs {
+            workflow_snapshot,
+            plan_snapshot: Some(PlanDispatchSnapshot {
+                content: prepared.plan.content,
+                trace: Some(prepared.trace),
+            }),
+            layers_config: None,
+        },
         move |args, permit, cancel| async move {
             let _global_provider_permit = permit;
             // Step 1: Queued → InProgress. `execute` has no per-layer

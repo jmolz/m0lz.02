@@ -9,12 +9,12 @@ validation = "Verify structured logs exist for errors, state transitions, and ke
 
 [[contract.criteria]]
 name = "Alerts are defined for SLA-critical metrics"
-threshold = 7
+threshold = 8
 validation = "Check that alert rules exist for latency, error rate, and availability thresholds"
 
 [[contract.criteria]]
 name = "Tracing spans cover service boundaries"
-threshold = 7
+threshold = 8
 validation = "Verify trace context propagation across HTTP calls, queue consumers, and database queries"
 
 [[contract.criteria]]

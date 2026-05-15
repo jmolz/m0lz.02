@@ -14,15 +14,15 @@ validation = "Check loading, empty, error, and populated states for new and modi
 
 [[contract.criteria]]
 name = "Basic accessibility requirements are met"
-threshold = 7
+threshold = 8
 validation = "Verify semantic HTML, alt text, keyboard navigation, and ARIA labels on interactive elements"
 
 [[contract.criteria]]
 name = "Client-side errors are caught and reported"
-threshold = 7
+threshold = 8
 validation = "Check for error boundaries, try-catch around async calls, and user-facing error messages"
 
 [[contract.criteria]]
 name = "Layout is responsive across breakpoints"
-threshold = 7
+threshold = 8
 validation = "Verify components adapt to mobile, tablet, and desktop viewport widths"

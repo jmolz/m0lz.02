@@ -18,6 +18,7 @@ use pice_core::layers::manifest::{
     VerificationManifest,
 };
 use pice_core::layers::{active_layers, LayersConfig};
+use pice_core::plan_parser::{PlanContract, PlanTrace};
 use pice_core::prompt::helpers::{get_git_diff, read_evaluation_guidance};
 use pice_core::seam::{default_registry, types::LayerBoundary, Registry};
 use pice_core::workflow::WorkflowConfig;
@@ -80,6 +81,12 @@ pub struct StackLoopsConfig<'a> {
     /// Background jobs pass this so queued work cannot evaluate different
     /// contract text if project files change before provider work starts.
     pub contract_contents: Option<&'a BTreeMap<String, String>>,
+    /// Approved feature-level plan contract. Used only as the missing
+    /// layer-contract fallback; evaluators still receive a contract payload,
+    /// not the full plan or planning rationale.
+    pub feature_contract: Option<&'a PlanContract>,
+    /// Trace metadata for the approved plan/contract used by this run.
+    pub plan_trace: Option<&'a PlanTrace>,
     /// Optional dispatch-time snapshot of the git diff. Background jobs pass
     /// this so queued work cannot evaluate a later worktree state.
     pub full_diff: Option<&'a str>,
@@ -339,6 +346,19 @@ pub async fn run_stack_loops_with_cancel(
             );
         })
         .unwrap_or_else(|| VerificationManifest::new(&feature_id, project_root));
+    if let Some(trace) = cfg.plan_trace {
+        if let Some(existing) = manifest.plan_trace.as_ref() {
+            if existing != trace {
+                anyhow::bail!(
+                    "existing manifest plan trace does not match evaluation plan: {} != {}",
+                    existing.plan_sha256,
+                    trace.plan_sha256
+                );
+            }
+        } else {
+            manifest.plan_trace = Some(trace.clone());
+        }
+    }
     manifest.overall_status = ManifestStatus::InProgress;
 
     // Phase 5 cohort parallelism: compute the concurrency cap once per
@@ -506,8 +526,13 @@ pub async fn run_stack_loops_with_cancel(
                 continue;
             }
 
-            let contract_content =
-                load_layer_contract(project_root, layer_name, layer_def, cfg.contract_contents);
+            let contract_content = load_layer_contract(
+                project_root,
+                layer_name,
+                layer_def,
+                cfg.contract_contents,
+                cfg.feature_contract,
+            );
             let _prompt = build_layer_evaluation_prompt(
                 layer_name,
                 &contract_content,
@@ -1491,12 +1516,15 @@ fn load_layer_contract(
     layer_name: &str,
     layer_def: &pice_core::layers::LayerDef,
     contract_contents: Option<&BTreeMap<String, String>>,
+    feature_contract: Option<&PlanContract>,
 ) -> String {
     if let Some(contents) = contract_contents {
         if let Some(content) = contents.get(layer_name) {
             return content.clone();
         }
-        return generic_layer_contract(layer_name);
+        return feature_contract
+            .map(|contract| feature_contract_fallback(layer_name, contract))
+            .unwrap_or_else(|| generic_layer_contract(layer_name));
     }
 
     // Try layer's explicit contract path
@@ -1516,13 +1544,35 @@ fn load_layer_contract(
     }
 
     // Fallback: generic contract
-    generic_layer_contract(layer_name)
+    feature_contract
+        .map(|contract| feature_contract_fallback(layer_name, contract))
+        .unwrap_or_else(|| generic_layer_contract(layer_name))
 }
 
 fn generic_layer_contract(layer_name: &str) -> String {
     format!(
         "[criteria]\n{layer_name}_correctness = \"Code changes in the {layer_name} layer are correct and complete\""
     )
+}
+
+fn feature_contract_fallback(layer_name: &str, contract: &PlanContract) -> String {
+    let criteria = serde_json::to_string_pretty(&contract.criteria).unwrap_or_else(|_| "[]".into());
+    format!(
+        "# Feature-contract fallback: no layer-specific contract exists for {layer_name}.\n\
+         [feature_contract_fallback]\n\
+         target_layer = \"{layer_name}\"\n\
+         feature = \"{}\"\n\
+         tier = {}\n\
+         fallback_reason = \"No layer-specific contract file exists; evaluating this layer against the approved feature contract criteria.\"\n\
+         criteria_json = '''\n{}\n'''\n",
+        escape_toml_string(&contract.feature),
+        contract.tier,
+        criteria,
+    )
+}
+
+fn escape_toml_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 // ─── Phase 5 cohort parallelism ─────────────────────────────────────────────
@@ -1848,6 +1898,8 @@ async fn try_run_layer_adaptive_owned(
         workflow: &workflow,
         merged_seams: &dummy_seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,
@@ -2122,6 +2174,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: Some(diff),
             claude_md: Some(""),
             layer_paths: Some(&empty_layer_paths),
@@ -2223,6 +2277,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: Some(diff),
             claude_md: Some(""),
             layer_paths: Some(&empty_layer_paths),
@@ -2305,6 +2361,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: Some(""),
             claude_md: Some(""),
             layer_paths: Some(&empty_layer_paths),
@@ -2423,6 +2481,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: Some(&diff),
             claude_md: Some(""),
             layer_paths: Some(&empty_layer_paths),
@@ -2499,6 +2559,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: Some(diff),
             claude_md: Some(""),
             layer_paths: Some(&empty_layer_paths),
@@ -2570,6 +2632,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: None,
             claude_md: None,
             layer_paths: None,
@@ -2682,6 +2746,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: None,
             claude_md: None,
             layer_paths: None,
@@ -2749,6 +2815,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: None,
             claude_md: None,
             layer_paths: None,
@@ -2806,9 +2874,39 @@ mod tests {
             environment_variants: None,
         };
 
-        let content = load_layer_contract(dir.path(), "backend", &def, None);
+        let content = load_layer_contract(dir.path(), "backend", &def, None, None);
         assert!(content.contains("[criteria]"));
         assert!(content.contains("backend"));
+    }
+
+    #[test]
+    fn load_layer_contract_falls_back_to_feature_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let def = LayerDef {
+            paths: vec!["src/**".to_string()],
+            always_run: false,
+            contract: None,
+            depends_on: Vec::new(),
+            layer_type: None,
+            environment_variants: None,
+        };
+        let contract = PlanContract {
+            feature: "Spec Traceability".to_string(),
+            tier: 2,
+            pass_threshold: 8,
+            criteria: vec![pice_core::plan_parser::ContractCriterion {
+                name: "Execute rejects contract-free plans".to_string(),
+                threshold: 9,
+                validation: "cargo test".to_string(),
+            }],
+        };
+
+        let content = load_layer_contract(dir.path(), "backend", &def, None, Some(&contract));
+        assert!(content.contains("Feature-contract fallback"));
+        assert!(content.contains("target_layer = \"backend\""));
+        assert!(content.contains("Spec Traceability"));
+        assert!(content.contains("Execute rejects contract-free plans"));
+        assert!(!content.contains("backend_correctness"));
     }
 
     #[test]
@@ -2831,7 +2929,7 @@ mod tests {
             environment_variants: None,
         };
 
-        let content = load_layer_contract(dir.path(), "api", &def, None);
+        let content = load_layer_contract(dir.path(), "api", &def, None, None);
         assert!(content.contains("response_format"));
         assert!(content.contains("JSON"));
     }
@@ -2857,7 +2955,7 @@ mod tests {
             "[criteria]\nsnapshot = \"dispatch\"".to_string(),
         );
 
-        let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot));
+        let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot), None);
         assert!(content.contains("snapshot = \"dispatch\""));
         assert!(!content.contains("live = \"late\""));
     }
@@ -2883,7 +2981,7 @@ mod tests {
         };
         let snapshot = BTreeMap::new();
 
-        let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot));
+        let content = load_layer_contract(dir.path(), "backend", &def, Some(&snapshot), None);
         assert!(!content.contains("should-not-load"));
         assert!(content.contains("backend_correctness"));
     }
@@ -2951,6 +3049,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: None,
             claude_md: None,
             layer_paths: None,
@@ -3038,6 +3138,8 @@ mod tests {
             workflow: &workflow,
             merged_seams: &empty_seams,
             contract_contents: None,
+            feature_contract: None,
+            plan_trace: None,
             full_diff: None,
             claude_md: None,
             layer_paths: None,

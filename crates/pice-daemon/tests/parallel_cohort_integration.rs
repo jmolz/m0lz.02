@@ -31,6 +31,7 @@ use pice_core::config::{
 };
 use pice_core::layers::manifest::LayerStatus;
 use pice_core::layers::{LayerDef, LayersConfig, LayersTable};
+use pice_core::plan_parser::{ContractCriterion, PlanContract};
 use pice_core::workflow::schema::AdaptiveAlgo;
 use pice_core::workflow::WorkflowConfig;
 use pice_daemon::orchestrator::stack_loops::{run_stack_loops_with_cancel, StackLoopsConfig};
@@ -362,6 +363,8 @@ fn make_cfg<'a>(
         workflow: wf,
         merged_seams: seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,
@@ -550,6 +553,80 @@ async fn parallel_layers_dont_leak_context() {
         !frontend_diff.contains("src/server/main.rs"),
         "frontend diff MUST NOT include backend file path; got: {frontend_diff}",
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn feature_contract_fallback_is_used_when_layer_contracts_are_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan_path = setup_two_layer_repo(dir.path());
+    let layers = two_layer_independent_config();
+    let pice_config = stub_pice_config();
+    let wf = workflow(true, None, 1);
+    let seams = BTreeMap::new();
+    let feature_contract = PlanContract {
+        feature: "spec-traceability-during-execution".to_string(),
+        tier: 2,
+        pass_threshold: 8,
+        criteria: vec![ContractCriterion {
+            name: "Stack Loops falls back to approved feature contract criteria".to_string(),
+            threshold: 9,
+            validation: "cargo test -p pice-daemon --test parallel_cohort_integration".to_string(),
+        }],
+    };
+    let mut cfg = make_cfg(&layers, &plan_path, dir.path(), &pice_config, &wf, &seams);
+    cfg.feature_contract = Some(&feature_contract);
+
+    let log_path = dir.path().join("stub-requests.jsonl");
+    let _log = RequestLogGuard::new(
+        &log_path,
+        &[("backend", "9.0,0.01"), ("frontend", "8.0,0.01")],
+    );
+
+    let manifest = run_stack_loops_with_cancel(
+        &cfg,
+        &NullSink,
+        true,
+        null_sink_arc(),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(manifest.layers.len(), 2, "both layers should be evaluated");
+
+    let log_raw = std::fs::read_to_string(&log_path).expect("request log exists");
+    let entries: Vec<serde_json::Value> = log_raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("valid JSON line"))
+        .collect();
+
+    for layer_name in ["backend", "frontend"] {
+        let entry = entries
+            .iter()
+            .find(|e| e["contract"]["layer"].as_str() == Some(layer_name))
+            .unwrap_or_else(|| panic!("no {layer_name} request recorded"));
+        let contract_toml = entry["contract"]["contract_toml"]
+            .as_str()
+            .expect("contract_toml is a string");
+        assert!(
+            contract_toml.contains("Feature-contract fallback"),
+            "{layer_name} should receive the feature-contract fallback, got: {contract_toml}",
+        );
+        assert!(
+            contract_toml.contains(&format!("target_layer = \"{layer_name}\"")),
+            "{layer_name} fallback should name its target layer, got: {contract_toml}",
+        );
+        assert!(
+            contract_toml.contains("spec-traceability-during-execution"),
+            "{layer_name} fallback should preserve the approved feature, got: {contract_toml}",
+        );
+        assert!(
+            contract_toml
+                .contains("Stack Loops falls back to approved feature contract criteria"),
+            "{layer_name} fallback should carry the approved feature criteria, got: {contract_toml}",
+        );
+    }
 }
 
 // ─── Test 3: gate matrix — five cells ───────────────────────────────────────
@@ -799,6 +876,8 @@ async fn global_provider_semaphore_bounds_parallel_layer_provider_sessions() {
         workflow: &wf,
         merged_seams: &seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,
@@ -866,6 +945,8 @@ async fn global_provider_semaphore_acquires_adts_provider_pair_atomically() {
         workflow: &wf,
         merged_seams: &seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,
@@ -947,6 +1028,8 @@ async fn adts_global_provider_capacity_below_pair_requirement_fails_fast() {
         workflow: &wf,
         merged_seams: &seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,

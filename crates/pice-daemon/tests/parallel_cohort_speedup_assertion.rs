@@ -220,6 +220,8 @@ async fn time_one_run(parallel: bool) -> Duration {
         workflow: &wf,
         merged_seams: &seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,

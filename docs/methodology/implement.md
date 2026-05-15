@@ -57,8 +57,9 @@ The implementation command takes a path to a plan file:
 pice execute plans/rate-limiting.md
 ```
 
-The CLI parses the plan file, extracts the contract (to validate the file is a proper
-PICE plan), and assembles the execution prompt. The prompt includes:
+The CLI parses the plan file, extracts the contract, refuses contract-free plans before
+provider startup, records plan trace metadata for background runs, and assembles the
+execution prompt. The prompt includes:
 
 - The full plan content (research, steps, contract)
 - The project's workflow guidance (coding standards, project structure, conventions)
@@ -72,6 +73,16 @@ file so existing projects continue to work.
 
 The AI then works through the plan, using its tools to read files, write code, and
 run commands. The developer watches the streaming output and can intervene if needed.
+
+## How Work Stays Tied To The Spec
+
+`prime` orients on the repository and current state. It does not bind implementation
+back to the original request. The binding starts when `plan` converts the original
+request, supplied spec, or stable reference into an approved plan, a `## Spec
+Traceability` mapping, and a contract. `execute` uses that approved plan and contract
+as the source of truth for a fresh session and refuses contract-free plans. `evaluate`
+then grades the diff against the contract with isolated evaluators. Stack Loops add
+per-layer contracts, seam checks, manifest state, and review gates.
 
 ## Validation During Implementation
 

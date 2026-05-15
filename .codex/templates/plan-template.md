@@ -17,6 +17,17 @@ As a {user type}, I want to {action}, so that {benefit}.
 - [ ] All validation commands pass.
 - [ ] No regressions in existing behavior.
 
+## Spec Traceability
+
+- **Original source**: {direct user request / PRD section / issue / email or customer signal / manually supplied reference}
+- **Source excerpts or stable references**: {quote or link only material supplied during planning; use "none supplied" when absent}
+- **Source-to-task mapping**:
+  - `{source requirement}` -> Task {N}: {implementation task}
+- **Source-to-contract mapping**:
+  - `{source requirement}` -> Contract criterion: `{criterion name}`
+- **Prime boundary**: `prime` orients on the repository and current state; this approved plan and its contract are the traceability mechanism.
+- **External-source boundary**: PICE records references supplied during planning. This feature does not discover, fetch, or infer external PRDs, issues, emails, or source systems automatically.
+
 ## Feature Metadata
 
 - Type: New Capability / Enhancement / Refactor / Bug Fix

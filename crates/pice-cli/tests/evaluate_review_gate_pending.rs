@@ -166,6 +166,7 @@ fn evaluate_json_mode_returns_review_gate_pending_exit_three() {
         }],
         overall_status: ManifestStatus::PendingReview,
         run_id: None,
+        plan_trace: None,
     };
     manifest.save(&manifest_path).unwrap();
 

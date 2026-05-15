@@ -215,6 +215,30 @@ db_path = ".pice/metrics.db"
         .stderr(predicate::str::contains("no contract section"));
 }
 
+#[test]
+fn execute_plan_without_contract_fails_json() {
+    let dir = setup_stub_project();
+    let plans_dir = dir.path().join(".codex/plans");
+    fs::create_dir_all(&plans_dir).unwrap();
+    let plan_path = plans_dir.join("no-contract.md");
+    fs::write(
+        &plan_path,
+        "# Feature: No Contract\n\n## Overview\nJust text.\n",
+    )
+    .unwrap();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("execute")
+        .arg("--json")
+        .arg(".codex/plans/no-contract.md")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("plan-contract-required"))
+        .stdout(predicate::str::contains(".codex/plans/no-contract.md"));
+}
+
 // ─── Stub Provider Pipeline Tests ──────────────────────────────────────────
 //
 // These tests spawn the stub provider as a real child process.
@@ -721,6 +745,44 @@ fn status_command_shows_plans() {
         .success()
         .stdout(predicate::str::contains(
             "\"title\": \"Feature: Test Plan\"",
+        ))
+        .stdout(predicate::str::contains("\"has_contract\": true"));
+}
+
+#[test]
+fn status_command_shows_codex_plans() {
+    let dir = tempfile::tempdir().unwrap();
+    let plans_dir = dir.path().join(".codex/plans");
+    fs::create_dir_all(&plans_dir).unwrap();
+    fs::write(
+        plans_dir.join("codex-plan.md"),
+        r#"# Feature: Codex Plan
+
+## Contract
+
+```json
+{
+  "feature": "Codex Plan",
+  "tier": 2,
+  "pass_threshold": 8,
+  "criteria": [
+    { "name": "Tests pass", "threshold": 8, "validation": "cargo test" }
+  ]
+}
+```
+"#,
+    )
+    .unwrap();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".codex/plans/codex-plan.md"))
+        .stdout(predicate::str::contains(
+            "\"title\": \"Feature: Codex Plan\"",
         ))
         .stdout(predicate::str::contains("\"has_contract\": true"));
 }

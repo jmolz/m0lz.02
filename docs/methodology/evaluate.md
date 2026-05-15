@@ -81,6 +81,15 @@ In Stack Loops, the daemon filters contract and diff context per layer. A layer
 evaluator does not see sibling layer contracts or another layer's evaluation
 findings.
 
+## How Work Stays Tied To The Spec
+
+Evaluation is the final check in the spec-to-plan-to-contract chain. `prime` orients
+on the repository, `plan` captures the original request or supplied spec in the plan's
+`## Spec Traceability` section and contract, and `execute` implements from that
+approved plan. `evaluate` then grades only the resulting diff against the contract.
+Stack Loops add per-layer contracts, seam checks, manifest trace metadata, and review
+gates without exposing planning rationale or implementation chat to evaluators.
+
 ## Tier System
 
 The evaluation tier is declared in the contract and determines the evaluator

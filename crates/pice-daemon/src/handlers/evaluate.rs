@@ -10,7 +10,7 @@ use serde_json::json;
 
 use super::background::{
     dispatch_background, feature_id_from_plan_path, finalize_terminal_manifest,
-    transition_queued_to_in_progress,
+    transition_queued_to_in_progress, BackgroundDispatchInputs, PlanDispatchSnapshot,
 };
 use crate::metrics;
 use crate::orchestrator::{ProviderOrchestrator, StreamSink};
@@ -930,6 +930,7 @@ pub async fn run(
             });
         }
     };
+    let plan_trace = plan.derive_trace(project_root, &contract)?;
 
     // Check for Stack Loops (v0.2): if .pice/layers.toml exists, run per-layer evaluation
     let layers_path = project_root.join(".pice/layers.toml");
@@ -1020,6 +1021,8 @@ pub async fn run(
             workflow: &workflow,
             merged_seams: &merged_seams,
             contract_contents: None,
+            feature_contract: Some(&contract),
+            plan_trace: Some(&plan_trace),
             full_diff: None,
             claude_md: None,
             layer_paths: None,
@@ -1988,6 +1991,45 @@ async fn run_background(
             Err(resp) => return Ok(resp),
         };
 
+    let plan = match ParsedPlan::load(plan_path) {
+        Ok(plan) => plan,
+        Err(e) => {
+            if req.json {
+                return Ok(CommandResponse::ExitJson {
+                    code: ExitJsonStatus::PlanParseFailed.exit_code(),
+                    value: json!({
+                        "status": ExitJsonStatus::PlanParseFailed.as_str(),
+                        "plan_path": plan_path.display().to_string(),
+                        "error": e.to_string(),
+                    }),
+                });
+            }
+            return Ok(CommandResponse::Exit {
+                code: ExitJsonStatus::PlanParseFailed.exit_code(),
+                message: format!("failed to parse plan: {e}"),
+            });
+        }
+    };
+    let contract = match plan.contract.as_ref() {
+        Some(contract) => contract,
+        None => {
+            if req.json {
+                return Ok(CommandResponse::ExitJson {
+                    code: ExitJsonStatus::NoContractSection.exit_code(),
+                    value: json!({
+                        "status": ExitJsonStatus::NoContractSection.as_str(),
+                        "plan_path": plan_path.display().to_string(),
+                    }),
+                });
+            }
+            return Ok(CommandResponse::Exit {
+                code: ExitJsonStatus::NoContractSection.exit_code(),
+                message: format!("no contract section found in {}", plan_path.display()),
+            });
+        }
+    };
+    let plan_trace = plan.derive_trace(ctx.project_root(), contract)?;
+
     // Capture owned clones of every ctx field the spawn future needs.
     let config_owned = ctx.config().clone();
     let events_for_spawn = ctx.events().clone();
@@ -2001,8 +2043,14 @@ async fn run_background(
         req.json,
         plan_path,
         ctx,
-        workflow_snapshot.clone(),
-        Some(layers_snapshot.clone()),
+        BackgroundDispatchInputs {
+            workflow_snapshot: workflow_snapshot.clone(),
+            plan_snapshot: Some(PlanDispatchSnapshot {
+                content: plan.content,
+                trace: Some(plan_trace),
+            }),
+            layers_config: Some(layers_snapshot.clone()),
+        },
         move |args, permit, cancel| async move {
             // Background evaluate now enforces global concurrency at the
             // provider-session boundary inside Stack Loops. Release the
@@ -2168,6 +2216,8 @@ async fn run_evaluate_orchestrator(
         workflow: workflow_snapshot,
         merged_seams: &merged_seams,
         contract_contents: Some(&args.contract_contents),
+        feature_contract: Some(&contract),
+        plan_trace: args.plan_trace.as_ref(),
         full_diff: Some(stack_snapshot.full_diff.as_str()),
         claude_md: Some(stack_snapshot.claude_md.as_str()),
         layer_paths: Some(&stack_snapshot.layer_paths),
@@ -2436,6 +2486,7 @@ mod tests {
             }],
             overall_status: ManifestStatus::PendingReview,
             run_id: None,
+            plan_trace: None,
         };
         match review_gate_pending_response(&manifest, true) {
             CommandResponse::ExitJson { code, .. } => assert_eq!(code, 3),
@@ -2498,8 +2549,10 @@ paths = ["Dockerfile"]
                 contracts: BTreeMap::new(),
                 pice_state_dir_override: None,
                 pice_user_workflow_file: None,
+                plan_trace: None,
             }),
             plan_content: std::fs::read_to_string(&plan_path).unwrap(),
+            plan_trace: None,
             layers_config: Some(layers_snapshot),
             contract_contents: BTreeMap::new(),
             stack_loop_snapshot: None,

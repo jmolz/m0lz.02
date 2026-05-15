@@ -117,6 +117,7 @@ async fn snapshot_survives_process_env_mutation_mid_flight() {
         contracts: BTreeMap::new(),
         pice_state_dir_override: Some(dir_a.path().to_path_buf()),
         pice_user_workflow_file: None,
+        plan_trace: None,
     });
 
     let manager = FeatureJobManager::new(EventBus::new(), 2);
@@ -229,6 +230,8 @@ async fn stack_loops_uses_dispatch_manifest_path_after_env_mutation() {
         workflow: &workflow,
         merged_seams: &seams,
         contract_contents: None,
+        feature_contract: None,
+        plan_trace: None,
         full_diff: None,
         claude_md: None,
         layer_paths: None,

@@ -17,7 +17,8 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use sha2::{Digest, Sha256};
+use std::path::{Component, Path};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanContract {
@@ -36,6 +37,16 @@ pub struct ContractCriterion {
     pub name: String,
     pub threshold: u8,
     pub validation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanTrace {
+    pub plan_path: String,
+    pub plan_sha256: String,
+    pub contract_sha256: String,
+    pub contract_feature: String,
+    pub contract_tier: u8,
+    pub has_spec_traceability: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +91,14 @@ impl ParsedPlan {
         self.contract.as_ref().map(|c| c.tier).unwrap_or(1)
     }
 
+    pub fn has_spec_traceability(&self) -> bool {
+        has_spec_traceability_heading(&self.content)
+    }
+
+    pub fn derive_trace(&self, project_root: &Path, contract: &PlanContract) -> Result<PlanTrace> {
+        derive_plan_trace(self, project_root, contract)
+    }
+
     fn extract_contract(content: &str) -> Result<Option<PlanContract>> {
         // Find a line-level ## Contract heading (not ### Contract or inline mentions).
         // The heading must be at the start of a line.
@@ -109,6 +128,61 @@ impl ParsedPlan {
             serde_json::from_str(json_str).context("failed to parse contract JSON")?;
 
         Ok(Some(contract))
+    }
+}
+
+pub fn has_spec_traceability_heading(content: &str) -> bool {
+    find_h2_heading(content, "Spec Traceability").is_some()
+}
+
+pub fn derive_plan_trace(
+    plan: &ParsedPlan,
+    project_root: &Path,
+    contract: &PlanContract,
+) -> Result<PlanTrace> {
+    let contract_json =
+        serde_json::to_string(contract).context("failed to serialize plan contract")?;
+    Ok(PlanTrace {
+        plan_path: normalized_plan_path(&plan.path, project_root),
+        plan_sha256: sha256_hex(plan.content.as_bytes()),
+        contract_sha256: sha256_hex(contract_json.as_bytes()),
+        contract_feature: contract.feature.clone(),
+        contract_tier: contract.tier,
+        has_spec_traceability: plan.has_spec_traceability(),
+    })
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn normalized_plan_path(plan_path: &str, project_root: &Path) -> String {
+    let path = Path::new(plan_path);
+    if path.is_absolute() {
+        if let Ok(rel) = path.strip_prefix(project_root) {
+            return normalize_components(rel);
+        }
+        return plan_path.replace('\\', "/");
+    }
+    normalize_components(path)
+}
+
+fn normalize_components(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            Component::ParentDir => parts.push("..".to_string()),
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
     }
 }
 
@@ -327,5 +401,80 @@ Some follow-up notes.
     fn parse_plan_missing_file() {
         let result = ParsedPlan::load(Path::new("/nonexistent/plan.md"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn spec_traceability_heading_detects_only_h2() {
+        assert!(has_spec_traceability_heading(
+            "# Plan\n\n## Spec Traceability\n\n- Source: request\n"
+        ));
+        assert!(has_spec_traceability_heading(
+            "# Plan\n\n   ## Spec Traceability\n\n- Source: request\n"
+        ));
+        assert!(!has_spec_traceability_heading(
+            "# Plan\n\n### Spec Traceability\n"
+        ));
+        assert!(!has_spec_traceability_heading(
+            "# Plan\n\nSee ## Spec Traceability in prose.\n"
+        ));
+    }
+
+    #[test]
+    fn derive_plan_trace_hashes_are_deterministic() {
+        let project_root = Path::new("/repo");
+        let path = Path::new("/repo/.codex/plans/trace.md");
+        let content = r#"# Feature: Trace
+
+## Spec Traceability
+
+- Original source: direct user request
+
+## Contract
+
+```json
+{
+  "feature": "Trace",
+  "tier": 2,
+  "pass_threshold": 8,
+  "criteria": [
+    {
+      "name": "Tests pass",
+      "threshold": 8,
+      "validation": "cargo test"
+    }
+  ]
+}
+```
+"#;
+        let plan_a = ParsedPlan::parse(path, content.to_string()).unwrap();
+        let plan_b = ParsedPlan::parse(path, content.to_string()).unwrap();
+        let trace_a = plan_a
+            .derive_trace(project_root, plan_a.contract.as_ref().unwrap())
+            .unwrap();
+        let trace_b = plan_b
+            .derive_trace(project_root, plan_b.contract.as_ref().unwrap())
+            .unwrap();
+
+        assert_eq!(trace_a, trace_b);
+        assert_eq!(trace_a.plan_path, ".codex/plans/trace.md");
+        assert_eq!(trace_a.contract_feature, "Trace");
+        assert_eq!(trace_a.contract_tier, 2);
+        assert!(trace_a.has_spec_traceability);
+        assert_eq!(trace_a.plan_sha256.len(), 64);
+        assert_eq!(trace_a.contract_sha256.len(), 64);
+    }
+
+    #[test]
+    fn derive_plan_trace_uses_display_path_outside_project_root() {
+        let plan = ParsedPlan::parse(
+            Path::new("/outside/trace.md"),
+            "# Trace\n\n## Contract\n\n```json\n{\"feature\":\"Trace\",\"tier\":1,\"pass_threshold\":8,\"criteria\":[]}\n```\n".to_string(),
+        )
+        .unwrap();
+        let trace = plan
+            .derive_trace(Path::new("/repo"), plan.contract.as_ref().unwrap())
+            .unwrap();
+        assert_eq!(trace.plan_path, "/outside/trace.md");
+        assert!(!trace.has_spec_traceability);
     }
 }
