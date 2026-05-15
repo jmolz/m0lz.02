@@ -260,27 +260,37 @@ Telemetry is opt-in and disabled by default. Public telemetry claims are limited
 
 ## Release Evidence
 
-Latest release evidence for v0.8.2 was produced on May 14, 2026 from commit `cfcf954`. Historical v0.7.0 evidence is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
+Reference release evidence for the v0.8.8 validation cycle was produced on May 15, 2026 from commit `0f47d20`. Release workflow artifacts are generated for every later tag; refresh this table whenever release validation materially changes. Historical v0.7.0 evidence is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
 
-Current release evidence:
+Recorded release evidence:
 
 | Check | Result |
 | --- | --- |
-| Local Linux Docker preflight | `scripts/ci/local-linux.sh` passed end-to-end on `linux/amd64` with Rust, TypeScript, Phase 8 acceptance, release-smoke, and README media gates |
-| Rust lint/tests/build | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, and `cargo build --release` passed in CI and release validation |
-| TypeScript lint/typecheck/tests/build | `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build` passed; local `pnpm test` passed 123 tests |
+| Local Linux Docker preflight | `scripts/ci/local-linux.sh` passed end-to-end on `linux/amd64` with Rust, TypeScript, Phase 8 acceptance, release-smoke, npm pack smoke, and README media gates; evidence path `/tmp/pice-local-ci-evidence.aKgrem` |
+| Rust lint/tests/build | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, and `cargo build --release` passed in local Docker, main CI, and release validation |
+| TypeScript lint/typecheck/tests/build | `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build` passed; local Docker `pnpm test` passed 125 tests |
 | Phase 8 acceptance | Metrics inventory, five-reference-project harness, release artifact smoke, npm pack smoke, and README media audit passed |
+| Hosted Windows pre-tag smoke | GitHub Actions run `25935159934` passed on `main` before the release tag; `scripts/ci/windows-smoke.ps1` ran native Windows build/test/release-smoke coverage |
 | Windows validation | `Rust (windows-latest)` passed in main CI; `Smoke x86_64-pc-windows-msvc` passed in the release workflow |
-| Remote CI | GitHub Actions run `25886626891` passed on `main`; includes `Phase 8 acceptance (linux-x64)` and `Rust (windows-latest)` |
-| Release workflow | GitHub Actions run `25886626757` passed for tag `v0.8.2` |
-| NPM publish | `@jacobmolz/pice@0.8.2` and platform packages published from the release workflow |
-| GitHub release | [`v0.8.2`](https://github.com/jmolz/m0lz.02/releases/tag/v0.8.2) published with five platform archives and shell completions |
+| Remote CI | GitHub Actions run `25935154020` passed on `main`; includes `Phase 8 acceptance (linux-x64)` and `Rust (windows-latest)` |
+| Release workflow | GitHub Actions run `25935675935` passed for tag `v0.8.8` |
+| NPM publish | `@jacobmolz/pice@0.8.8` and platform packages published from the release workflow |
+| GitHub release | [`v0.8.8`](https://github.com/jmolz/m0lz.02/releases/tag/v0.8.8) published with five platform archives and shell completions |
 
 For a Linux CI-equivalent local preflight, run:
 
 ```bash
 scripts/ci/local-linux.sh
 ```
+
+For release, CI, command/template, validation, test-policy, CLI-runtime, or follow-up Windows-failure changes, do not substitute one platform gate for the other. Use the Docker preflight above for Linux CI parity before pushing, then verify the exact pushed `main` commit on the hosted Windows runner before tagging:
+
+```bash
+gh workflow run windows-smoke.yml --ref main
+gh run watch <windows-smoke-run-id> --exit-status
+```
+
+The Linux Docker gate is the authoritative local parity check for the Linux CI environment, including scheduler-sensitive performance assertions. The hosted Windows runner is the authoritative pre-tag check for Windows CLI behavior such as path normalization, `.cmd` execution, PowerShell, archive smoke, and daemon named-pipe behavior.
 
 The Phase 8 acceptance suite inside that preflight is:
 
@@ -300,4 +310,4 @@ Read [building a provider](docs/providers/building-a-provider.md) and [the provi
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Full validation includes Rust format, clippy, tests, TypeScript lint/typecheck/tests/build, release build, Phase 8 acceptance harnesses, artifact smoke, and the local Linux Docker preflight for CI or release changes.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Full validation includes Rust format, clippy, tests, TypeScript lint/typecheck/tests/build, release build, Phase 8 acceptance harnesses, artifact smoke, the local Linux Docker preflight for CI or release changes, and hosted Windows Smoke before release tags when the change can affect Windows CLI/runtime behavior or follows a Windows CI failure.
