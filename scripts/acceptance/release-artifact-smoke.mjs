@@ -4,6 +4,7 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync } fr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isWindowsDaemonStopDisconnect, stopDaemonAndWait } from './release-artifact-smoke-helpers.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const outPath =
@@ -71,47 +72,6 @@ function cleanupRetrySync(target, options = {}) {
     }
     console.warn(`warning: could not remove temporary path ${target}: ${err.code}`);
   }
-}
-
-function isWindowsDaemonStopDisconnect(err, platform = process.platform) {
-  return (
-    platform === 'win32' &&
-    /failed to send shutdown|daemon closed connection during shutdown|pipe is being closed|os error 232|transport write .*failed/i.test(
-      err?.message ?? ''
-    )
-  );
-}
-
-function stopDaemonAndWait(runner, cmd, cwd, env, platform = process.platform) {
-  let stopError = null;
-  const deadline = Date.now() + daemonStopTimeout;
-  let nextStopAttemptAt = 0;
-  let lastStatus = '';
-  while (Date.now() < deadline) {
-    if (Date.now() >= nextStopAttemptAt) {
-      try {
-        runner(cmd, ['daemon', 'stop'], { cwd, env, timeout: daemonStopTimeout });
-      } catch (err) {
-        if (!isWindowsDaemonStopDisconnect(err, platform)) {
-          throw err;
-        }
-        stopError = err;
-      }
-      nextStopAttemptAt = Date.now() + (platform === 'win32' ? 1_000 : daemonStopTimeout);
-    }
-
-    lastStatus = runner(cmd, ['daemon', 'status'], { cwd, env, timeout: daemonCommandTimeout }).stdout.trim();
-    if (/not running/i.test(lastStatus)) {
-      if (platform === 'win32') {
-        sleepMs(500);
-      }
-      return;
-    }
-    sleepMs(250);
-  }
-
-  const stopDetail = stopError ? `; stop error: ${stopError.message}` : '';
-  throw new Error(`daemon did not stop within ${daemonStopTimeout / 1_000}s; last status: ${lastStatus}${stopDetail}`);
 }
 
 function stopDaemonBestEffort(runner, cmd, cwd, env) {
@@ -469,5 +429,3 @@ function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }
-
-export { isWindowsDaemonStopDisconnect, stopDaemonAndWait };

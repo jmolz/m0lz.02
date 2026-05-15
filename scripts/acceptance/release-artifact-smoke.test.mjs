@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isWindowsDaemonStopDisconnect,
   stopDaemonAndWait,
-} from './release-artifact-smoke.mjs';
+} from './release-artifact-smoke-helpers.mjs';
 
 describe('release artifact smoke daemon teardown', () => {
   it('recognizes the Windows named-pipe shutdown race', () => {
