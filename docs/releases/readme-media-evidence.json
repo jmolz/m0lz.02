@@ -1,25 +1,49 @@
 {
-  "generated_at": "2026-05-14T22:08:22.132Z",
+  "generated_at": "2026-05-14T23:11:34.293Z",
   "readme": "README.md",
   "checked": [
-    {
-      "kind": "markdown-image",
-      "alt": "CI",
-      "src": "https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml/badge.svg",
-      "status": "external-or-empty"
-    },
-    {
-      "kind": "markdown-image",
-      "alt": "License: MIT",
-      "src": "https://img.shields.io/badge/license-MIT-blue.svg",
-      "status": "external-or-empty"
-    },
     {
       "kind": "html-img",
       "alt": "m0lz.02 branch mark for the PICE CLI",
       "src": "branch-mark.svg",
       "size_bytes": 788,
       "status": "ok"
+    },
+    {
+      "kind": "html-img",
+      "alt": "CI status",
+      "src": "https://img.shields.io/github/actions/workflow/status/jmolz/m0lz.02/ci.yml",
+      "status": "external-or-empty"
+    },
+    {
+      "kind": "html-img",
+      "alt": "Latest GitHub release",
+      "src": "https://img.shields.io/github/v/release/jmolz/m0lz.02",
+      "status": "external-or-empty"
+    },
+    {
+      "kind": "html-img",
+      "alt": "npm package version",
+      "src": "https://img.shields.io/npm/v/%40jacobmolz%2Fpice",
+      "status": "external-or-empty"
+    },
+    {
+      "kind": "html-img",
+      "alt": "Node.js version",
+      "src": "https://img.shields.io/badge/node-22%2B-171717",
+      "status": "external-or-empty"
+    },
+    {
+      "kind": "html-img",
+      "alt": "Rust stable",
+      "src": "https://img.shields.io/badge/rust-stable-171717",
+      "status": "external-or-empty"
+    },
+    {
+      "kind": "html-img",
+      "alt": "License: MIT",
+      "src": "https://img.shields.io/github/license/jmolz/m0lz.02",
+      "status": "external-or-empty"
     },
     {
       "kind": "html-img",

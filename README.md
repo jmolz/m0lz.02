@@ -8,8 +8,19 @@
   PICE CLI: a Rust daemon and CLI adapter for structured AI coding workflows.
 </p>
 
-[![CI](https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml/badge.svg)](https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/jmolz/m0lz.02/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/jmolz/m0lz.02/ci.yml?branch=main&style=flat-square&label=ci&labelColor=404040&color=171717"></a>
+  &nbsp;
+  <a href="https://github.com/jmolz/m0lz.02/releases"><img alt="Latest GitHub release" src="https://img.shields.io/github/v/release/jmolz/m0lz.02?style=flat-square&label=release&labelColor=404040&color=171717"></a>
+  &nbsp;
+  <a href="https://www.npmjs.com/package/@jacobmolz/pice"><img alt="npm package version" src="https://img.shields.io/npm/v/%40jacobmolz%2Fpice?style=flat-square&label=npm&labelColor=404040&color=171717"></a>
+  &nbsp;
+  <a href="./package.json"><img alt="Node.js version" src="https://img.shields.io/badge/node-22%2B-171717?style=flat-square&labelColor=404040"></a>
+  &nbsp;
+  <a href="./Cargo.toml"><img alt="Rust stable" src="https://img.shields.io/badge/rust-stable-171717?style=flat-square&labelColor=404040"></a>
+  &nbsp;
+  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/github/license/jmolz/m0lz.02?style=flat-square&labelColor=404040&color=171717"></a>
+</p>
 
 <p align="center">
   <img src="docs/images/pice-evaluate-demo.gif" alt="Animated terminal demo showing m0lz.02 install, initialization, Stack Loops layer detection, background evaluation, and a passing status result" width="760">
