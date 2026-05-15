@@ -1,6 +1,6 @@
 {
   "name": "@pice/provider-claude-code",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "type": "module",
   "description": "Claude Code SDK provider for PICE — workflow + evaluation",
   "main": "./dist/index.js",
