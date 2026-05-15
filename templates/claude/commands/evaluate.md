@@ -134,6 +134,10 @@ For EACH criterion in the contract:
    - 9: Exceeds expectations — well-tested, defensive, production-hardened
    - 10: Exceptional — comprehensive error handling, security-aware, zero gaps found
 
+## Validation Proof Discipline
+
+Before scoring a criterion as passing, confirm that the validation command directly exercises the behavior named by that criterion. A broad suite, integration target, or grep command exiting 0 is not sufficient by itself; identify the assertion, request-log check, fixture, or observable output that would fail if the criterion regressed. If no such proof exists, score the criterion below threshold or call out the missing coverage even when the command passes.
+
 ## Output Format
 
 For each criterion, output:
@@ -246,5 +250,6 @@ Critical design challenges from the configured adversarial review that the team 
 - **The evaluator never sees implementation rationale** — only contract, diff, and conventions
 - **Do not weaken criteria to make things pass** — if the implementation doesn't meet the bar, it fails
 - **Run validation commands for real** — don't just read the code and guess
+- **Prove validation coverage** — passing output is not enough unless the command contains an assertion or observable check for the criterion's behavior
 - **Between passes, the user decides** — fix, accept, or adjust. Never auto-retry without user input
 - **Kill background processes** before outputting results to prevent session hangs

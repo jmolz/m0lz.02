@@ -27,6 +27,8 @@ If a plan file exists, read its `## Contract` section. If a contract is found:
 2. After Phase 3 (Code Review), add a **Phase 3.5: Contract Evaluation** that spawns a fresh sub-agent to grade the implementation against the contract (see `/evaluate` for the full evaluator protocol)
 3. Include the contract evaluation results in the final output
 
+Phase 3.5 must follow `/evaluate`'s Validation Proof Discipline: a validation command passing is not enough unless the evaluator identifies the assertion, request-log check, fixture, or observable output that would fail if the criterion regressed. If the named validation target is too broad or does not directly cover the criterion, report the coverage gap instead of treating the criterion as proven.
+
 If no contract exists, skip this and proceed normally. The contract evaluation is additive — it does not replace the standard code review phases.
 
 ---
@@ -62,8 +64,14 @@ PICE's full test corpus runs through two commands. The Rust workspace runner pic
 
 ```bash
 # Full workspace regression — covers every test target
-cargo test --workspace --all-targets && pnpm test
+env RUST_TEST_THREADS=1 PATH="$PWD/target/debug:$PATH" cargo test --workspace --all-targets
+pnpm test
 ```
+
+The Rust command intentionally serializes tests and exposes `target/debug` on
+`PATH`. Phase 8 review caught that daemon-spawning CLI tests can fail
+spuriously when `pice-daemon` is not discoverable or socket tests race under the
+default parallel runner.
 
 For targeted re-runs of specific milestones during a review:
 
