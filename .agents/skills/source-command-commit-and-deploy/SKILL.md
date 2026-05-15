@@ -61,6 +61,20 @@ cargo build --release
 pnpm build
 ```
 
+### 4. Local CI parity gate
+
+Before any `main` push or release tag from this command, run the Linux
+CI-equivalent Docker preflight:
+
+```bash
+scripts/ci/local-linux.sh
+```
+
+This gate is mandatory for code, release, CI, command/template, validation, or
+test-policy changes. Do not substitute host macOS `cargo`/`pnpm` results for
+this check. If it fails, fix the underlying issue and rerun this Docker
+preflight before pushing or tagging.
+
 **Expected baseline:** 1262 Rust tests (1 ignored doc-test), 125 TypeScript tests, 0 lint errors, 0 warnings, clean release build. The 1 ignored test is the doc-test in `crates/pice-daemon/src/handlers/mod.rs` (line 5). When the baseline shifts, update both this file AND `AGENTS.md` in the same release.
 
 ## Determine Context (Worktree or Main)
@@ -136,6 +150,22 @@ git push origin main
 
 CI runs automatically via GitHub Actions (`.github/workflows/ci.yml`).
 
+After pushing `main`, verify the exact pushed SHA before creating or pushing a
+release tag:
+
+```bash
+gh run list --commit "$(git rev-parse HEAD)" --limit 5
+gh workflow run windows-smoke.yml --ref main
+gh run watch <windows-smoke-run-id> --exit-status
+```
+
+Do not create or push the release tag until GitHub CI for `HEAD` and the hosted
+Windows smoke workflow have passed. If either fails, fix the root cause, rerun
+the local Docker preflight, push the fix to `main`, and rerun hosted Windows
+smoke before tagging. This Windows runner gate is required for code, release,
+CI, command/template, validation, or test-policy changes and for any follow-up
+to a Windows CI failure.
+
 ## Release (REQUIRED for every push)
 
 Every push to main gets a release. A `v*` tag is always a full release: it must
@@ -168,16 +198,18 @@ The version-bump heuristic is mechanical. If the diff scope hits "minor", the ne
 1. Update version in `Cargo.toml` (`workspace.package.version`), all `npm/*/package.json` files, and `packages/*/package.json` files. Confirm with `grep -r '"version"' npm/ packages/ Cargo.toml` after.
 2. Run the release-policy tripwire: `pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs`.
 3. Commit the version bump: `git commit -am "chore: bump version to $NEXT_TAG"`
-4. Tag and push:
+4. Run the local CI parity gate, push `main`, and verify GitHub CI + hosted
+   Windows smoke for the exact version-bump commit as described above.
+5. Tag and push the tag only after those gates pass:
 
 ```bash
 git tag $NEXT_TAG
-git push origin main --tags
+git push origin $NEXT_TAG
 ```
 
 This triggers `.github/workflows/release.yml` which builds cross-platform binaries, creates a GitHub Release with assets, and publishes to NPM.
 
-5. Verify the release pipeline and confirm `Release / Publish to NPM` was not skipped:
+6. Verify the release pipeline and confirm `Release / Publish to NPM` was not skipped:
 
 ```bash
 gh run list --workflow=release.yml --limit 1
