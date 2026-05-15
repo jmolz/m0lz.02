@@ -1,6 +1,6 @@
 {
   "name": "@pice/pice-darwin-arm64",
-  "version": "0.8.6",
+  "version": "0.8.7",
   "description": "PICE CLI binary for macOS ARM64 (Apple Silicon)",
   "os": ["darwin"],
   "cpu": ["arm64"],
