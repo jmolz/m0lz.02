@@ -91,5 +91,10 @@ describe('release workflow policy', () => {
     for (const pkgPath of publishablePackages) {
       expect(packageJson(pkgPath).version, pkgPath).toBe(workspaceVersion);
     }
+
+    const wrapperPackage = packageJson('npm/pice/package.json');
+    for (const [pkgName, version] of Object.entries(wrapperPackage.optionalDependencies ?? {})) {
+      expect(version, `npm/pice optionalDependency ${pkgName}`).toBe(workspaceVersion);
+    }
   });
 });
