@@ -1,6 +1,6 @@
 {
   "name": "@jacobmolz/pice",
-  "version": "0.8.9",
+  "version": "0.8.10",
   "description": "PICE CLI — structured AI coding workflow orchestrator",
   "bin": { "pice": "bin/pice" },
   "main": "index.js",
