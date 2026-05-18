@@ -69,6 +69,29 @@ preflight before pushing or tagging.
 
 **Expected baseline:** {RUST_TEST_COUNT} Rust tests ({IGNORED_COUNT} ignored), {TS_TEST_COUNT} TypeScript tests, 0 lint errors, 0 warnings, clean release build. Update this line and the matching baseline in `CLAUDE.md` whenever you ship a feature that adds tests.
 
+### 5. README release-readiness review
+
+Before committing, pushing, or tagging, review `README.md` against the actual
+deployment diff and the fresh evidence from this run. This gate is mandatory
+even when no README edit is expected.
+
+Check at minimum:
+
+- Install, quickstart, command examples, provider/runtime requirements, and
+  self-heal or workflow guidance touched by the change
+- Test counts, benchmark/performance claims, badges, release evidence,
+  npm/GitHub/tag references, and CI/run IDs
+- Screenshots, images, GIFs, diagrams, captions, and linked media
+- Docker/Linux CI parity guidance and hosted Windows runner guidance for
+  Windows CLI/runtime behavior
+
+If any README claim is stale or incomplete, update `README.md` in the same
+deployment before pushing or tagging. If no README edit is needed, record the
+README review evidence in the final response and release notes. Run
+`node scripts/acceptance/readme-media-audit.mjs` after README/media edits and
+include the result in validation evidence. Never update README evidence from
+memory; use current command output, GitHub Actions, npm, or release artifacts.
+
 ## Determine Context (Worktree or Main)
 
 ```bash
@@ -160,7 +183,11 @@ to a Windows CI failure.
 
 ## Release (REQUIRED for every push)
 
-Every push to main gets a GitHub Release. The type and version are determined deterministically — **no asking**.
+Every push to main gets a release. A `v*` tag is always a full release: it must
+build artifacts, pass artifact smoke, publish the matching npm packages, and
+only then create the GitHub Release. Do not create tag-only or GitHub-only
+lightweight releases; the release workflow fails closed when the tag does not
+match `npm/pice/package.json`.
 
 ### Determine release type and version (deterministic)
 
@@ -177,17 +204,18 @@ Apply the following rules in order — first match wins:
 | Any commit message starts with `feat!`, `fix!`, contains `BREAKING CHANGE:`, or removes/renames a public API in `crates/pice-protocol`, `crates/pice-core`, or `packages/provider-protocol` | **major** | `vX.0.0` |
 | Any new file under `crates/pice-core/src/`, `crates/pice-daemon/src/orchestrator/`, `crates/pice-daemon/src/handlers/`, `packages/`, OR any commit message starts with `feat(` | **minor** | `v0.X.0` |
 | Any modification to `crates/`, `packages/`, `templates/`, `npm/`, `Cargo.toml`, `Cargo.lock`, `package.json`, `pnpm-lock.yaml` (without matching the rules above) | **patch (code)** | `v0.X.Y` (full release) |
-| Only files under `docs/`, `README.md`, `CONTRIBUTING.md`, `.claude/`, `.github/`, or other non-code paths changed | **chore** | `v0.X.Y` (lightweight release) |
+| Only files under `docs/`, `README.md`, `CONTRIBUTING.md`, `.claude/`, `.github/`, or other non-code paths changed | **chore** | `v0.X.Y` (full release) |
 
 The version-bump heuristic is mechanical. If the diff scope hits "minor", the next tag is the next minor — do NOT downgrade to patch because "the change feels small." Phase milestones (e.g., a new orchestration capability) are minor releases by definition.
 
-### Code changes → full release (triggers binary builds + NPM publish)
+### All changes → full release (triggers binary builds + NPM publish)
 
 1. Update version in `Cargo.toml` (`workspace.package.version`), all `npm/*/package.json` files, and `packages/*/package.json` files. Confirm with `grep -r '"version"' npm/ packages/ Cargo.toml` after.
-2. Commit the version bump: `git commit -am "chore: bump version to $NEXT_TAG"`
-3. Run the local CI parity gate, push `main`, and verify GitHub CI + hosted
+2. Run the release-policy tripwire: `pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs`.
+3. Commit the version bump: `git commit -am "chore: bump version to $NEXT_TAG"`
+4. Run the local CI parity gate, push `main`, and verify GitHub CI + hosted
    Windows smoke for the exact version-bump commit as described above.
-4. Tag and push the tag only after those gates pass:
+5. Tag and push the tag only after those gates pass:
 
 ```bash
 git tag $NEXT_TAG
@@ -196,31 +224,10 @@ git push origin $NEXT_TAG
 
 This triggers `.github/workflows/release.yml` which builds cross-platform binaries, creates a GitHub Release with assets, and publishes to NPM.
 
-5. Verify the release pipeline:
+6. Verify the release pipeline and confirm `Release / Publish to NPM` was not skipped:
 
 ```bash
 gh run list --workflow=release.yml --limit 1
-```
-
-### Docs/chore changes → lightweight release (no binaries)
-
-No version bump in source files needed. Create a lightweight GitHub Release directly:
-
-```bash
-NEXT_TAG="v0.X.Y"  # Computed from the table above
-git tag $NEXT_TAG
-git push origin $NEXT_TAG
-gh release create $NEXT_TAG \
-  --title "$NEXT_TAG — <short description>" \
-  --notes "$(cat <<'EOF'
-Documentation-only release (no binary changes).
-
-## Changes
-- <list changes>
-
-**Full Changelog**: https://github.com/{GH_OWNER}/{GH_REPO}/compare/$LAST_TAG...$NEXT_TAG
-EOF
-)"
 ```
 
 ## Clean Up Worktree (Worktree Only)

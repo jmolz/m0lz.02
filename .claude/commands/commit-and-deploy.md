@@ -67,7 +67,30 @@ test-policy changes. Do not substitute host macOS `cargo`/`pnpm` results for
 this check. If it fails, fix the underlying issue and rerun this Docker
 preflight before pushing or tagging.
 
-**Expected baseline:** 1262 Rust tests (1 ignored doc-test), 125 TypeScript tests, 0 lint errors, 0 warnings, clean release build. The 1 ignored test is the doc-test in `crates/pice-daemon/src/handlers/mod.rs` (line 5). When the baseline shifts, update both this file AND `CLAUDE.md` in the same release.
+**Expected baseline:** 1262 Rust tests (1 ignored doc-test), 128 TypeScript tests, 0 lint errors, 0 warnings, clean release build. The 1 ignored test is the doc-test in `crates/pice-daemon/src/handlers/mod.rs` (line 5). When the baseline shifts, update both this file AND `CLAUDE.md` in the same release.
+
+### 5. README release-readiness review
+
+Before committing, pushing, or tagging, review `README.md` against the actual
+deployment diff and the fresh evidence from this run. This gate is mandatory
+even when no README edit is expected.
+
+Check at minimum:
+
+- Install, quickstart, command examples, provider/runtime requirements, and
+  self-heal or workflow guidance touched by the change
+- Test counts, benchmark/performance claims, badges, release evidence,
+  npm/GitHub/tag references, and CI/run IDs
+- Screenshots, images, GIFs, diagrams, captions, and linked media
+- Docker/Linux CI parity guidance and hosted Windows runner guidance for
+  Windows CLI/runtime behavior
+
+If any README claim is stale or incomplete, update `README.md` in the same
+deployment before pushing or tagging. If no README edit is needed, record the
+README review evidence in the final response and release notes. Run
+`node scripts/acceptance/readme-media-audit.mjs` after README/media edits and
+include the result in validation evidence. Never update README evidence from
+memory; use current command output, GitHub Actions, npm, or release artifacts.
 
 ## Determine Context (Worktree or Main)
 

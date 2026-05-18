@@ -107,7 +107,8 @@ pnpm test
 # Release and local-CI tripwires (NPM publish gate, artifact smoke, Docker/Windows harness policy)
 pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs \
   scripts/acceptance/release-artifact-smoke.test.mjs \
-  scripts/acceptance/local-ci-policy.test.mjs
+  scripts/acceptance/local-ci-policy.test.mjs \
+  scripts/acceptance/command-contract-policy.test.mjs
 ```
 
 ### What each test covers
@@ -147,8 +148,9 @@ pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs \
 | `provider-claude-code/__tests__/claude-code.test.ts` (7 tests) | Claude Code SDK provider | Capability declaration, prompt assembly, error propagation |
 | `provider-codex/__tests__/codex.test.ts` (5 tests) | Codex/OpenAI evaluator provider | Adversarial review structuring, cost extraction |
 | `scripts/acceptance/release-workflow-policy.test.mjs` | Release publishing policy | Tag-triggered GitHub releases depend on `npm-publish`, tag releases fail closed on package-version mismatch, manual dry-runs do not publish, and every publishable package version stays aligned |
-| `scripts/acceptance/release-artifact-smoke.test.mjs` (3 tests) | Release artifact smoke hardening | Windows daemon-stop named-pipe disconnects are treated as shutdown races only after status polling confirms the daemon is stopped; non-Windows stop failures remain fatal |
-| `scripts/acceptance/local-ci-policy.test.mjs` (4 tests) | Local CI and Windows smoke policy | `Dockerfile.ci`, `scripts/ci/local-linux.sh`, `scripts/ci/windows-smoke.ps1`, and the manual `Windows Smoke` workflow keep Linux Docker preflight and Windows-specific validation discoverable |
+| `scripts/acceptance/release-artifact-smoke.test.mjs` (4 tests) | Release artifact smoke hardening | Windows daemon-stop named-pipe disconnects are treated as shutdown races only after status polling confirms the daemon is stopped; non-Windows stop failures remain fatal |
+| `scripts/acceptance/local-ci-policy.test.mjs` (5 tests) | Local CI and Windows smoke policy | `Dockerfile.ci`, `scripts/ci/local-linux.sh`, `scripts/ci/windows-smoke.ps1`, and the manual `Windows Smoke` workflow keep Linux Docker preflight and Windows-specific validation discoverable |
+| `scripts/acceptance/command-contract-policy.test.mjs` (3 tests) | Deployment command policy | Commit-and-deploy command mirrors require README freshness review, Docker/Linux and hosted Windows runner guidance, README media audit evidence, and full release tags for every deployment |
 
 **Phase 5 cohort parallelism (commits 1f6424f..84aa43f)**
 
@@ -241,7 +243,7 @@ pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs \
 
 ### Expected results
 
-All tests should pass. Baseline: **1262 Rust tests (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs` line 5), 125 TypeScript tests, 0 lint errors, 0 warnings, clean release build.**
+All tests should pass. Baseline: **1262 Rust tests (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs` line 5), 128 TypeScript tests, 0 lint errors, 0 warnings, clean release build.**
 
 If any fail after your changes:
 
@@ -292,7 +294,7 @@ For CI, release, publishing, or release-smoke changes, also run the Linux CI-equ
 scripts/ci/local-linux.sh
 ```
 
-Expected baseline: **1262 Rust tests passing (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs`), 125 TypeScript tests passing, 0 lint errors, 0 clippy warnings (workspace + lib unwrap/expect denies), clean release build.**
+Expected baseline: **1262 Rust tests passing (1 ignored doc-test in `crates/pice-daemon/src/handlers/mod.rs`), 128 TypeScript tests passing, 0 lint errors, 0 clippy warnings (workspace + lib unwrap/expect denies), clean release build.**
 
 ## Phase 3: Code Review of Current Changes
 
@@ -391,11 +393,12 @@ Phase 6 review gates:
 
 Release/CI tripwires:
   - release-workflow-policy (6 tests — NPM publish gate + tag/package alignment): ✓ / ✗
-  - release-artifact-smoke unit tests (3 tests — Windows pipe disconnect recovery): ✓ / ✗
-  - local-ci-policy (4 tests — Dockerfile/local Linux/Windows smoke invariants): ✓ / ✗
+  - release-artifact-smoke unit tests (4 tests — Windows pipe disconnect recovery): ✓ / ✗
+  - local-ci-policy (5 tests — Dockerfile/local Linux/Windows smoke invariants): ✓ / ✗
+  - command-contract-policy (3 tests — README review gate + full release mirrors): ✓ / ✗
   - local Linux Docker preflight for CI/release changes: ✓ / ✗ / N/A
 
-Full Suite: 1262 / 123 tests passing
+Full Suite: 1262 / 128 tests passing
 Lint: 0 errors, 0 warnings (workspace + lib unwrap/expect denies)
 Build: PASS / FAIL
 ```

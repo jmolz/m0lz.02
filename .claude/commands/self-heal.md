@@ -18,7 +18,7 @@ This command captures durable workflow improvements:
 2. Tripwire tests or grep checks for missed failure modes.
 3. Command or skill updates that close process gaps.
 4. Documentation drift fixes tied to current code or incident evidence.
-5. Process patterns worth preserving for future m0lz/editorial pipeline work.
+5. Process patterns worth preserving for future PICE CLI and workflow-orchestrator work.
 
 ## When to run
 
