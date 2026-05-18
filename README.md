@@ -260,22 +260,22 @@ Telemetry is opt-in and disabled by default. Public telemetry claims are limited
 
 ## Release Evidence
 
-Reference release evidence for the v0.8.8 validation cycle was produced on May 15, 2026 from commit `0f47d20`. Release workflow artifacts are generated for every later tag; refresh this table whenever release validation materially changes. Historical v0.7.0 evidence is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
+Reference release evidence for the v0.8.9 validation cycle was verified on May 15, 2026 from commit `bb3d364`. Release workflow artifacts are generated for every later tag; refresh this table whenever release validation materially changes. Historical v0.7.0 evidence is recorded in [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md).
 
 Recorded release evidence:
 
 | Check | Result |
 | --- | --- |
-| Local Linux Docker preflight | `scripts/ci/local-linux.sh` passed end-to-end on `linux/amd64` with Rust, TypeScript, Phase 8 acceptance, release-smoke, npm pack smoke, and README media gates; evidence path `/tmp/pice-local-ci-evidence.aKgrem` |
+| Local Linux Docker preflight | `scripts/ci/local-linux.sh` is the required Linux CI parity gate before every deployment push/tag; it runs Rust, TypeScript, Phase 8 acceptance, release-smoke, npm pack smoke, and README media gates in Docker |
 | Rust lint/tests/build | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --all-targets`, and `cargo build --release` passed in local Docker, main CI, and release validation |
-| TypeScript lint/typecheck/tests/build | `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build` passed; local Docker `pnpm test` passed 125 tests |
+| TypeScript lint/typecheck/tests/build | `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build` passed; current local `pnpm test` passed 128 tests |
 | Phase 8 acceptance | Metrics inventory, five-reference-project harness, release artifact smoke, npm pack smoke, and README media audit passed |
-| Hosted Windows pre-tag smoke | GitHub Actions run `25935159934` passed on `main` before the release tag; `scripts/ci/windows-smoke.ps1` ran native Windows build/test/release-smoke coverage |
+| Hosted Windows pre-tag smoke | GitHub Actions run `25937214270` passed on `main` at commit `bb3d364` before the `v0.8.9` release tag; `scripts/ci/windows-smoke.ps1` ran native Windows build/test/release-smoke coverage |
 | Windows validation | `Rust (windows-latest)` passed in main CI; `Smoke x86_64-pc-windows-msvc` passed in the release workflow |
-| Remote CI | GitHub Actions run `25935154020` passed on `main`; includes `Phase 8 acceptance (linux-x64)` and `Rust (windows-latest)` |
-| Release workflow | GitHub Actions run `25935675935` passed for tag `v0.8.8` |
-| NPM publish | `@jacobmolz/pice@0.8.8` and platform packages published from the release workflow |
-| GitHub release | [`v0.8.8`](https://github.com/jmolz/m0lz.02/releases/tag/v0.8.8) published with five platform archives and shell completions |
+| Remote CI | GitHub Actions run `25937187663` passed on `main`; includes `Phase 8 acceptance (linux-x64)`, `Rust (windows-latest)`, TypeScript, and Rust release-build coverage |
+| Release workflow | GitHub Actions run `25940205779` passed for tag `v0.8.9` |
+| NPM publish | `@jacobmolz/pice@0.8.9` and platform packages published from the release workflow; `npm view @jacobmolz/pice version` returned `0.8.9` |
+| GitHub release | [`v0.8.9`](https://github.com/jmolz/m0lz.02/releases/tag/v0.8.9) published with five platform archives and shell completions |
 
 For a Linux CI-equivalent local preflight, run:
 

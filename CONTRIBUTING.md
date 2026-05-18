@@ -105,15 +105,15 @@ PICE_ARTIFACT_ARCHIVE=/private/tmp/pice-release-smoke-local.tar.gz PICE_NPM_PACK
 node scripts/acceptance/readme-media-audit.mjs
 ```
 
-Expected release baseline from the May 14, 2026 v0.8.2 validation run:
+Current release baseline:
 
 - Rust: `cargo test --workspace --all-targets` passed 1262 tests.
 - Rust docs: `cargo test --workspace --doc` passed with 1 ignored documentation example.
-- TypeScript: `pnpm test` passed 123 tests.
+- TypeScript: `pnpm test` passed 128 tests.
 - Lint/typecheck/build: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `pnpm lint`, `pnpm typecheck`, `pnpm build`, and `cargo build --release` passed.
 - Local Linux Docker preflight: `scripts/ci/local-linux.sh` passed end-to-end on `linux/amd64`.
-- Release/CI tripwires: `release-workflow-policy`, `release-artifact-smoke`, and `local-ci-policy` Vitest suites passed.
-- Windows validation: `Rust (windows-latest)` passed in main CI, and `Smoke x86_64-pc-windows-msvc` passed in the v0.8.2 release workflow.
+- Release/CI tripwires: `release-workflow-policy`, `release-artifact-smoke`, `local-ci-policy`, and `command-contract-policy` Vitest suites passed.
+- Windows validation: `Rust (windows-latest)` passed in main CI, and `Smoke x86_64-pc-windows-msvc` passed in the v0.8.9 release workflow.
 - Phase 8 acceptance: metrics inventory, five-reference-project harness,
   npm pack artifact smoke, README media audit, speedup assertion, and Criterion
   benchmark passed. See `docs/releases/validation-evidence.json`.
