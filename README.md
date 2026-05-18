@@ -311,3 +311,7 @@ Read [building a provider](docs/providers/building-a-provider.md) and [the provi
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Full validation includes Rust format, clippy, tests, TypeScript lint/typecheck/tests/build, release build, Phase 8 acceptance harnesses, artifact smoke, the local Linux Docker preflight for CI or release changes, and hosted Windows Smoke before release tags when the change can affect Windows CLI/runtime behavior or follows a Windows CI failure.
+
+## Writing
+
+- [m0lz-02-stack-loops](https://m0lz.dev/writing/m0lz-02-stack-loops)
