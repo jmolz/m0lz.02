@@ -48,8 +48,14 @@ pnpm lint                      # Lint TS code (eslint)
 pnpm typecheck                 # Type check (tsc --noEmit)
 
 # Full Validation (run before every commit)
-cargo fmt --check && cargo clippy -- -D warnings && cargo test && pnpm lint && pnpm typecheck && pnpm test && pnpm build && cargo build --release
+cargo fmt --check && cargo clippy -- -D warnings && pnpm lint && pnpm typecheck && pnpm test && pnpm build && cargo test && cargo build --release
 ```
+
+Provider build order matters: Rust integration tests spawn TypeScript providers
+from ignored `packages/provider-*/dist` artifacts. Run `pnpm build` before Rust
+tests when validating from a fresh checkout, after switching worktrees, or after
+merging provider changes; stale provider JS can produce false failures in
+request-log assertions such as `PICE_STUB_REQUEST_LOG`.
 
 **Expected baseline:** 1262 Rust tests (1 ignored doc-test), 128 TypeScript tests, 0 lint errors, 0 warnings, clean release build. The 1 ignored test is the doc-test in `crates/pice-daemon/src/handlers/mod.rs` (line 5) — a documentation-only example that the doc harness intentionally skips. If the ignored doc-test annotation moves, update this baseline accordingly.
 
@@ -203,19 +209,17 @@ Users configure models via `.pice/config.toml` `[evaluation]` section. Both API 
 Run these before every commit:
 
 ```bash
+# TypeScript first so ignored provider dist is fresh for Rust integration tests
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+
 # Rust
 cargo fmt --check
 cargo clippy -- -D warnings
 cargo test
-
-# TypeScript
-pnpm lint
-pnpm typecheck
-pnpm test
-
-# Build
 cargo build --release
-pnpm build
 ```
 
 ---

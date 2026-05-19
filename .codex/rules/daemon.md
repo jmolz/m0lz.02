@@ -84,6 +84,14 @@ If the CLI needs to preview what the daemon will execute, put the logic in `pice
 - All adapters (CLI, dashboard, CI) observe the same manifest
 - Never build parallel state stores. Never write manifest data to SQLite and treat SQLite as authoritative — SQLite is for metrics aggregation and audit trail. The manifest is for current evaluation state.
 
+## PICE-native memory boundaries
+
+- Memory is daemon-owned advisory context, never verification state. The manifest remains the source of truth for features, layers, gates, contracts, evaluations, and release readiness.
+- Core memory policy is the hard allow/deny boundary: only `prime`, `plan`, and `execute` may read memory in v1. `review`, `evaluate`, adversarial evaluation, and `commit` remain denied even if a config attempts to enable them.
+- Workflow memory recall degrades corrupt `private_state` JSONL to an empty brief plus warning; `pice memory` governance commands still fail closed on corrupt stores. Pinned by `memory::store::tests::workflow_load_warns_and_empties_on_private_state_corruption`, `memory::recall::tests::workflow_recall_returns_warning_and_empty_brief_for_corrupt_private_state`, and `command_integration::corrupt_private_state_prime_uses_empty_memory_brief_instead_of_failing`.
+- Disabled memory must not require `HOME`, `USERPROFILE`, or `PICE_STATE_DIR`. Do policy/preflight checks before state-dir resolution for disabled read/write paths. Pinned by `command_integration::disabled_memory_execute_does_not_require_state_dir_home` and `command_integration::disabled_memory_handoff_does_not_require_state_dir_home`.
+- Project-learning writes parse the existing `.pice/learnings.md` before mutation and refuse malformed files without changing them. Retention/prune ordering compares parsed RFC3339 instants rather than raw timestamp strings.
+
 ## Watchdog
 
 - Daemon health check endpoint at `daemon/health` returns `{ status, version, uptime_s }` in <5ms

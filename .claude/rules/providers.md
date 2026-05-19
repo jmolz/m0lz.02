@@ -55,7 +55,8 @@ Providers handle their own authentication:
 - Provider-specific integration tests can use live APIs in a separate test target (not default CI).
 - Both sync (`std::process`) and async (`tokio::process`) integration tests exist for the stub provider.
 
-## CI Build Order Dependency
+## Provider Build Order Dependency
 
-- **`pnpm install && pnpm build` must run before `cargo test`** in all CI workflows. Rust integration tests spawn `provider-stub` which requires compiled JS at `packages/provider-stub/dist/bin.js`. If this file doesn't exist, all provider integration tests fail with `MODULE_NOT_FOUND`.
-- This applies to both `ci.yml` (main/PR) and `release.yml` (tag push). Both workflows have been fixed for this — do not reorder their steps.
+- **`pnpm install && pnpm build` must run before Rust tests that spawn TypeScript providers** in CI, release, local review, and post-merge smoke workflows. Rust integration tests spawn `provider-stub` from ignored JS artifacts such as `packages/provider-stub/dist/bin.js`.
+- If provider `dist/` does not exist, provider integration tests fail with `MODULE_NOT_FOUND`. If provider `dist/` is stale after switching worktrees or merging provider changes, request-log assertions such as `PICE_STUB_REQUEST_LOG` can fail against old JS even when the Rust and TypeScript source is correct.
+- Keep full-validation and review-command ordering with `pnpm build` before `cargo test`; do not rely on a previous checkout's provider build artifacts.

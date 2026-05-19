@@ -60,10 +60,16 @@ The command must succeed before proceeding. If it fails, flag as **Critical**.
 
 Run these tests FIRST to verify that all previously shipped features are intact. This suite grows with every feature — when you ship a feature, add its tests here. If any fail, flag them as **Critical** and investigate before proceeding with the code review.
 
-PICE's full test corpus runs through two commands. The Rust workspace runner picks up every `#[cfg(test)]` module AND every `tests/*.rs` integration target automatically; the TS runner picks up every `__tests__/*.test.ts` file. Listing individual integration targets below documents what's covered for human review — the actual CI command is the workspace one.
+PICE's full regression pass starts with the provider build, then runs the Rust
+and TypeScript test commands. The Rust workspace runner picks up every
+`#[cfg(test)]` module AND every `tests/*.rs` integration target automatically;
+the TS runner picks up every `__tests__/*.test.ts` file. Listing individual
+integration targets below documents what's covered for human review — the
+actual CI command is the workspace one.
 
 ```bash
 # Full workspace regression — covers every test target
+pnpm build
 env RUST_TEST_THREADS=1 PATH="$PWD/target/debug:$PATH" cargo test --workspace --all-targets
 pnpm test
 ```
@@ -72,6 +78,12 @@ The Rust command intentionally serializes tests and exposes `target/debug` on
 `PATH`. Phase 8 review caught that daemon-spawning CLI tests can fail
 spuriously when `pice-daemon` is not discoverable or socket tests race under the
 default parallel runner.
+
+Run `pnpm build` before Rust tests even for targeted review after switching
+worktrees, merging a branch, or touching `packages/**`. Rust CLI integration
+tests spawn ignored `packages/provider-*/dist` artifacts; stale provider JS can
+make request-log assertions such as `PICE_STUB_REQUEST_LOG` fail against old
+behavior.
 
 For targeted re-runs of specific milestones during a review:
 
@@ -100,6 +112,11 @@ cargo bench -p pice-daemon --bench parallel_cohort_speedup -- --quick
 # Phase 6 review gates (lifecycle scenarios, resume-from-disk, timeout reconciliation, idempotent recovery, project scoping)
 cargo test -p pice-daemon --test review_gate_lifecycle_integration
 cargo test -p pice-cli --test evaluate_review_gate_pending --test audit_gates_csv_roundtrip
+
+# PICE-native memory (policy, storage, recall, governance, and prompt isolation)
+cargo test -p pice-core memory
+cargo test -p pice-daemon memory
+cargo test -p pice-cli --test command_integration memory
 
 # TS provider stack
 pnpm test
@@ -183,12 +200,23 @@ pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs \
 | `pice-cli/src/commands/evaluate.rs::tests` (Phase 6 additions) | TTY auto-resume loop | `is_review_gate_pending_detects_status_discriminant`, `extract_pending_gates_from_response` shape, CLI exits 1 after 10-iteration cap reached |
 | `pice-cli/src/input/decision_source.rs::tests` (Phase 6, 2 inline tests) | `render_prompt` pure helper | `render_prompt_includes_details_when_provided`, `render_prompt_omits_detail_separator_when_none`. The original `DecisionSource` trait was Phase-6 scaffolding that `StdinLock: !Send` blocked from wiring into the async handler path; the Pass-3 review removed it along with the `Scripted`/`Piped`/`Tty` impl structs. Only the pure `render_prompt` helper survived — both production prompt call sites read stdin directly while using this helper for the box-drawing string |
 
+**PICE-native memory (feature/pice-native-agent-memory)**
+
+| Test File | Feature | What It Validates |
+| --------- | ------- | ----------------- |
+| `pice-core/src/memory/{policy,types}.rs::tests` | Memory config and policy | Disabled default, allow/deny matrix, excluded consumers (`review`, `evaluate`, adversarial, `commit`), DTO serde stability, token estimates |
+| `pice-daemon/src/memory/{store,recall,redaction,recorder}.rs::tests` | Daemon memory storage and recall | Strict `.pice/learnings.md` parsing, malformed-file write refusal without mutation, corrupt private-state workflow warning + empty brief, summary-only redaction, private-state namespace routing, RFC3339 instant ordering for prune |
+| `pice-cli/tests/command_integration.rs` (`memory` filter) | Memory CLI and prompt isolation | `pice memory` JSON governance, allowed `prime`/`plan`/`execute` memory prompts, no sentinel leakage into `review`/`evaluate`/`commit`, disabled memory not requiring `HOME`/`USERPROFILE`/`PICE_STATE_DIR` |
+
 ### Source files these tests protect
 
 - `crates/pice-cli/src/main.rs` — CLI entrypoint
 - `crates/pice-cli/src/commands/*.rs` — render_response, JSON vs text output
+- `crates/pice-cli/src/commands/memory.rs` — `pice memory` status/list/show/delete/prune CLI request mapping
 - `crates/pice-cli/src/provider/*.rs` — provider host process model
+- `crates/pice-core/src/memory/*.rs` — memory policy, store selector, DTOs, token estimation, excluded-consumer deny matrix
 - `crates/pice-daemon/src/lifecycle.rs` — SIGTERM/SIGINT, shutdown, watchdog
+- `crates/pice-daemon/src/handlers/memory.rs` — memory governance handler and JSON/text command responses
 - `crates/pice-daemon/src/server/router.rs` — RPC dispatch + per-manifest lock map
 - `crates/pice-daemon/src/server/auth.rs` — bearer token rotation, file mode 0600
 - `crates/pice-daemon/src/handlers/evaluate.rs` — `pice evaluate` backend, finalize, metrics-persist routing (mid-loop + finalize)
@@ -209,6 +237,8 @@ pnpm exec vitest run scripts/acceptance/release-workflow-policy.test.mjs \
 - `packages/provider-stub/src/*.ts` — deterministic test stub
 - `packages/provider-claude-code/src/*.ts` — Claude Code SDK bridge
 - `packages/provider-codex/src/*.ts` — Codex/OpenAI bridge
+- `crates/pice-daemon/src/memory/*.rs` — daemon-owned memory recorder, store, recall, and redaction behavior
+- `docs/guides/memory.md` + `templates/pice/learnings.md` — user-facing memory boundaries and scaffolded durable lesson format
 - `templates/pice/workflow.yaml` + `templates/pice/workflow-presets/*.yaml` — shipped defaults (capability-gate compatible)
 - `scripts/acceptance/release-artifact-smoke.mjs` — release archive smoke runner, including Windows daemon-stop disconnect recovery and npm pack smoke path
 - `Dockerfile.ci` + `scripts/ci/local-linux.sh` — local Linux CI-equivalent preflight with Node 22, pnpm 9, Rust stable, host-owned temporary dependency mounts, Phase 8 acceptance, and artifact smoke
@@ -280,11 +310,11 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --lib -p pice-core -- -D clippy::unwrap_used -D clippy::expect_used
 cargo clippy --lib -p pice-daemon -- -D clippy::unwrap_used -D clippy::expect_used
-cargo test --workspace --all-targets
 pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
+cargo test --workspace --all-targets
 cargo build --release
 ```
 
@@ -390,6 +420,11 @@ Phase 6 review gates:
   - pice-core manifest::tests schema-v0.3 (4 tests — soft-migration v0.2→v0.3, typed UnsupportedSchema, PendingReview overall-status precedence): ✓ / ✗
   - pice-core workflow/merge::tests retry_on_reject floor-merge: ✓ / ✗
   - clock.rs inline tests (MockClock gated `#[cfg(test)]`): ✓ / ✗
+
+PICE-native memory:
+  - pice-core memory tests (policy, DTOs, config-facing types): ✓ / ✗
+  - pice-daemon memory tests (store, recall, recorder, redaction): ✓ / ✗
+  - pice-cli command_integration memory filter (governance, no-leak, disabled-state-dir): ✓ / ✗
 
 Release/CI tripwires:
   - release-workflow-policy (6 tests — NPM publish gate + tag/package alignment): ✓ / ✗
