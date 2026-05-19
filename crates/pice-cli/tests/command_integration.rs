@@ -4,8 +4,11 @@
 //! They verify the full CLI pipeline without requiring real API keys.
 
 use assert_cmd::Command;
+use pice_core::layers::manifest::manifest_project_namespace;
 use predicates::prelude::*;
 use std::fs;
+
+const MEMORY_LEAK_SENTINEL: &str = "MEMORY_LEAK_SENTINEL_DO_NOT_INCLUDE";
 
 fn pice_cmd() -> Command {
     let mut cmd = Command::cargo_bin("pice").unwrap();
@@ -13,6 +16,88 @@ fn pice_cmd() -> Command {
     // so tests don't need a running daemon process.
     cmd.env("PICE_DAEMON_INLINE", "1");
     cmd
+}
+
+fn enable_project_memory_with_sentinel(dir: &std::path::Path) {
+    let config_path = dir.join(".pice/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str(
+        r#"
+
+[memory]
+enabled = true
+store = "project_learnings"
+max_recalled_items = 6
+max_tokens = 1200
+retention_days = 90
+write_after = ["execute", "handoff"]
+read_for = ["prime", "plan", "execute"]
+"#,
+    );
+    fs::write(&config_path, config).unwrap();
+
+    write_memory_record_with_body(
+        dir,
+        "mem_sentinel",
+        "2026-05-19T00:00:00Z",
+        &format!("Parsed sentinel body: {MEMORY_LEAK_SENTINEL}"),
+    );
+}
+
+fn enable_private_memory_with_sentinel(dir: &std::path::Path, state_dir: &std::path::Path) {
+    let config_path = dir.join(".pice/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str(
+        r#"
+
+[memory]
+enabled = true
+store = "private_state"
+max_recalled_items = 6
+max_tokens = 1200
+retention_days = 90
+write_after = ["execute", "handoff"]
+read_for = ["prime", "plan", "execute"]
+"#,
+    );
+    fs::write(&config_path, config).unwrap();
+
+    let project_root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let project_hash = manifest_project_namespace(&project_root);
+    let memory_dir = state_dir.join(&project_hash).join("memory");
+    fs::create_dir_all(&memory_dir).unwrap();
+    fs::write(
+        memory_dir.join("records.jsonl"),
+        format!(
+            "{{\"id\":\"mem_private_sentinel\",\"created_at\":\"2026-05-19T00:00:00Z\",\"source\":\"handoff_summary\",\"store\":\"private_state\",\"project_hash\":\"{project_hash}\",\"redaction_status\":\"clean\",\"title\":\"Private CLI memory test\",\"body\":\"Private sentinel body: {MEMORY_LEAK_SENTINEL}\",\"tags\":[\"durable\"]}}\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn enable_private_memory_with_corrupt_state(dir: &std::path::Path, state_dir: &std::path::Path) {
+    let config_path = dir.join(".pice/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str(
+        r#"
+
+[memory]
+enabled = true
+store = "private_state"
+max_recalled_items = 6
+max_tokens = 1200
+retention_days = 90
+write_after = ["execute", "handoff"]
+read_for = ["prime", "plan", "execute"]
+"#,
+    );
+    fs::write(&config_path, config).unwrap();
+
+    let project_root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let project_hash = manifest_project_namespace(&project_root);
+    let memory_dir = state_dir.join(&project_hash).join("memory");
+    fs::create_dir_all(&memory_dir).unwrap();
+    fs::write(memory_dir.join("records.jsonl"), "not-json\n").unwrap();
 }
 
 /// Helper: create a temp directory with a minimal .pice/config.toml
@@ -137,6 +222,125 @@ fn daemon_subcommand_shows_actions_in_help() {
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("restart"))
         .stdout(predicate::str::contains("logs"));
+}
+
+#[test]
+fn memory_command_shows_actions_in_help() {
+    pice_cmd()
+        .arg("memory")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("list"))
+        .stdout(predicate::str::contains("show"))
+        .stdout(predicate::str::contains("prune"))
+        .stdout(predicate::str::contains("delete"));
+}
+
+fn write_memory_record(dir: &std::path::Path, id: &str, created_at: &str) {
+    write_memory_record_with_body(dir, id, created_at, &format!("Body for {id}."));
+}
+
+fn write_memory_record_with_body(dir: &std::path::Path, id: &str, created_at: &str, body: &str) {
+    let pice_dir = dir.join(".pice");
+    fs::create_dir_all(&pice_dir).unwrap();
+    let project_root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let project_hash = manifest_project_namespace(&project_root);
+    fs::write(
+        pice_dir.join("learnings.md"),
+        format!(
+            "<!-- pice-memory id=\"{id}\" created_at=\"{created_at}\" source=\"handoff_summary\" store=\"project_learnings\" project_hash=\"{project_hash}\" redaction_status=\"clean\" -->\n### CLI memory test\n\n{body}\n<!-- /pice-memory -->\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn memory_status_json_works_inline() {
+    let dir = setup_stub_project();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("memory")
+        .arg("status")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""status": "complete""#))
+        .stdout(predicate::str::contains(r#""store": "project_learnings""#));
+}
+
+#[test]
+fn memory_list_show_delete_json_work_inline() {
+    let dir = setup_stub_project();
+    write_memory_record(dir.path(), "mem_cli", "2026-05-19T00:00:00Z");
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("memory")
+        .arg("list")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("mem_cli"));
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("memory")
+        .arg("show")
+        .arg("mem_cli")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Body for mem_cli."));
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("memory")
+        .arg("delete")
+        .arg("mem_cli")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(r#""removed": 1"#));
+}
+
+#[test]
+fn memory_show_missing_json_is_structured_failure() {
+    let dir = setup_stub_project();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("memory")
+        .arg("show")
+        .arg("mem_missing")
+        .arg("--json")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains(r#""status": "not_found""#))
+        .stdout(predicate::str::contains(r#""record_id": "mem_missing""#));
+}
+
+#[test]
+fn memory_prune_json_uses_before_boundary_inline() {
+    let dir = setup_stub_project();
+    write_memory_record(dir.path(), "mem_old", "2026-05-18T00:00:00Z");
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .arg("memory")
+        .arg("prune")
+        .arg("--before")
+        .arg("2026-05-19")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#""before": "2026-05-19T00:00:00Z""#,
+        ))
+        .stdout(predicate::str::contains(r#""removed": 1"#));
 }
 
 // ─── Error Path Tests ──────────────────────────────────────────────────────
@@ -324,6 +528,62 @@ fn evaluate_command_with_stub_provider() {
         .success()
         .stdout(predicate::str::contains("\"passed\": true"))
         .stdout(predicate::str::contains("\"tier\": 2"));
+}
+
+#[test]
+fn evaluate_create_payloads_do_not_include_enabled_memory() {
+    let dir = setup_stub_project();
+    enable_project_memory_with_sentinel(dir.path());
+    let plan_path = create_plan_with_contract(dir.path());
+
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    let log_path = dir.path().join("evaluate-requests.jsonl");
+    pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STUB_REQUEST_LOG", &log_path)
+        .arg("evaluate")
+        .arg(plan_path.to_string_lossy().to_string())
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"passed\": true"));
+
+    let log = fs::read_to_string(&log_path).expect("stub request log");
+    assert!(
+        log.lines().filter(|line| !line.trim().is_empty()).count() >= 2,
+        "tier 2 evaluation should record primary and adversarial evaluate/create payloads"
+    );
+    assert!(
+        !log.contains(MEMORY_LEAK_SENTINEL),
+        "evaluate/create payload leaked enabled memory: {log}"
+    );
+    assert!(
+        !log.contains("Approved Project Memory"),
+        "evaluate/create payload included memory section: {log}"
+    );
 }
 
 #[test]
@@ -841,6 +1101,49 @@ fn setup_stub_project_with_git() -> tempfile::TempDir {
     dir
 }
 
+fn setup_stub_project_with_git_and_memory() -> tempfile::TempDir {
+    let dir = setup_stub_project();
+    enable_project_memory_with_sentinel(dir.path());
+
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+
+    dir
+}
+
+fn assert_log_includes_enabled_memory(log: &str, command: &str) {
+    assert!(log.contains(r#""method":"session/send""#));
+    assert!(
+        log.contains(MEMORY_LEAK_SENTINEL),
+        "{command} prompt did not include enabled memory for an allowed consumer: {log}"
+    );
+    assert!(
+        log.contains("Approved Project Memory"),
+        "{command} prompt did not include the memory section for an allowed consumer: {log}"
+    );
+}
+
 #[test]
 
 fn phase3_prime_command_with_stub_provider() {
@@ -870,6 +1173,182 @@ fn phase3_review_command_with_stub_provider() {
 }
 
 #[test]
+fn prime_prompt_includes_enabled_memory_for_allowed_consumer() {
+    let dir = setup_stub_project_with_git_and_memory();
+
+    let log_path = dir.path().join("prime-requests.jsonl");
+    pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STUB_REQUEST_LOG", &log_path)
+        .arg("prime")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+
+    let log = fs::read_to_string(&log_path).expect("stub request log");
+    assert_log_includes_enabled_memory(&log, "prime");
+}
+
+#[test]
+fn plan_prompt_includes_enabled_memory_for_allowed_consumer() {
+    let dir = setup_stub_project_with_git_and_memory();
+
+    let log_path = dir.path().join("plan-requests.jsonl");
+    pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STUB_REQUEST_LOG", &log_path)
+        .arg("plan")
+        .arg("test feature")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+
+    let log = fs::read_to_string(&log_path).expect("stub request log");
+    assert_log_includes_enabled_memory(&log, "plan");
+}
+
+#[test]
+fn execute_prompt_includes_enabled_memory_for_allowed_consumer() {
+    let dir = setup_stub_project_with_git_and_memory();
+    let plan_path = create_plan_with_contract(dir.path());
+
+    let log_path = dir.path().join("execute-requests.jsonl");
+    pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STUB_REQUEST_LOG", &log_path)
+        .arg("execute")
+        .arg(plan_path.to_string_lossy().to_string())
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+
+    let log = fs::read_to_string(&log_path).expect("stub request log");
+    assert_log_includes_enabled_memory(&log, "execute");
+}
+
+#[test]
+fn private_state_prime_prompt_uses_pice_state_dir_namespace() {
+    let dir = setup_stub_project_with_git();
+    let state_dir = tempfile::tempdir().unwrap();
+    enable_private_memory_with_sentinel(dir.path(), state_dir.path());
+
+    let project_root = dir.path().canonicalize().unwrap();
+    let project_hash = manifest_project_namespace(&project_root);
+    assert!(
+        state_dir
+            .path()
+            .join(&project_hash)
+            .join("memory")
+            .join("records.jsonl")
+            .exists(),
+        "private sentinel fixture must live under PICE_STATE_DIR/<project_hash>/memory"
+    );
+
+    let log_path = dir.path().join("prime-private-requests.jsonl");
+    pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STATE_DIR", state_dir.path())
+        .env("PICE_STUB_REQUEST_LOG", &log_path)
+        .arg("prime")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+
+    let log = fs::read_to_string(&log_path).expect("stub request log");
+    assert_log_includes_enabled_memory(&log, "prime private_state");
+}
+
+#[test]
+fn corrupt_private_state_prime_uses_empty_memory_brief_instead_of_failing() {
+    let dir = setup_stub_project_with_git();
+    let state_dir = tempfile::tempdir().unwrap();
+    enable_private_memory_with_corrupt_state(dir.path(), state_dir.path());
+
+    let log_path = dir.path().join("prime-corrupt-private-requests.jsonl");
+    pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STATE_DIR", state_dir.path())
+        .env("PICE_STUB_REQUEST_LOG", &log_path)
+        .arg("prime")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+
+    let log = fs::read_to_string(&log_path).expect("stub request log");
+    assert!(log.contains(r#""method":"session/send""#));
+    assert!(
+        !log.contains("Approved Project Memory"),
+        "corrupt private-state recall should use an empty brief: {log}"
+    );
+}
+
+#[test]
+fn disabled_memory_execute_does_not_require_state_dir_home() {
+    let dir = setup_stub_project_with_git();
+    let plan_path = create_plan_with_contract(dir.path());
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .env_remove("PICE_STATE_DIR")
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .arg("execute")
+        .arg(plan_path.to_string_lossy().to_string())
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+}
+
+#[test]
+fn disabled_memory_handoff_does_not_require_state_dir_home() {
+    let dir = setup_stub_project_with_git();
+
+    pice_cmd()
+        .current_dir(dir.path())
+        .env_remove("PICE_STATE_DIR")
+        .env_remove("HOME")
+        .env_remove("USERPROFILE")
+        .arg("handoff")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+}
+
+#[test]
+fn review_prompt_does_not_include_enabled_memory() {
+    let dir = setup_stub_project_with_git_and_memory();
+    fs::write(dir.path().join("review-change.txt"), "review me").unwrap();
+
+    let log_path = dir.path().join("review-requests.jsonl");
+    pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STUB_REQUEST_LOG", &log_path)
+        .arg("review")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"complete\""));
+
+    let log = fs::read_to_string(&log_path).expect("stub request log");
+    assert!(log.contains(r#""method":"session/send""#));
+    assert!(
+        !log.contains(MEMORY_LEAK_SENTINEL),
+        "review prompt leaked enabled memory: {log}"
+    );
+    assert!(
+        !log.contains("Approved Project Memory"),
+        "review prompt included memory section: {log}"
+    );
+}
+
+#[test]
 
 fn phase3_commit_command_dry_run_with_stub_provider() {
     let dir = setup_stub_project_with_git();
@@ -889,6 +1368,38 @@ fn phase3_commit_command_dry_run_with_stub_provider() {
         .success()
         .stdout(predicate::str::contains("\"status\": \"dry_run\""))
         .stdout(predicate::str::contains("\"message\""));
+}
+
+#[test]
+fn commit_prompt_does_not_include_enabled_memory() {
+    let dir = setup_stub_project_with_git_and_memory();
+
+    let config_path = dir.path().join(".pice/config.toml");
+    let mut config = fs::read_to_string(&config_path).unwrap();
+    config.push_str("\n# commit isolation change\n");
+    fs::write(&config_path, config).unwrap();
+
+    let log_path = dir.path().join("commit-requests.jsonl");
+    pice_cmd()
+        .current_dir(dir.path())
+        .env("PICE_STUB_REQUEST_LOG", &log_path)
+        .arg("commit")
+        .arg("--dry-run")
+        .arg("--json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"dry_run\""));
+
+    let log = fs::read_to_string(&log_path).expect("stub request log");
+    assert!(log.contains(r#""method":"session/send""#));
+    assert!(
+        !log.contains(MEMORY_LEAK_SENTINEL),
+        "commit prompt leaked enabled memory: {log}"
+    );
+    assert!(
+        !log.contains("Approved Project Memory"),
+        "commit prompt included memory section: {log}"
+    );
 }
 
 #[test]

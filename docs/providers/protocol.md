@@ -106,6 +106,11 @@ Create a new AI session.
 
 Workflow sessions are routed through the project primary developer provider, configured as `[provider].name` in `.pice/config.toml`. The selection is independent from `[evaluation.primary]` and `[evaluation.adversarial]`, which are only used by `pice evaluate`.
 
+PICE memory is assembled by the daemon before `session/send`. Providers do not get a
+memory-specific protocol method and must not independently fetch or mutate memory;
+any approved memory appears only as ordinary prompt text in eligible workflow
+sessions.
+
 | Param | Type | Required | Description |
 |-------|------|----------|-------------|
 | `workingDirectory` | `string` | Yes | Absolute path to the project directory |

@@ -23,7 +23,8 @@ As a PICE user working across repeated repository sessions, I want PICE to remem
 - [ ] Metrics records memory write/read/prune metadata in SQLite without storing natural-language memory content as metrics truth.
 - [ ] `pice memory` exposes status, list, show, and prune/delete operations with `--json` parity and stable exit codes.
 - [ ] Memory storage is project-scoped by normalized project root and project hash; private state under `~/.pice/state/{project_hash}` cannot collide across repositories.
-- [ ] Retention, pruning, and redaction are implemented in the first runtime version, not deferred.
+- [ ] Every persisted memory record has a stable `mem_` id and machine-readable metadata so `pice memory show`, `delete`, and `prune` do not rely on brittle Markdown parsing.
+- [ ] Retention, pruning, and redaction are implemented in the first runtime version, with separate semantics for committed `.pice/learnings.md` and private `~/.pice/state/{project_hash}` storage.
 - [ ] Explicit tests prove no memory text reaches `evaluate/create`, adversarial evaluator prompts, `pice review`, or `pice commit`.
 - [ ] Documentation explains memory as advisory context, not authoritative workflow state.
 - [ ] All validation commands pass.
@@ -57,7 +58,8 @@ As a PICE user working across repeated repository sessions, I want PICE to remem
   - `SessionMemoryRecorder and SessionRunContext` -> Contract criterion: `Daemon-owned lifecycle integration is explicit`.
   - `storage-free prompt builders` -> Contract criterion: `Prompt builders remain storage-free`.
   - `manifest source-of-truth preservation` -> Contract criterion: `Memory remains advisory and non-authoritative`.
-  - `operator-visible governance/delete/prune` -> Contract criterion: `Memory governance commands are complete`.
+  - `operator-visible governance/delete/prune` -> Contract criteria: `Memory record format supports governance`, `Memory governance commands are complete`.
+  - `project-hashed private state` -> Contract criterion: `Private memory state follows manifest namespace rules`.
   - `metrics metadata only` -> Contract criterion: `Metrics store metadata without natural-language memory content`.
 - **Prime boundary**: `prime` orients on the repository and current state; this approved plan and its contract are the traceability mechanism.
 - **External-source boundary**: PICE records references supplied during planning. This feature does not discover, fetch, or infer external PRDs, issues, emails, transcripts, or source systems automatically.
@@ -219,7 +221,6 @@ max_tokens = 1200
 retention_days = 90
 write_after = ["execute", "handoff"]
 read_for = ["prime", "plan", "execute"]
-private_state = false
 ```
 
 Use serde defaults so older configs parse without change. Validate numeric bounds:
@@ -236,7 +237,9 @@ Use serde defaults so older configs parse without change. Validate numeric bound
 - `private_state`: non-committed `~/.pice/state/{project_hash}/memory/records.jsonl`.
 - `both`: write redacted summaries to both only when explicitly configured.
 
-Do not add AgentMemory, embeddings, vector, graph, rerank, or MCP settings. If a user config includes unsupported future keys like `agentmemory_server`, `embedding_provider`, `vector_store`, or `mcp`, reject them only if the existing config parser already denies unknown fields; otherwise document that they are ignored and add explicit tests for the supported fields.
+The `store` enum is the sole storage selector. Do not add a parallel `private_state = true/false` boolean; that creates contradictory states such as `store = "project_learnings"` plus `private_state = true`.
+
+Do not add AgentMemory, embeddings, vector, graph, rerank, or MCP settings. Add `#[serde(deny_unknown_fields)]` to the new `MemoryConfig` type even though the current top-level `PiceConfig` remains backward-compatible. A user config with unsupported memory keys like `agentmemory_server`, `embedding_provider`, `vector_store`, `mcp`, or `private_state` must fail with a parse/validation error rather than silently no-oping.
 
 Depends on: none
 
@@ -329,6 +332,7 @@ Description: Add daemon-owned lifecycle context before touching prompts:
 pub struct SessionRunContext {
     pub project_root: PathBuf,
     pub project_hash: String,
+    pub state_dir: PathBuf,
     pub feature_id: Option<String>,
     pub plan_path: Option<PathBuf>,
     pub plan_hash: Option<String>,
@@ -351,6 +355,12 @@ pub struct SessionMemoryRecorder { ... }
 - Accept only summary fields that pass redaction.
 - Attach metadata: command, writer, run id, feature id, plan path, plan hash, contract hash, project hash, created timestamp, source commit if available.
 - Return structured write result for metrics and JSON command output.
+
+`state_dir` must come from the same source as manifests:
+
+- foreground/inline handlers use `VerificationManifest::state_dir()`;
+- background jobs use the dispatch-time `JobEnv.state_dir` snapshot;
+- no memory path may read `PICE_STATE_DIR` again after a background job has been admitted.
 
 For `execute`, v1 may write a deterministic run summary after a successful provider session instead of trying to capture the entire streamed provider answer. For `handoff`, v1 may write a redacted summary derived from the already captured handoff response. Do not modify `commit` capture flow.
 
@@ -381,15 +391,34 @@ Description: Implement storage without making memory authoritative:
 - `private_state` writes JSONL records under `~/.pice/state/{project_hash}/memory/records.jsonl`.
 - `both` writes to both stores only when explicitly configured.
 
+Record format rules:
+
+- Every record has a stable `mem_` id, RFC3339 UTC `created_at`, source phase, store, feature id, plan path, plan hash, contract hash, run id, redaction status, title, summary body, and tags.
+- `.pice/learnings.md` stores each record inside a machine-readable block such as:
+
+```markdown
+<!-- pice-memory id="mem_..." created_at="2026-05-19T00:00:00Z" source="handoff_summary" -->
+### Short title
+
+Redacted summary body.
+<!-- /pice-memory -->
+```
+
+- `private_state` stores the same logical record as one JSON object per line.
+- `show`, `delete`, and `prune` operate by record id and metadata, not by fuzzy heading or body matching.
+- Tests must cover malformed blocks, duplicate ids, missing end markers, and JSONL lines with unknown fields.
+
 Storage rules:
 
-- Normalize project root and derive project hash using the same project-hash convention as daemon manifest state.
+- Normalize project root and derive project hash with `pice_core::layers::manifest::manifest_project_namespace(project_root)`.
+- Resolve private-state roots with `VerificationManifest::state_dir()` in foreground and `JobEnv.state_dir` in background so `PICE_STATE_DIR` test overrides and dispatch-time snapshots behave exactly like manifest IO.
 - Reject paths that resolve outside the project root for `.pice/learnings.md`.
 - Use crash-safe writes: write temporary file, fsync file, rename, fsync directory where supported.
 - For append-style JSONL, either lock around append or use temp+rename rewrite. Prefer deterministic temp+rename for v1 if record counts remain small.
 - Never write into verification manifest files.
 - Never write natural-language memory content into `.pice/metrics.db`.
 - If `.pice/learnings.md` is scaffolded, explain that it can be committed and should contain only durable non-secret project lessons. If it is not scaffolded, create it lazily on first successful opted-in write.
+- Retention for `.pice/learnings.md` edits only the current working-tree file and cannot erase prior git history. The command output and docs must say this explicitly. Private-state retention can physically remove JSONL records from the current state file.
 
 Redaction rules:
 
@@ -450,23 +479,26 @@ Description: Add a new schema migration for memory metadata. Use the next schema
 ```sql
 CREATE TABLE IF NOT EXISTS memory_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK(event_type IN
+        ('memory_read','memory_write','memory_write_rejected','memory_prune','memory_delete')),
     record_id TEXT,
     project_hash TEXT NOT NULL,
     plan_path TEXT,
     feature_id TEXT,
     run_id TEXT,
     command TEXT,
-    consumer TEXT,
-    writer TEXT,
-    estimated_tokens INTEGER,
-    result TEXT NOT NULL,
+    consumer TEXT CHECK(consumer IS NULL OR consumer IN
+        ('prime','plan','execute')),
+    writer TEXT CHECK(writer IS NULL OR writer IN
+        ('execute_summary','handoff_summary','operator_note')),
+    estimated_tokens INTEGER CHECK(estimated_tokens IS NULL OR estimated_tokens >= 0),
+    result TEXT NOT NULL CHECK(result IN ('ok','rejected','warning','error')),
     details_json TEXT
 );
 ```
 
-Allowed `event_type` values should include `memory_read`, `memory_write`, `memory_write_rejected`, `memory_prune`, and `memory_delete`. Do not include memory text in `details_json`; store IDs, counts, sizes, reasons, and config values only.
+Use `metrics::store::canonicalize_rfc3339` or an equivalent shared helper at the write and query boundaries so `created_at` sorting/filtering does not regress into mixed `Z`/`+00:00` text ordering. Add indexes for `(project_hash, created_at)`, `(record_id)`, and `(feature_id, plan_path)` if the query paths use them. Do not include memory text in `details_json`; store IDs, counts, sizes, reasons, and config values only.
 
 Integrate metrics writes best-effort for allowed workflow read/write paths. For `pice memory` governance commands, metrics failure should be surfaced as a warning in text mode and a structured warning in JSON mode unless the command cannot safely complete.
 
@@ -600,6 +632,9 @@ Behavior:
 - Every command supports `--json` and emits a single JSON object to stdout in JSON mode.
 - Commands must not mutate verification manifests.
 - Commands must record metadata events when metrics is enabled.
+- `prune --before YYYY-MM-DD` interprets the date as a UTC day boundary and reports the boundary used in JSON output.
+- For `.pice/learnings.md`, `delete` and `prune` edit the current file only and must warn that git history may still contain prior records.
+- For `private_state`, `delete` and `prune` rewrite the JSONL file crash-safely and remove the targeted records from the current state file.
 
 Depends on: Task 6
 
@@ -668,6 +703,7 @@ Description: This feature should not add provider memory methods. Add regression
 - Rust `pice-protocol` and TypeScript `@pice/provider-protocol` stay in sync if touched.
 - `package.json` and `pnpm-lock.yaml` do not gain `@agentmemory/agentmemory`, `iii-sdk`, embeddings packages, vector stores, or AgentMemory MCP tooling.
 - `Cargo.toml` and `Cargo.lock` do not gain unnecessary storage/search dependencies.
+- Negative tests may contain strings like `agentmemory_server` or `MEMORY_LEAK_SENTINEL_DO_NOT_INCLUDE`; dependency checks must search dependency manifests and lockfiles, not all source files indiscriminately.
 
 If `pice memory` changes only daemon CLI request types in `pice-core`, do not touch provider protocol packages.
 
@@ -676,7 +712,7 @@ Depends on: Tasks 2 and 8
 Validate:
 
 ```bash
-rg -n "agentmemory|iii-sdk|embedding|vector|rerank|memory/" package.json pnpm-lock.yaml Cargo.toml Cargo.lock crates packages
+! rg -n "@agentmemory/agentmemory|iii-sdk|chromadb|qdrant|lancedb|faiss|hnswlib|mcp.*memory" package.json pnpm-lock.yaml Cargo.toml Cargo.lock
 cargo test -p pice-protocol
 pnpm --filter @pice/provider-protocol test
 pnpm --filter @pice/provider-protocol typecheck
@@ -701,6 +737,8 @@ Description: Add integration tests using stub providers only. Required scenarios
 6. `pice memory list/show/status/prune/delete --json` returns single JSON objects and stable exit codes.
 7. Excluded commands with sentinel memory do not leak memory into request logs.
 8. Old `.pice/config.toml` and old metrics DB migrate successfully.
+9. `.pice/learnings.md` malformed blocks, duplicate ids, and missing end markers fail safely without corrupting the file.
+10. `PICE_STATE_DIR` overrides and background `JobEnv.state_dir` snapshots route private memory to the same project namespace as manifests.
 
 Do not use live API keys. Use stub/echo providers and temp directories.
 
@@ -814,6 +852,8 @@ Expected results:
 - [ ] Prompt builders remain storage-free.
 - [ ] `prime`, `plan`, and `execute` are the only read consumers in v1.
 - [ ] `handoff` and successful workflow phases write summary-only records through policy.
+- [ ] Stored records have stable ids and metadata-backed parsers for `show`, `delete`, and `prune`.
+- [ ] Private memory state uses the same `PICE_STATE_DIR` and project namespace helpers as verification manifests.
 - [ ] `review`, `evaluate`, adversarial evaluation, and `commit` are mechanically denied and covered by sentinel leak tests.
 - [ ] `pice memory` supports status/list/show/prune/delete with `--json`.
 - [ ] Metrics metadata migration is idempotent and stores no natural-language memory body.
@@ -837,7 +877,7 @@ Expected results:
     {
       "name": "No external memory runtime is introduced",
       "threshold": 10,
-      "validation": "! rg -n \"@agentmemory/agentmemory|iii-sdk|agentmemory|embedding|vector|rerank|mcp.*memory\" package.json pnpm-lock.yaml Cargo.toml Cargo.lock crates packages"
+      "validation": "! rg -n \"@agentmemory/agentmemory|iii-sdk|chromadb|qdrant|lancedb|faiss|hnswlib|mcp.*memory\" package.json pnpm-lock.yaml Cargo.toml Cargo.lock"
     },
     {
       "name": "Provider protocol boundary is preserved",
@@ -877,12 +917,22 @@ Expected results:
     {
       "name": "Metrics store metadata without natural-language memory content",
       "threshold": 9,
-      "validation": "cargo test -p pice-daemon metrics && rg -n \"memory_events|memory_write|memory_read|details_json\" crates/pice-daemon/src/metrics"
+      "validation": "cargo test -p pice-daemon metrics && rg -n \"memory_events|memory_write|memory_read|details_json|CHECK\\(event_type|canonicalize_rfc3339\" crates/pice-daemon/src/metrics"
+    },
+    {
+      "name": "Memory record format supports governance",
+      "threshold": 9,
+      "validation": "cargo test -p pice-daemon memory::store && rg -n \"mem_|pice-memory|duplicate ids|missing end\" crates/pice-daemon/src crates/pice-daemon/tests docs/guides/memory.md"
+    },
+    {
+      "name": "Private memory state follows manifest namespace rules",
+      "threshold": 10,
+      "validation": "cargo test -p pice-daemon memory::store && rg -n \"manifest_project_namespace|VerificationManifest::state_dir|JobEnv\\.state_dir|PICE_STATE_DIR\" crates/pice-daemon/src/memory crates/pice-daemon/src/handlers"
     },
     {
       "name": "Memory governance commands are complete",
       "threshold": 9,
-      "validation": "cargo test -p pice-cli command_integration memory && cargo test -p pice-daemon handlers::memory && pice memory status --json"
+      "validation": "cargo test -p pice-cli command_integration memory && cargo test -p pice-daemon handlers::memory && cargo run -p pice-cli -- memory status --json"
     },
     {
       "name": "Full validation passes",
@@ -896,24 +946,24 @@ Expected results:
 ## Adversarial Review
 
 **Tier**: 3
-**Reviewers**: Primary planner plus local adversarial pass against `AGENTS.md`, the AgentMemory assessment, daemon rules, Stack Loops rules, metrics rules, and protocol rules.
-**Refinement cycles**: 1
+**Reviewers**: Primary planner plus local in-environment adversarial passes against `AGENTS.md`, the AgentMemory assessment, daemon rules, Stack Loops rules, metrics rules, protocol rules, and current source.
+**Refinement cycles**: 2
 
 ### Critical
 
-1. The plan could be misread as "implement AgentMemory inside PICE" instead of "learn from AgentMemory patterns." Resolution: the overview, success criteria, Task 11, and contract explicitly forbid AgentMemory runtime dependency, MCP wiring, provider calls, embeddings, vector search, graph search, reranking, and hook lifecycle adoption.
-2. Memory could contaminate evaluator context through shared prompt-builder plumbing. Resolution: memory policy is default-deny, prompt builders accept explicit optional briefs only for approved commands, and Task 8 requires sentinel tests against review, commit, evaluate, adversarial evaluation, Stack Loops layer payloads, and adaptive payloads.
-3. Memory could become a second source of truth for workflow state. Resolution: the plan treats memory as advisory context only, keeps manifests authoritative, and limits metrics to metadata without natural-language memory content.
-4. Summary memory could still leak secrets or private incident data. Resolution: Tasks 3, 4, 9, and 10 require redaction, rejection, inspection, prune/delete, retention policy, and documentation in the first runtime version.
-5. Prompt builders might quietly grow filesystem or SQLite access. Resolution: Task 7 requires storage-free builder signatures and Task 8/contract include negative searches and tests.
-6. `execute` streamed output is not naturally available for high-quality memory summaries. Resolution: Task 3 permits only deterministic run summaries for `execute` in v1, while `handoff` may use already captured output. Raw streamed transcript capture is explicitly out of scope.
-7. Config could silently accept unsafe future keys. Resolution: Task 1 requires explicit handling or tests for unsupported memory-like keys based on the repository's current serde behavior.
+1. Hidden assumption: the config draft had both `store = "..."` and `private_state = false`, which creates contradictory states and lets unsafe future keys silently no-op. Section: `Task 1: Add Backward-Compatible Memory Configuration`. Resolution: removed the parallel boolean, made `store` the sole selector, and required `#[serde(deny_unknown_fields)]` on `MemoryConfig`.
+2. Verification-loop readiness: `pice memory show/delete/prune` cannot be reliable against free-form `.pice/learnings.md` prose unless records have stable ids and parseable metadata. Section: `Task 4: Implement Project-Scoped Memory Stores`. Resolution: added a required `mem_` record format, machine-readable Markdown blocks, JSONL shape parity, and malformed-block tests.
+3. Hidden assumption: the plan claimed retention/prune semantics without distinguishing current-file deletion from erasure of committed history. Sections: `Success Criteria`, `Task 4`, `Task 9`, `Task 10`. Resolution: retention now has per-store semantics; `.pice/learnings.md` pruning edits only the current file and must warn that git history may still contain prior records.
+4. Context/state isolation: private memory state could drift from manifest namespacing if it re-derived state paths or reread `PICE_STATE_DIR` during background jobs. Sections: `Task 3` and `Task 4`. Resolution: `SessionRunContext` now carries `state_dir`; foreground uses `VerificationManifest::state_dir()`, background uses dispatch-time `JobEnv.state_dir`, and project namespace uses `manifest_project_namespace`.
+5. Weak success criteria: the dependency-negative grep would fail on the negative tests the plan asks implementers to add, such as `agentmemory_server`. Sections: `Task 11` and `Contract`. Resolution: dependency scans now target dependency manifests/lockfiles and concrete package/runtime names, not all source files.
+6. Metrics integrity: the proposed `memory_events` table listed allowed values in prose but lacked CHECK constraints and timestamp canonicalization, diverging from existing metrics hardening. Section: `Task 6: Add Memory Metrics Metadata Migration`. Resolution: added CHECK constraints for event type, consumer, writer, token count, result, RFC3339 canonicalization, and query indexes.
+7. Tooling honesty: this plan is Tier 3, but this review pass did not use fresh spawned adversary agents because the active tool policy only permits subagents when explicitly requested. Section: `Adversarial Review`. Resolution: reviewer line now records this as a local in-environment adversarial pass rather than overstating external or multi-agent review.
 
 ### Consider
 
 1. `.pice/learnings.md` is transparent but commit-prone. The plan allows `private_state` and `both`; implementation should make docs clear enough that users choose shared vs private memory intentionally.
 2. A `pice memory add` operator-note command may be useful, but it is not required for v1. If added, it must use the same redaction and metrics path as recorder writes.
-3. Retention for committed `.pice/learnings.md` is socially different from retention for private JSONL state. The implementation should avoid pretending that pruning a committed file erases prior git history.
+3. The machine-readable Markdown block format is intentionally simple, but implementation should keep the parser strict enough to avoid deleting the wrong block after manual edits.
 4. Memory summaries can become stale. The brief renderer should show created timestamps/source phase so users and models can treat them as historical context.
 5. If schema version numbers have advanced by implementation time, Task 6 must use the next actual schema version, not the number implied by this plan.
 

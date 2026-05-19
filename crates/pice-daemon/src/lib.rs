@@ -41,6 +41,7 @@ pub mod jobs;
 pub mod lifecycle;
 pub mod logging;
 pub mod logs;
+pub mod memory;
 pub mod metrics;
 pub mod orchestrator;
 pub mod prompt;

@@ -56,6 +56,9 @@ enum Commands {
     /// Inspect or tail captured provider session logs for a feature (Phase 7)
     Logs(commands::logs::LogsArgs),
 
+    /// Inspect, show, prune, or delete PICE summary memory records
+    Memory(commands::memory::MemoryArgs),
+
     /// Aggregate and display quality metrics
     Metrics(commands::metrics::MetricsArgs),
 
@@ -140,6 +143,7 @@ async fn async_main() -> anyhow::Result<()> {
         Commands::Handoff(args) => commands::handoff::run(args).await,
         Commands::Status(args) => commands::status::run(args).await,
         Commands::Logs(args) => commands::logs::run(args).await,
+        Commands::Memory(args) => commands::memory::run(args).await,
         Commands::Metrics(args) => commands::metrics::run(args).await,
         Commands::Benchmark(args) => commands::benchmark::run(args).await,
         Commands::Layers(args) => commands::layers::run(args).await,

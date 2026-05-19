@@ -52,8 +52,8 @@ export class StubProvider extends BaseProvider {
    * Phase 4 context-isolation test harness: when `PICE_STUB_REQUEST_LOG`
    * points at a file path, every `evaluate/create` request's payload
    * (contract, diff, claudeMd, passIndex, freshContext, effortOverride,
-   * model) is appended as one JSON line. Callers parse the file to verify
-   * byte-identical prompts across passes.
+   * model) and every `session/send` workflow message are appended as one
+   * JSON line. Callers parse the file to verify prompt isolation.
    */
   private requestLogPath: string | undefined;
   /**
@@ -158,6 +158,21 @@ export class StubProvider extends BaseProvider {
       this.requireInitialized();
       const { sessionId, message } = params as { sessionId: string; message: string };
 
+      if (this.requestLogPath) {
+        try {
+          appendFileSync(
+            this.requestLogPath,
+            JSON.stringify({
+              method: 'session/send',
+              sessionId,
+              message,
+            }) + '\n',
+          );
+        } catch (err) {
+          console.error(`[stub] request log append failed: ${String(err)}`);
+        }
+      }
+
       // Echo the message back as a chunk notification
       transport.sendNotification('response/chunk', {
         sessionId,
@@ -254,11 +269,12 @@ export class StubProvider extends BaseProvider {
       // must never crash the provider (mirrors the daemon's metrics pattern).
       if (this.requestLogPath) {
         try {
-          appendFileSync(
-            this.requestLogPath,
-            JSON.stringify({
-              sessionId,
-              model: p.model ?? null,
+              appendFileSync(
+                this.requestLogPath,
+                JSON.stringify({
+                  method: 'evaluate/create',
+                  sessionId,
+                  model: p.model ?? null,
               effort: p.effort ?? null,
               effortOverride: p.effortOverride ?? null,
               freshContext: p.freshContext ?? null,

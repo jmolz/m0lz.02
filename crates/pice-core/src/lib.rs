@@ -39,6 +39,7 @@ pub mod events;
 pub mod gate;
 pub mod jobs;
 pub mod layers;
+pub mod memory;
 pub mod paths;
 pub mod plan_parser;
 pub mod prompt;

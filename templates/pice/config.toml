@@ -28,3 +28,16 @@ db_path = ".pice/metrics.db"
 
 [init]
 project_type = "auto"
+
+[memory]
+# PICE summary memory is opt-in. When disabled, no workflow prompt receives
+# recalled memory and no memory files are written.
+enabled = false
+# project_learnings = .pice/learnings.md; private_state = ~/.pice/state/{project_hash}/memory/records.jsonl; both = write both.
+store = "project_learnings"
+max_recalled_items = 6
+max_tokens = 1200
+# 0 disables retention-based pruning; otherwise days must be 1..3650.
+retention_days = 90
+write_after = ["execute", "handoff"]
+read_for = ["prime", "plan", "execute"]

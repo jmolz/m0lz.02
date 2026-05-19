@@ -69,6 +69,7 @@ Evaluators do not receive:
 - The implementation session's chat history
 - The developer's verbal instructions
 - Previous evaluation results
+- Recalled project memory
 - Any explanation of why the code looks the way it does
 
 This is enforced at the protocol level. The `evaluate/create` JSON-RPC method accepts
@@ -76,6 +77,8 @@ only the contract, diff, evaluation-guidance text on the compatibility `claudeMd
 field, optional model/effort controls, seam-check specs, and adaptive pass controls.
 Layer scoping lives on the provider session created by `session/create`; there is no
 mechanism for passing implementation conversation even if a provider wanted to.
+PICE memory is daemon-owned advisory context for selected workflow prompts, not an
+evaluation input.
 
 In Stack Loops, the daemon filters contract and diff context per layer. A layer
 evaluator does not see sibling layer contracts or another layer's evaluation

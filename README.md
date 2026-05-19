@@ -84,7 +84,7 @@ Stack Loops turn one feature into layer-specific loops:
 5. Halt adaptively when confidence, budget, gate, cancellation, or max-pass rules decide the result.
 6. Persist the manifest to `~/.pice/state/{project-hash}/{feature-id}.manifest.json`.
 
-See [the Stack Loops guide](docs/guides/stack-loops.md) and [the v0.1 to v0.2 migration guide](docs/guides/migration-v01-to-v02.md).
+See [the Stack Loops guide](docs/guides/stack-loops.md), [the memory guide](docs/guides/memory.md), and [the v0.1 to v0.2 migration guide](docs/guides/migration-v01-to-v02.md).
 
 ## Commands
 
@@ -100,6 +100,7 @@ See [the Stack Loops guide](docs/guides/stack-loops.md) and [the v0.1 to v0.2 mi
 | `pice handoff` | Capture session state |
 | `pice status [feature-id]` | Inspect manifests; `--follow --stream-json` tails live updates |
 | `pice logs <feature-id>` | Inspect captured provider logs; `--follow --stream-json` tails live chunks |
+| `pice memory status/list/show/prune/delete` | Govern opt-in summary memory records |
 | `pice metrics` | Aggregate local quality metrics |
 | `pice benchmark` | Compare workflow effectiveness |
 | `pice layers detect/list/check/graph` | Manage layer configuration |
@@ -142,6 +143,8 @@ Project config lives in `.pice/config.toml`; Stack Loops behavior lives in `.pic
 
 `[provider].name` selects the primary developer for workflow commands such as `prime`, `plan`, `execute`, `review`, `commit`, and `handoff`. `[evaluation.primary]` and `[evaluation.adversarial]` select the evaluators used by `pice evaluate`; they are independent of the workflow provider.
 
+`[memory]` enables opt-in, summary-only project memory for workflow context. Recalled memory is injected only into `prime`, `plan`, and `execute`; `review`, `evaluate`, adversarial evaluation, and `commit` remain isolated.
+
 Claude-primary complete config:
 
 ```toml
@@ -173,6 +176,15 @@ db_path = ".pice/metrics.db"
 
 [init]
 project_type = "auto"
+
+[memory]
+enabled = false
+store = "project_learnings"
+max_recalled_items = 6
+max_tokens = 1200
+retention_days = 90
+write_after = ["execute", "handoff"]
+read_for = ["prime", "plan", "execute"]
 ```
 
 Codex-primary with dual-model evaluation complete config:
@@ -206,6 +218,15 @@ db_path = ".pice/metrics.db"
 
 [init]
 project_type = "auto"
+
+[memory]
+enabled = false
+store = "project_learnings"
+max_recalled_items = 6
+max_tokens = 1200
+retention_days = 90
+write_after = ["execute", "handoff"]
+read_for = ["prime", "plan", "execute"]
 ```
 
 Codex-primary workflow with Codex adversarial evaluation disabled complete config:
@@ -239,6 +260,15 @@ db_path = ".pice/metrics.db"
 
 [init]
 project_type = "auto"
+
+[memory]
+enabled = false
+store = "project_learnings"
+max_recalled_items = 6
+max_tokens = 1200
+retention_days = 90
+write_after = ["execute", "handoff"]
+read_for = ["prime", "plan", "execute"]
 ```
 
 Required environment variables depend on the providers you enable:
