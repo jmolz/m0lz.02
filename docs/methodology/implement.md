@@ -71,6 +71,11 @@ The configured workflow provider controls which guidance file is preferred.
 prefers `AGENTS.md`. If the preferred file is absent, PICE falls back to the other
 file so existing projects continue to work.
 
+If project memory is enabled, `execute` may also receive an approved memory brief.
+The daemon assembles that brief before provider startup from redacted summaries only.
+It never includes raw transcripts, raw diffs, secrets, or evaluation findings, and the
+approved plan and contract still override any recalled memory.
+
 The AI then works through the plan, using its tools to read files, write code, and
 run commands. The developer watches the streaming output and can intervene if needed.
 

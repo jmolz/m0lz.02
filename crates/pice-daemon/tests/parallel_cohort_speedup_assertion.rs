@@ -176,6 +176,7 @@ fn stub_pice_config() -> PiceConfig {
             db_path: ".pice/metrics.db".to_string(),
         },
         init: InitConfig::default(),
+        memory: pice_core::config::MemoryConfig::default(),
     }
 }
 

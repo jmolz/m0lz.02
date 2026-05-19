@@ -97,6 +97,7 @@ See the [brownfield guide](brownfield.md) for a detailed walkthrough.
 | `pice commit` | After every successful implementation |
 | `pice handoff` | When session is getting long |
 | `pice status` | Check active plans and evaluation state |
+| `pice memory status/list/show/prune/delete` | Inspect and govern opt-in summary memory |
 | `pice metrics` | View quality data across PICE loops |
 | `pice benchmark` | Before/after effectiveness comparison |
 

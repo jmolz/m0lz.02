@@ -29,8 +29,9 @@ use pice_core::config::{
     AdversarialConfig, EvalProviderConfig, EvaluationConfig, InitConfig, MetricsConfig, PiceConfig,
     ProviderConfig, TelemetryConfig, TiersConfig,
 };
-use pice_core::layers::manifest::LayerStatus;
+use pice_core::layers::manifest::{manifest_project_namespace, LayerStatus};
 use pice_core::layers::{LayerDef, LayersConfig, LayersTable};
+use pice_core::memory::MemoryStore;
 use pice_core::plan_parser::{ContractCriterion, PlanContract};
 use pice_core::workflow::schema::AdaptiveAlgo;
 use pice_core::workflow::WorkflowConfig;
@@ -45,6 +46,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::subscriber::DefaultGuard;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;
+
+const MEMORY_LEAK_SENTINEL: &str = "MEMORY_LEAK_SENTINEL_DO_NOT_INCLUDE";
 
 // ─── Env guard ─────────────────────────────────────────────────────────────
 //
@@ -119,10 +122,19 @@ impl Drop for ParallelStubGuard {
 
 struct RequestLogGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
+    previous_state_dir: Option<Option<std::ffi::OsString>>,
 }
 
 impl RequestLogGuard {
     fn new(log_path: &Path, per_layer_scores: &[(&str, &str)]) -> Self {
+        Self::new_with_state_dir(log_path, per_layer_scores, None)
+    }
+
+    fn new_with_state_dir(
+        log_path: &Path,
+        per_layer_scores: &[(&str, &str)],
+        state_dir: Option<&Path>,
+    ) -> Self {
         let guard = stub_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("PICE_STUB_REQUEST_LOG", log_path);
         for (layer, scores) in per_layer_scores {
@@ -130,7 +142,15 @@ impl RequestLogGuard {
             std::env::set_var(&key, scores);
         }
         std::env::remove_var("PICE_STUB_SCORES");
-        Self { _guard: guard }
+        let previous_state_dir = state_dir.map(|path| {
+            let previous = std::env::var_os("PICE_STATE_DIR");
+            std::env::set_var("PICE_STATE_DIR", path);
+            previous
+        });
+        Self {
+            _guard: guard,
+            previous_state_dir,
+        }
     }
 }
 
@@ -139,6 +159,13 @@ impl Drop for RequestLogGuard {
         std::env::remove_var("PICE_STUB_REQUEST_LOG");
         std::env::remove_var("PICE_STUB_SCORES_BACKEND");
         std::env::remove_var("PICE_STUB_SCORES_FRONTEND");
+        if let Some(previous) = self.previous_state_dir.take() {
+            if let Some(value) = previous {
+                std::env::set_var("PICE_STATE_DIR", value);
+            } else {
+                std::env::remove_var("PICE_STATE_DIR");
+            }
+        }
     }
 }
 
@@ -239,6 +266,22 @@ fn write_file(dir: &Path, rel: &str, content: &str) {
     std::fs::write(&full, content).unwrap();
 }
 
+fn write_private_memory_sentinel(project_root: &Path, state_dir: &Path) {
+    let project_hash = manifest_project_namespace(project_root);
+    let records_path = state_dir
+        .join(&project_hash)
+        .join("memory")
+        .join("records.jsonl");
+    std::fs::create_dir_all(records_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        records_path,
+        format!(
+            "{{\"id\":\"mem_stack_sentinel\",\"created_at\":\"2026-05-19T00:00:00Z\",\"source\":\"handoff_summary\",\"store\":\"private_state\",\"project_hash\":\"{project_hash}\",\"redaction_status\":\"clean\",\"title\":\"Stack memory sentinel\",\"body\":\"{MEMORY_LEAK_SENTINEL}\",\"tags\":[\"durable\"]}}\n"
+        ),
+    )
+    .unwrap();
+}
+
 /// Two-layer config with NO `depends_on` edge between them — they land in
 /// the same DAG cohort and are eligible for parallel execution.
 fn two_layer_independent_config() -> LayersConfig {
@@ -307,6 +350,7 @@ fn stub_pice_config() -> PiceConfig {
             db_path: ".pice/metrics.db".to_string(),
         },
         init: InitConfig::default(),
+        memory: pice_core::config::MemoryConfig::default(),
     }
 }
 
@@ -455,7 +499,11 @@ async fn parallel_layers_dont_leak_context() {
     let dir = tempfile::tempdir().unwrap();
     let plan_path = setup_two_layer_repo(dir.path());
     let layers = two_layer_independent_config();
-    let pice_config = stub_pice_config();
+    let mut pice_config = stub_pice_config();
+    pice_config.memory.enabled = true;
+    pice_config.memory.store = MemoryStore::PrivateState;
+    let state_dir = dir.path().join("state");
+    write_private_memory_sentinel(dir.path(), &state_dir);
     let wf = workflow(true, None, 1);
     let seams = BTreeMap::new();
     let cfg = make_cfg(&layers, &plan_path, dir.path(), &pice_config, &wf, &seams);
@@ -474,9 +522,10 @@ async fn parallel_layers_dont_leak_context() {
     );
 
     let log_path = dir.path().join("stub-requests.jsonl");
-    let _log = RequestLogGuard::new(
+    let _log = RequestLogGuard::new_with_state_dir(
         &log_path,
         &[("backend", "9.0,0.01"), ("frontend", "8.0,0.01")],
+        Some(&state_dir),
     );
 
     let _manifest = run_stack_loops_with_cancel(
@@ -553,6 +602,21 @@ async fn parallel_layers_dont_leak_context() {
         !frontend_diff.contains("src/server/main.rs"),
         "frontend diff MUST NOT include backend file path; got: {frontend_diff}",
     );
+
+    for entry in &entries {
+        let combined = format!(
+            "{} {} {}",
+            entry["contract"], entry["diff"], entry["claudeMd"]
+        );
+        assert!(
+            !combined.contains(MEMORY_LEAK_SENTINEL),
+            "Stack Loops layer payload leaked memory: {combined}"
+        );
+        assert!(
+            !combined.contains("Approved Project Memory"),
+            "Stack Loops layer payload included memory section: {combined}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

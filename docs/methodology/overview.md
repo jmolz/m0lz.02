@@ -42,6 +42,10 @@ single-model blind spots.
 The result is a workflow where every feature has a paper trail: what was planned, what
 was built, and how it scored against objective criteria.
 
+PICE also has optional summary memory for durable project lessons. It is off by
+default and, when enabled, is read only by selected workflow commands. It does not
+replace plans, contracts, manifests, git history, or evaluation records.
+
 ## The Four Phases
 
 ### Plan

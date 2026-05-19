@@ -89,6 +89,12 @@ decisions were made -- eliminating the independent judgment that evaluation requ
 PICE enforces this by running `pice plan` and `pice execute` as separate commands,
 each of which creates and destroys its own provider session.
 
+When `[memory].enabled = true`, `pice plan` may receive a bounded, summary-only
+memory brief from prior `execute` and `handoff` runs. That brief is advisory: it can
+remind the planner about durable project lessons, but it is not a source of new
+requirements. The plan's `## Spec Traceability` section and embedded contract remain
+the only durable mechanism that binds implementation and evaluation to the request.
+
 ## Example Plan Structure
 
 ````markdown

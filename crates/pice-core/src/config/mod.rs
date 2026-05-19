@@ -4,8 +4,10 @@
 //! Both `pice-cli` (config preview + validation) and `pice-daemon` (config
 //! loading at daemon startup) depend on this module.
 
+use crate::memory::{MemoryConsumer, MemoryPolicy, MemoryStore, MemoryWriter};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Top-level PICE configuration (`.pice/config.toml`).
@@ -17,6 +19,8 @@ pub struct PiceConfig {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub init: InitConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +74,49 @@ pub struct InitConfig {
     pub project_type: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub store: MemoryStore,
+    #[serde(default = "default_max_recalled_items")]
+    pub max_recalled_items: usize,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u32,
+    #[serde(default = "default_write_after")]
+    pub write_after: Vec<MemoryConsumer>,
+    #[serde(default = "default_read_for")]
+    pub read_for: Vec<MemoryConsumer>,
+}
+
+fn default_max_recalled_items() -> usize {
+    6
+}
+
+fn default_max_tokens() -> usize {
+    1200
+}
+
+fn default_retention_days() -> u32 {
+    90
+}
+
+fn default_write_after() -> Vec<MemoryConsumer> {
+    vec![MemoryConsumer::Execute, MemoryConsumer::Handoff]
+}
+
+fn default_read_for() -> Vec<MemoryConsumer> {
+    vec![
+        MemoryConsumer::Prime,
+        MemoryConsumer::Plan,
+        MemoryConsumer::Execute,
+    ]
+}
+
 fn default_project_type() -> String {
     "auto".to_string()
 }
@@ -78,6 +125,74 @@ impl Default for InitConfig {
     fn default() -> Self {
         Self {
             project_type: default_project_type(),
+        }
+    }
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            store: MemoryStore::ProjectLearnings,
+            max_recalled_items: default_max_recalled_items(),
+            max_tokens: default_max_tokens(),
+            retention_days: default_retention_days(),
+            write_after: default_write_after(),
+            read_for: default_read_for(),
+        }
+    }
+}
+
+impl MemoryConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.max_recalled_items > 20 {
+            anyhow::bail!("memory.max_recalled_items must be between 0 and 20");
+        }
+        if self.max_tokens > 4000 {
+            anyhow::bail!("memory.max_tokens must be between 0 and 4000");
+        }
+        if self.retention_days > 3650 {
+            anyhow::bail!("memory.retention_days must be 0 or between 1 and 3650");
+        }
+        for consumer in &self.read_for {
+            if !matches!(
+                consumer,
+                MemoryConsumer::Prime | MemoryConsumer::Plan | MemoryConsumer::Execute
+            ) {
+                anyhow::bail!(
+                    "memory.read_for may include only prime, plan, and execute (got {})",
+                    consumer.as_str()
+                );
+            }
+        }
+        for consumer in &self.write_after {
+            if !matches!(consumer, MemoryConsumer::Execute | MemoryConsumer::Handoff) {
+                anyhow::bail!(
+                    "memory.write_after may include only execute and handoff (got {})",
+                    consumer.as_str()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn policy(&self) -> MemoryPolicy {
+        let allowed_readers: BTreeSet<_> = self.read_for.iter().copied().collect();
+        let allowed_writers: BTreeSet<_> = self
+            .write_after
+            .iter()
+            .filter_map(|consumer| match consumer {
+                MemoryConsumer::Execute => Some(MemoryWriter::ExecuteSummary),
+                MemoryConsumer::Handoff => Some(MemoryWriter::HandoffSummary),
+                _ => None,
+            })
+            .collect();
+        MemoryPolicy {
+            enabled: self.enabled,
+            allowed_readers,
+            allowed_writers,
+            max_recalled_items: self.max_recalled_items,
+            max_tokens: self.max_tokens,
         }
     }
 }
@@ -114,6 +229,7 @@ impl Default for PiceConfig {
                 db_path: ".pice/metrics.db".to_string(),
             },
             init: InitConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }
@@ -124,7 +240,12 @@ impl PiceConfig {
             .with_context(|| format!("failed to read config from {}", path.display()))?;
         let config: PiceConfig = toml::from_str(&content)
             .with_context(|| format!("failed to parse config from {}", path.display()))?;
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.memory.validate()
     }
 
     /// Save is used by future config-editing commands (Phase 3+).
@@ -155,6 +276,8 @@ mod tests {
         assert!(config.evaluation.adversarial.enabled);
         assert!(!config.telemetry.enabled);
         assert_eq!(config.init.project_type, "auto");
+        assert!(!config.memory.enabled);
+        assert_eq!(config.memory.max_recalled_items, 6);
     }
 
     #[test]
@@ -168,6 +291,7 @@ mod tests {
             config.evaluation.primary.model
         );
         assert_eq!(parsed.evaluation.tiers.tier2_models.len(), 2);
+        assert_eq!(parsed.memory.store, MemoryStore::ProjectLearnings);
     }
 
     #[test]
@@ -181,6 +305,7 @@ mod tests {
         let loaded = PiceConfig::load(&path).unwrap();
         assert_eq!(loaded.provider.name, "claude-code");
         assert_eq!(loaded.evaluation.adversarial.effort, "high");
+        assert!(!loaded.memory.enabled);
     }
 
     #[test]
@@ -196,6 +321,99 @@ mod tests {
         std::fs::write(&path, "this is not valid toml [[[").unwrap();
         let result = PiceConfig::load(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn old_config_without_memory_section_parses() {
+        let content = r#"
+[provider]
+name = "claude-code"
+[evaluation.primary]
+provider = "claude-code"
+model = "claude-opus-4-6"
+[evaluation.adversarial]
+provider = "codex"
+model = "gpt-5.5"
+effort = "high"
+enabled = true
+[evaluation.tiers]
+tier1_models = ["claude-opus-4-6"]
+tier2_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_agent_team = true
+[telemetry]
+enabled = false
+endpoint = "https://telemetry.pice.dev/v1/events"
+[metrics]
+db_path = ".pice/metrics.db"
+"#;
+        let parsed: PiceConfig = toml::from_str(content).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.memory.store, MemoryStore::ProjectLearnings);
+    }
+
+    #[test]
+    fn memory_config_rejects_unknown_keys() {
+        let content = r#"
+[provider]
+name = "claude-code"
+[evaluation.primary]
+provider = "claude-code"
+model = "claude-opus-4-6"
+[evaluation.adversarial]
+provider = "codex"
+model = "gpt-5.5"
+effort = "high"
+enabled = true
+[evaluation.tiers]
+tier1_models = ["claude-opus-4-6"]
+tier2_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_models = ["claude-opus-4-6", "gpt-5.5"]
+tier3_agent_team = true
+[telemetry]
+enabled = false
+endpoint = "https://telemetry.pice.dev/v1/events"
+[metrics]
+db_path = ".pice/metrics.db"
+[memory]
+enabled = true
+private_state = true
+"#;
+        let err = toml::from_str::<PiceConfig>(content).unwrap_err();
+        assert!(err.to_string().contains("private_state"));
+    }
+
+    #[test]
+    fn memory_policy_hard_denies_misconfigured_readers() {
+        let cfg = MemoryConfig {
+            enabled: true,
+            read_for: vec![
+                MemoryConsumer::Prime,
+                MemoryConsumer::Evaluate,
+                MemoryConsumer::Commit,
+            ],
+            ..MemoryConfig::default()
+        };
+        let policy = cfg.policy();
+        assert!(policy.can_read(MemoryConsumer::Prime));
+        assert!(!policy.can_read(MemoryConsumer::Evaluate));
+        assert!(!policy.can_read(MemoryConsumer::Commit));
+    }
+
+    #[test]
+    fn memory_config_bounds_are_validated() {
+        let mut cfg = MemoryConfig {
+            max_tokens: 4001,
+            ..MemoryConfig::default()
+        };
+        assert!(cfg
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_tokens"));
+        cfg.max_tokens = 1200;
+        cfg.read_for = vec![MemoryConsumer::Review];
+        assert!(cfg.validate().unwrap_err().to_string().contains("read_for"));
     }
 
     #[test]

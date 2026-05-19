@@ -13,6 +13,12 @@ use super::background::{
     transition_queued_to_in_progress, BackgroundDispatchInputs, PlanDispatchSnapshot,
 };
 use super::to_shared_sink;
+use crate::memory::recall::{build_memory_recall, record_read_metrics, MemoryReadMetrics};
+use crate::memory::recorder::{
+    deterministic_execute_summary, record_write_metrics, MemoryWriteOutcome, SessionMemoryRecorder,
+    SessionRunContext,
+};
+use crate::memory::store::MemoryPaths;
 use crate::orchestrator::session::{self, streaming_handler};
 use crate::orchestrator::{ProviderOrchestrator, StreamSink};
 use crate::prompt::builders;
@@ -103,6 +109,17 @@ struct PreparedExecutePlan {
     trace: PlanTrace,
 }
 
+struct ExecuteMemoryWrite<'a> {
+    project_root: &'a std::path::Path,
+    provider_name: &'a str,
+    memory_config: &'a pice_core::config::MemoryConfig,
+    feature_id: Option<String>,
+    plan_path: Option<std::path::PathBuf>,
+    trace: Option<&'a PlanTrace>,
+    title: &'a str,
+    body: &'a str,
+}
+
 fn plan_not_found_response(plan_path: &std::path::Path, json_mode: bool) -> CommandResponse {
     if json_mode {
         return CommandResponse::ExitJson {
@@ -183,6 +200,35 @@ fn load_execute_plan(
     Ok(Ok(PreparedExecutePlan { plan, trace }))
 }
 
+fn maybe_record_execute_memory(input: ExecuteMemoryWrite<'_>) -> Result<()> {
+    let writer = pice_core::memory::MemoryWriter::ExecuteSummary;
+    let recorder = SessionMemoryRecorder::new(input.memory_config);
+    if recorder.preflight_write(writer).is_some() {
+        return Ok(());
+    }
+
+    let run_ctx = SessionRunContext::foreground(
+        input.project_root,
+        input.provider_name,
+        pice_core::memory::MemoryConsumer::Execute,
+        input.feature_id,
+        input.plan_path,
+        input.trace,
+    )?;
+    let write_result = recorder.record_summary(
+        &run_ctx,
+        writer,
+        input.title,
+        input.body,
+        vec!["execute".to_string(), "summary".to_string()],
+    )?;
+    record_write_metrics(input.project_root, &run_ctx, writer, &write_result);
+    if matches!(write_result, MemoryWriteOutcome::Rejected { .. }) {
+        tracing::warn!("execute memory write rejected: {write_result:?}");
+    }
+    Ok(())
+}
+
 pub async fn run(
     req: ExecuteRequest,
     ctx: &DaemonContext,
@@ -215,9 +261,51 @@ pub async fn run(
         Ok(prepared) => prepared,
         Err(resp) => return Ok(resp),
     };
+    let trace = prepared.trace;
     let plan = prepared.plan;
-    let prompt =
-        builders::build_execute_prompt(&plan.content, project_root, &config.provider.name)?;
+    let feature_id = feature_id_from_plan_path(&plan_path);
+    let relative_plan_path = plan_path
+        .strip_prefix(project_root)
+        .unwrap_or(&plan_path)
+        .to_string_lossy()
+        .to_string();
+    let memory = if config
+        .memory
+        .policy()
+        .can_read(pice_core::memory::MemoryConsumer::Execute)
+    {
+        let state_dir = pice_core::layers::manifest::VerificationManifest::state_dir()?;
+        let paths = MemoryPaths::new(project_root, &state_dir);
+        let recall = build_memory_recall(
+            &paths,
+            &config.memory,
+            pice_core::memory::MemoryConsumer::Execute,
+            Some(&feature_id),
+            Some(&relative_plan_path),
+            &chrono::Utc::now().to_rfc3339(),
+        )?;
+        record_read_metrics(
+            project_root,
+            &paths,
+            MemoryReadMetrics {
+                consumer: pice_core::memory::MemoryConsumer::Execute,
+                feature_id: Some(&feature_id),
+                plan_path: Some(&relative_plan_path),
+                run_id: None,
+                brief: recall.brief.as_ref(),
+                warning: recall.warning,
+            },
+        );
+        recall.brief
+    } else {
+        None
+    };
+    let prompt = builders::build_execute_prompt(
+        &plan.content,
+        project_root,
+        &config.provider.name,
+        memory.as_ref(),
+    )?;
 
     let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, config).await?;
     if !req.json {
@@ -229,6 +317,18 @@ pub async fn run(
     let result = session::run_session(&mut orchestrator, project_root, prompt).await;
     orchestrator.shutdown().await.ok();
     result?;
+
+    let (title, body) = deterministic_execute_summary(&plan.title, &plan_path);
+    maybe_record_execute_memory(ExecuteMemoryWrite {
+        project_root,
+        provider_name: &config.provider.name,
+        memory_config: &config.memory,
+        feature_id: Some(feature_id),
+        plan_path: Some(plan_path.clone()),
+        trace: Some(&trace),
+        title: &title,
+        body: &body,
+    })?;
 
     if req.json {
         Ok(CommandResponse::Json {
@@ -301,8 +401,11 @@ async fn run_background(
             // dispatch helper before admission can drift.
             let run_outcome = run_execute_session(
                 &args.plan_content,
+                args.plan_path.as_path(),
+                args.plan_trace.as_ref(),
                 &config_owned,
                 args.env.project_root.as_path(),
+                args.env.state_dir.as_path(),
                 &logs_for_spawn,
                 &args.feature_id,
                 &args.run_id,
@@ -365,10 +468,14 @@ async fn run_background(
 /// Run a single `pice execute` provider session, routing chunks into
 /// the daemon's [`LogStore`] so `pice logs --follow <feature>` can
 /// replay them. Returns `Ok(())` on success.
+#[allow(clippy::too_many_arguments)]
 async fn run_execute_session(
     plan_content: &str,
+    plan_path: &std::path::Path,
+    plan_trace: Option<&PlanTrace>,
     config: &pice_core::config::PiceConfig,
     project_root: &std::path::Path,
+    state_dir: &std::path::Path,
     logs: &crate::logs::LogStore,
     feature_id: &str,
     run_id: &str,
@@ -381,7 +488,47 @@ async fn run_execute_session(
         anyhow::bail!("cancelled before provider startup");
     }
 
-    let prompt = builders::build_execute_prompt(plan_content, project_root, &config.provider.name)?;
+    let relative_plan_path = plan_path
+        .strip_prefix(project_root)
+        .unwrap_or(plan_path)
+        .to_string_lossy()
+        .to_string();
+    let memory = if config
+        .memory
+        .policy()
+        .can_read(pice_core::memory::MemoryConsumer::Execute)
+    {
+        let paths = MemoryPaths::new(project_root, state_dir);
+        let recall = build_memory_recall(
+            &paths,
+            &config.memory,
+            pice_core::memory::MemoryConsumer::Execute,
+            Some(feature_id),
+            Some(&relative_plan_path),
+            &chrono::Utc::now().to_rfc3339(),
+        )?;
+        record_read_metrics(
+            project_root,
+            &paths,
+            MemoryReadMetrics {
+                consumer: pice_core::memory::MemoryConsumer::Execute,
+                feature_id: Some(feature_id),
+                plan_path: Some(&relative_plan_path),
+                run_id: Some(run_id),
+                brief: recall.brief.as_ref(),
+                warning: recall.warning,
+            },
+        );
+        recall.brief
+    } else {
+        None
+    };
+    let prompt = builders::build_execute_prompt(
+        plan_content,
+        project_root,
+        &config.provider.name,
+        memory.as_ref(),
+    )?;
 
     let mut orchestrator = ProviderOrchestrator::start(&config.provider.name, config).await?;
 
@@ -405,5 +552,34 @@ async fn run_execute_session(
     };
     orchestrator.shutdown().await.ok();
     log_sink.flush().await;
-    result
+    result?;
+
+    let (title, body) = deterministic_execute_summary("background execute", plan_path);
+    let recorder = SessionMemoryRecorder::new(&config.memory);
+    let writer = pice_core::memory::MemoryWriter::ExecuteSummary;
+    if recorder.preflight_write(writer).is_some() {
+        return Ok(());
+    }
+    let run_ctx = SessionRunContext::with_state_dir(
+        project_root,
+        state_dir,
+        &config.provider.name,
+        pice_core::memory::MemoryConsumer::Execute,
+        Some(feature_id.to_string()),
+        Some(plan_path.to_path_buf()),
+        plan_trace,
+        run_id.to_string(),
+    );
+    let write_result = recorder.record_summary(
+        &run_ctx,
+        writer,
+        &title,
+        &body,
+        vec!["execute".to_string(), "summary".to_string()],
+    )?;
+    record_write_metrics(project_root, &run_ctx, writer, &write_result);
+    if matches!(write_result, MemoryWriteOutcome::Rejected { .. }) {
+        tracing::warn!("background execute memory write rejected: {write_result:?}");
+    }
+    Ok(())
 }

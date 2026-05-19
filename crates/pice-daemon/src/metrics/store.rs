@@ -1560,6 +1560,52 @@ pub(crate) fn canonicalize_rfc3339(s: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MemoryEventRow<'a> {
+    pub event_type: &'a str,
+    pub record_id: Option<&'a str>,
+    pub project_hash: &'a str,
+    pub plan_path: Option<&'a str>,
+    pub feature_id: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub command: Option<&'a str>,
+    pub consumer: Option<&'a str>,
+    pub writer: Option<&'a str>,
+    pub estimated_tokens: Option<usize>,
+    pub result: &'a str,
+    pub details_json: Option<&'a str>,
+}
+
+/// Insert a memory metadata event. Natural-language memory content must not be
+/// stored in `details_json`; callers pass only IDs, counts, config, or reasons.
+pub fn insert_memory_event(db: &MetricsDb, row: &MemoryEventRow<'_>) -> Result<i64> {
+    let created_at = canonicalize_rfc3339(&chrono::Utc::now().to_rfc3339());
+    db.conn()
+        .execute(
+            "INSERT INTO memory_events (created_at, event_type, record_id, project_hash, \
+             plan_path, feature_id, run_id, command, consumer, writer, estimated_tokens, \
+             result, details_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            rusqlite::params![
+                created_at,
+                row.event_type,
+                row.record_id,
+                row.project_hash,
+                row.plan_path,
+                row.feature_id,
+                row.run_id,
+                row.command,
+                row.consumer,
+                row.writer,
+                row.estimated_tokens.map(|v| v as i64),
+                row.result,
+                row.details_json,
+            ],
+        )
+        .context("failed to insert memory event")?;
+    Ok(db.conn().last_insert_rowid())
+}
+
 /// Insert a gate_decisions row. The `UNIQUE(gate_id)` constraint turns
 /// a concurrent double-decide into a typed `DuplicateGateId` error at
 /// the first SQLite call — no in-process CAS needed. Timestamps are

@@ -56,6 +56,8 @@ pub enum CommandRequest {
     /// First subcommand is `Gates`; additional audit surfaces (e.g.,
     /// `Seams`) can extend the enum without a new RPC variant.
     Audit(AuditRequest),
+    /// PICE-native summary-memory governance commands.
+    Memory(MemoryRequest),
     // NOTE: Completions is handled entirely by clap at the CLI layer.
     // NOTE: Daemon subcommand (start/stop/etc.) is also CLI-only.
 }
@@ -743,6 +745,36 @@ pub enum AuditSubcommand {
     },
 }
 
+/// Top-level wire struct for `pice memory`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryRequest {
+    pub subcommand: MemorySubcommand,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum MemorySubcommand {
+    Status,
+    List {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feature: Option<String>,
+    },
+    Show {
+        record_id: String,
+    },
+    Prune {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+    },
+    Delete {
+        record_id: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1392,6 +1424,34 @@ mod tests {
                 }
             },
             _ => panic!("expected Audit"),
+        }
+    }
+
+    #[test]
+    fn memory_request_roundtrip() {
+        let req = CommandRequest::Memory(MemoryRequest {
+            json: true,
+            subcommand: MemorySubcommand::List {
+                limit: Some(5),
+                feature: Some("feat".to_string()),
+            },
+        });
+        let wire = serde_json::to_string(&req).unwrap();
+        assert!(wire.contains("\"command\":\"memory\""));
+        assert!(wire.contains("\"action\":\"list\""));
+        let parsed: CommandRequest = serde_json::from_str(&wire).unwrap();
+        match parsed {
+            CommandRequest::Memory(r) => {
+                assert!(r.json);
+                match r.subcommand {
+                    MemorySubcommand::List { limit, feature } => {
+                        assert_eq!(limit, Some(5));
+                        assert_eq!(feature.as_deref(), Some("feat"));
+                    }
+                    _ => panic!("expected list"),
+                }
+            }
+            _ => panic!("expected memory"),
         }
     }
 

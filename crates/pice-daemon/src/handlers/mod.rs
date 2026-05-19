@@ -34,6 +34,7 @@ pub mod handoff;
 pub mod init;
 pub mod layers;
 pub mod logs;
+pub mod memory;
 pub mod metrics;
 pub mod plan;
 pub mod prime;
@@ -113,6 +114,7 @@ pub async fn dispatch(
         CommandRequest::ReviewGate(r) => review_gate::run(r, ctx, sink).await,
         CommandRequest::Audit(r) => audit::run(r, ctx, sink).await,
         CommandRequest::Logs(r) => logs::run(r, ctx, sink).await,
+        CommandRequest::Memory(r) => memory::run(r, ctx, sink).await,
     }
 }
 

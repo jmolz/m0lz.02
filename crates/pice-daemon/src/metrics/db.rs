@@ -113,6 +113,9 @@ impl MetricsDb {
         if current < 5 {
             self.migrate_v5()?;
         }
+        if current < 6 {
+            self.migrate_v6()?;
+        }
         Ok(())
     }
 
@@ -446,6 +449,70 @@ impl MetricsDb {
         }
     }
 
+    /// PICE-native summary memory metadata events. The table stores only
+    /// machine metadata; natural-language memory bodies live in the memory
+    /// stores and never in metrics.
+    fn migrate_v6(&self) -> Result<()> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .context("failed to begin migrate_v6 transaction")?;
+
+        let result = (|| -> Result<()> {
+            let current = self.current_schema_version()?;
+            if current >= 6 {
+                return Ok(());
+            }
+            self.conn
+                .execute_batch(
+                    "
+            CREATE TABLE IF NOT EXISTS memory_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                event_type TEXT NOT NULL CHECK(event_type IN
+                    ('memory_read','memory_write','memory_write_rejected','memory_prune','memory_delete')),
+                record_id TEXT,
+                project_hash TEXT NOT NULL,
+                plan_path TEXT,
+                feature_id TEXT,
+                run_id TEXT,
+                command TEXT,
+                consumer TEXT CHECK(consumer IS NULL OR consumer IN
+                    ('prime','plan','execute')),
+                writer TEXT CHECK(writer IS NULL OR writer IN
+                    ('execute_summary','handoff_summary','operator_note')),
+                estimated_tokens INTEGER CHECK(estimated_tokens IS NULL OR estimated_tokens >= 0),
+                result TEXT NOT NULL CHECK(result IN ('ok','rejected','warning','error')),
+                details_json TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_memory_events_project_created
+                ON memory_events(project_hash, created_at);
+            CREATE INDEX IF NOT EXISTS idx_memory_events_record
+                ON memory_events(record_id);
+            CREATE INDEX IF NOT EXISTS idx_memory_events_feature_plan
+                ON memory_events(feature_id, plan_path);
+
+            INSERT INTO schema_version (version) VALUES (6);
+            ",
+                )
+                .context("failed to run v6 migration")?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                self.conn
+                    .execute_batch("COMMIT")
+                    .context("failed to commit migrate_v6 transaction")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
+    }
+
     /// Phase 3 — create the `seam_findings` table with CHECK constraints
     /// and FK-cascade on `evaluations`. Idempotent via `IF NOT EXISTS`.
     fn migrate_v2(&self) -> Result<()> {
@@ -499,6 +566,7 @@ mod tests {
         assert!(tables.contains(&"telemetry_queue".to_string()));
         assert!(tables.contains(&"schema_version".to_string()));
         assert!(tables.contains(&"layer_runs".to_string()));
+        assert!(tables.contains(&"memory_events".to_string()));
     }
 
     #[test]
@@ -529,18 +597,18 @@ mod tests {
     fn migration_is_idempotent() {
         let db = MetricsDb::open_in_memory().unwrap();
         let v = db.current_schema_version().unwrap();
-        assert_eq!(v, 5);
+        assert_eq!(v, 6);
 
         // Running init again should not fail or duplicate version rows
         db.init().unwrap();
         let v_again = db.current_schema_version().unwrap();
-        assert_eq!(v_again, 5);
+        assert_eq!(v_again, 6);
     }
 
     #[test]
     fn schema_version_matches_current() {
         let db = MetricsDb::open_in_memory().unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
     }
 
     #[test]
@@ -558,6 +626,27 @@ mod tests {
     }
 
     #[test]
+    fn memory_events_table_has_checks_and_indexes() {
+        let db = MetricsDb::open_in_memory().unwrap();
+        let count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_events'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let bad = db.conn().execute(
+            "INSERT INTO memory_events (created_at, event_type, project_hash, result) \
+             VALUES ('2026-05-19T00:00:00Z','memory_body','abc','ok')",
+            [],
+        );
+        assert!(bad.is_err());
+    }
+
+    #[test]
     fn open_file_db_creates_and_reopens() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("metrics.db");
@@ -570,7 +659,7 @@ mod tests {
 
         // Reopen
         let db = MetricsDb::open(&db_path).unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
     }
 
     #[test]
@@ -725,24 +814,24 @@ mod tests {
     }
 
     /// Re-running `init()` on a current-version database is a no-op:
-    /// schema_version stays at 5, no duplicate columns are added, and
+    /// schema_version stays current, no duplicate columns are added, and
     /// `pass_events` + `gate_decisions` still exist.
     #[test]
     fn migrate_v3_is_idempotent() {
         let db = MetricsDb::open_in_memory().unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
 
         // `init()` gates at `if current < N` so it's a proper no-op.
         db.init().unwrap();
         db.init().unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
 
-        // The gated version rows are: 1, 2, 3, 4, 5 — one per migration, no dupes.
+        // The gated version rows are: 1, 2, 3, 4, 5, 6 — one per migration, no dupes.
         let rows: i64 = db
             .conn()
             .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 5, "init should never duplicate version rows");
+        assert_eq!(rows, 6, "init should never duplicate version rows");
 
         // Adaptive columns still exist exactly once (no ALTER ... duplicate error).
         let passes_used_count: i64 = db
@@ -779,7 +868,7 @@ mod tests {
 
         // Open via the public API — should run v2, v3 AND v4 migrations.
         let db = MetricsDb::open(&db_path).unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
 
         // All v3/v4 artifacts present.
         let tables: Vec<String> = db
@@ -816,7 +905,7 @@ mod tests {
         }
 
         let db = MetricsDb::open(&db_path).unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
 
         // v2 seam_findings must still be there and still accepting inserts.
         db.conn()
@@ -1044,7 +1133,7 @@ mod tests {
         // are present exactly once, and `pass_events` + `gate_decisions`
         // tables exist.
         let db = MetricsDb::open(&db_path).unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
 
         let cols: Vec<String> = db
             .conn()
@@ -1173,7 +1262,7 @@ mod tests {
             assert_eq!(stub.current_schema_version().unwrap(), 3);
         }
         let db = MetricsDb::open(&db_path).unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
 
         let tables: Vec<String> = db
             .conn()
@@ -1248,7 +1337,7 @@ mod tests {
         let db_path = dir.path().join("idem.db");
         let _ = MetricsDb::open(&db_path).unwrap();
         let db = MetricsDb::open(&db_path).unwrap();
-        assert_eq!(db.current_schema_version().unwrap(), 5);
+        assert_eq!(db.current_schema_version().unwrap(), 6);
         let v4_rows: i64 = db
             .conn()
             .query_row(

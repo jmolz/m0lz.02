@@ -5,6 +5,10 @@ use pice_core::cli::{CommandResponse, HandoffRequest};
 use serde_json::json;
 
 use super::to_shared_sink;
+use crate::memory::recorder::{
+    handoff_summary_from_capture, record_write_metrics, MemoryWriteOutcome, SessionMemoryRecorder,
+    SessionRunContext,
+};
 use crate::orchestrator::session;
 use crate::orchestrator::{NullSink, ProviderOrchestrator, SharedSink, StreamSink};
 use crate::prompt::builders;
@@ -49,6 +53,31 @@ pub async fn run(
         .unwrap_or_else(|| project_root.join("HANDOFF.md"));
 
     std::fs::write(&output_path, &handoff_content)?;
+
+    let (title, body) = handoff_summary_from_capture(&handoff_content);
+    let writer = pice_core::memory::MemoryWriter::HandoffSummary;
+    let recorder = SessionMemoryRecorder::new(&config.memory);
+    if recorder.preflight_write(writer).is_none() {
+        let run_ctx = SessionRunContext::foreground(
+            project_root,
+            &config.provider.name,
+            pice_core::memory::MemoryConsumer::Handoff,
+            None,
+            None,
+            None,
+        )?;
+        let write_result = recorder.record_summary(
+            &run_ctx,
+            writer,
+            &title,
+            &body,
+            vec!["handoff".to_string(), "summary".to_string()],
+        )?;
+        record_write_metrics(project_root, &run_ctx, writer, &write_result);
+        if matches!(write_result, MemoryWriteOutcome::Rejected { .. }) {
+            tracing::warn!("handoff memory write rejected: {write_result:?}");
+        }
+    }
 
     let relative_path = output_path
         .strip_prefix(project_root)

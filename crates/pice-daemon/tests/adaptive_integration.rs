@@ -27,8 +27,9 @@ use pice_core::config::{
     ProviderConfig, TelemetryConfig, TiersConfig,
 };
 use pice_core::events::ManifestEvent;
-use pice_core::layers::manifest::{LayerStatus, ManifestStatus};
+use pice_core::layers::manifest::{manifest_project_namespace, LayerStatus, ManifestStatus};
 use pice_core::layers::{LayerDef, LayersConfig, LayersTable};
+use pice_core::memory::MemoryStore;
 use pice_core::workflow::schema::{AdaptiveAlgo, OnTimeout, ReviewConfig};
 use pice_core::workflow::WorkflowConfig;
 use pice_daemon::events::{EventBus, EventEmittingSaver};
@@ -37,6 +38,8 @@ use pice_daemon::orchestrator::{NullPassSink, NullSink, RecordingPassSink};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+
+const MEMORY_LEAK_SENTINEL: &str = "MEMORY_LEAK_SENTINEL_DO_NOT_INCLUDE";
 
 /// Serializes access to `PICE_STUB_SCORES`. The variable is process-wide, so
 /// parallel tests would race on get/set. Each test acquires this guard once
@@ -73,10 +76,20 @@ impl Drop for StubScoresGuard {
 /// tests can't race on `PICE_STUB_*` vars.
 struct StubAdtsGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
+    previous_state_dir: Option<Option<std::ffi::OsString>>,
 }
 
 impl StubAdtsGuard {
     fn new(primary_scores: &str, adversarial_scores: &str, request_log: Option<&Path>) -> Self {
+        Self::new_with_state_dir(primary_scores, adversarial_scores, request_log, None)
+    }
+
+    fn new_with_state_dir(
+        primary_scores: &str,
+        adversarial_scores: &str,
+        request_log: Option<&Path>,
+        state_dir: Option<&Path>,
+    ) -> Self {
         let guard = stub_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("PICE_STUB_SCORES", primary_scores);
         std::env::set_var("PICE_STUB_ADVERSARIAL_SCORES", adversarial_scores);
@@ -85,7 +98,15 @@ impl StubAdtsGuard {
         } else {
             std::env::remove_var("PICE_STUB_REQUEST_LOG");
         }
-        Self { _guard: guard }
+        let previous_state_dir = state_dir.map(|path| {
+            let previous = std::env::var_os("PICE_STATE_DIR");
+            std::env::set_var("PICE_STATE_DIR", path);
+            previous
+        });
+        Self {
+            _guard: guard,
+            previous_state_dir,
+        }
     }
 }
 
@@ -94,6 +115,13 @@ impl Drop for StubAdtsGuard {
         std::env::remove_var("PICE_STUB_SCORES");
         std::env::remove_var("PICE_STUB_ADVERSARIAL_SCORES");
         std::env::remove_var("PICE_STUB_REQUEST_LOG");
+        if let Some(previous) = self.previous_state_dir.take() {
+            if let Some(value) = previous {
+                std::env::set_var("PICE_STATE_DIR", value);
+            } else {
+                std::env::remove_var("PICE_STATE_DIR");
+            }
+        }
     }
 }
 
@@ -263,6 +291,22 @@ fn write_file(dir: &Path, rel: &str, content: &str) {
     std::fs::write(&full, content).unwrap();
 }
 
+fn write_private_memory_sentinel(project_root: &Path, state_dir: &Path) {
+    let project_hash = manifest_project_namespace(project_root);
+    let records_path = state_dir
+        .join(&project_hash)
+        .join("memory")
+        .join("records.jsonl");
+    std::fs::create_dir_all(records_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        records_path,
+        format!(
+            "{{\"id\":\"mem_adaptive_sentinel\",\"created_at\":\"2026-05-19T00:00:00Z\",\"source\":\"handoff_summary\",\"store\":\"private_state\",\"project_hash\":\"{project_hash}\",\"redaction_status\":\"clean\",\"title\":\"Adaptive memory sentinel\",\"body\":\"{MEMORY_LEAK_SENTINEL}\",\"tags\":[\"durable\"]}}\n"
+        ),
+    )
+    .unwrap();
+}
+
 /// Single-layer LayersConfig — `backend` covering `src/**`. Used by every
 /// adaptive test except the ADTS one (which still uses backend, just with a
 /// dual-provider config).
@@ -323,6 +367,7 @@ fn stub_pice_config(adversarial_enabled: bool) -> PiceConfig {
             db_path: ".pice/metrics.db".to_string(),
         },
         init: InitConfig::default(),
+        memory: pice_core::config::MemoryConfig::default(),
     }
 }
 
@@ -1097,7 +1142,11 @@ async fn prompt_identical_across_passes() {
     let dir = tempfile::tempdir().unwrap();
     let plan_path = setup_minimal_repo(dir.path());
     let layers = single_layer_config();
-    let pice_config = stub_pice_config(false);
+    let mut pice_config = stub_pice_config(false);
+    pice_config.memory.enabled = true;
+    pice_config.memory.store = MemoryStore::PrivateState;
+    let state_dir = dir.path().join("state");
+    write_private_memory_sentinel(dir.path(), &state_dir);
     // Use AdaptiveAlgo::None with max_passes=3 so no SPRT/VEC halt intervenes
     // — the loop runs every pass up to max_passes, giving us 3 request
     // captures to compare against each other.
@@ -1113,12 +1162,13 @@ async fn prompt_identical_across_passes() {
     );
 
     let log_path = dir.path().join("stub-requests.log");
-    let _stub = StubAdtsGuard::new(
+    let _stub = StubAdtsGuard::new_with_state_dir(
         "9.5,0.001;9.5,0.001;9.5,0.001",
         // Adversarial list is unused (adversarial disabled) — set to match
         // primary to avoid confusing a future reader.
         "9.5,0.001;9.5,0.001;9.5,0.001",
         Some(&log_path),
+        Some(&state_dir),
     );
 
     let sink: std::sync::Arc<dyn pice_daemon::orchestrator::PassMetricsSink> =
@@ -1179,6 +1229,14 @@ async fn prompt_identical_across_passes() {
         assert!(
             !combined.contains("Stub evaluation complete"),
             "pass {i}: prior-pass summary leaked into this pass's payload"
+        );
+        assert!(
+            !combined.contains(MEMORY_LEAK_SENTINEL),
+            "pass {i}: memory leaked into adaptive payload"
+        );
+        assert!(
+            !combined.contains("Approved Project Memory"),
+            "pass {i}: memory section leaked into adaptive payload"
         );
     }
 }
