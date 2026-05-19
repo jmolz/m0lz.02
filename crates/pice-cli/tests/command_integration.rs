@@ -18,6 +18,18 @@ fn pice_cmd() -> Command {
     cmd
 }
 
+fn project_root_for_test_namespace(dir: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        dir.to_path_buf()
+    }
+
+    #[cfg(not(windows))]
+    {
+        dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
+    }
+}
+
 fn enable_project_memory_with_sentinel(dir: &std::path::Path) {
     let config_path = dir.join(".pice/config.toml");
     let mut config = fs::read_to_string(&config_path).unwrap();
@@ -62,7 +74,7 @@ read_for = ["prime", "plan", "execute"]
     );
     fs::write(&config_path, config).unwrap();
 
-    let project_root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let project_root = project_root_for_test_namespace(dir);
     let project_hash = manifest_project_namespace(&project_root);
     let memory_dir = state_dir.join(&project_hash).join("memory");
     fs::create_dir_all(&memory_dir).unwrap();
@@ -93,7 +105,7 @@ read_for = ["prime", "plan", "execute"]
     );
     fs::write(&config_path, config).unwrap();
 
-    let project_root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let project_root = project_root_for_test_namespace(dir);
     let project_hash = manifest_project_namespace(&project_root);
     let memory_dir = state_dir.join(&project_hash).join("memory");
     fs::create_dir_all(&memory_dir).unwrap();
@@ -245,7 +257,7 @@ fn write_memory_record(dir: &std::path::Path, id: &str, created_at: &str) {
 fn write_memory_record_with_body(dir: &std::path::Path, id: &str, created_at: &str, body: &str) {
     let pice_dir = dir.join(".pice");
     fs::create_dir_all(&pice_dir).unwrap();
-    let project_root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let project_root = project_root_for_test_namespace(dir);
     let project_hash = manifest_project_namespace(&project_root);
     fs::write(
         pice_dir.join("learnings.md"),
@@ -1235,7 +1247,7 @@ fn private_state_prime_prompt_uses_pice_state_dir_namespace() {
     let state_dir = tempfile::tempdir().unwrap();
     enable_private_memory_with_sentinel(dir.path(), state_dir.path());
 
-    let project_root = dir.path().canonicalize().unwrap();
+    let project_root = project_root_for_test_namespace(dir.path());
     let project_hash = manifest_project_namespace(&project_root);
     assert!(
         state_dir
