@@ -410,6 +410,8 @@ Systematically improves Arch Expert and evaluation prompts. Define metric functi
 
 Lightweight, interpretable learning. After each verification session, append discovered patterns (new anti-patterns, false positive triggers, effective prompt formulations, project-specific gotchas) to `.pice/learnings.md`. Future evaluations condition on this growing library. Transparent, auditable, reversible.
 
+See [AgentMemory Value Assessment for PICE](./agentmemory-value-assessment.md) for adjacent prior art. AgentMemory is useful evidence for token-budgeted recall and durable lessons, but any PICE runtime memory integration must preserve evaluator isolation and keep manifests, contracts, and metrics within their existing source-of-truth boundaries.
+
 ### Pattern 4: Ensemble verification with learned reliability weights
 
 Extend the dual-model approach following Weaver. Track per-model, per-check-type accuracy and confidence calibration. When models disagree, weight their verdicts by learned reliability rather than treating them equally. Over time, route each check type to the model combination that maximizes the check value score.
