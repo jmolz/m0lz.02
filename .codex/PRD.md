@@ -96,7 +96,7 @@ The repo serves dual purpose: it documents the PICE methodology (readable on Git
 3. As a developer adding a feature, I want to run `pice plan "add user auth"` so that an AI agent researches my codebase, creates a detailed plan with a contract, and presents it for my approval.
 4. As a developer with an approved plan, I want to run `pice execute auth-plan.md` so that an AI agent implements the plan in a fresh session with full context from the plan file.
 5. As a developer who just finished implementation, I want to run `pice evaluate auth-plan.md` so that multiple adversarial AI agents from different model families grade my implementation against the contract criteria in parallel — eliminating single-model blind spots.
-11. As a developer, I want to configure which models run evaluation (e.g., Claude Opus for contract grading, GPT-5.5 for design challenge) so that I can choose the evaluation rigor and cost trade-off that fits my needs.
+11. As a developer, I want to configure which models run evaluation (e.g., Claude Opus for contract grading, GPT-5.5 xhigh for design challenge) so that I can choose the evaluation rigor and cost trade-off that fits my needs.
 6. As a developer who wants to ship, I want to run `pice review` so that code review and regression tests run before I commit.
 7. As a developer, I want to run `pice metrics` so that I can see aggregate quality scores, pass rates, and trends across all my PICE loops — proving the methodology works.
 8. As an open-source contributor, I want to build a provider for my preferred AI tool by implementing the JSON-RPC protocol, without needing to understand or modify the Rust core.
@@ -429,8 +429,8 @@ Providers declare their capabilities during `initialize`. This allows the core t
     "workflow": true,          // Can orchestrate coding sessions (plan, execute, etc.)
     "evaluation": true,        // Can run adversarial evaluation
     "agentTeams": true,        // Can spawn parallel sub-agents (Tier 3)
-    "models": ["claude-opus-4-6", "claude-sonnet-4-6"],  // Available models
-    "defaultEvalModel": "claude-opus-4-6"
+    "models": ["claude-opus-4-8", "claude-sonnet-4-6"],  // Available models
+    "defaultEvalModel": "claude-opus-4-8"
   }
 }
 ```
@@ -494,19 +494,19 @@ name = "claude-code"         # Primary provider for workflow orchestration
 
 [evaluation.primary]
 provider = "claude-code"     # Contract evaluator — formal grading
-model = "claude-opus-4-6"   # User-selectable model
+model = "claude-opus-4-8"   # User-selectable model
 
 [evaluation.adversarial]
 provider = "codex"           # Design challenge evaluator — different model family
 model = "gpt-5.5"           # User-selectable model
-effort = "high"              # Reasoning effort: "low", "high", "xhigh"
+effort = "xhigh"              # Reasoning effort: "low", "high", "xhigh"
 enabled = true               # Can be disabled for Tier 1 or cost savings
 
 [evaluation.tiers]
 # Override default tier behavior
-tier1_models = ["claude-opus-4-6"]                     # Single evaluator
-tier2_models = ["claude-opus-4-6", "gpt-5.5"]          # Dual-model
-tier3_models = ["claude-opus-4-6", "gpt-5.5"]          # Dual-model + agent team
+tier1_models = ["claude-opus-4-8"]                     # Single evaluator
+tier2_models = ["claude-opus-4-8", "gpt-5.5"]          # Dual-model
+tier3_models = ["claude-opus-4-8", "gpt-5.5"]          # Dual-model + agent team
 tier3_agent_team = true                                 # Enable 4-agent team for Tier 3
 
 [telemetry]
