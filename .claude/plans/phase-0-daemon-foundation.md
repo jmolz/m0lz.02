@@ -1054,13 +1054,13 @@ See "E2E Validation Steps" above. All 9 steps must pass with behavior identical 
 
 ## Contract
 
-> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 3, `/evaluate` runs a Claude agent team (4 evaluators) + GPT-5.4 adversarial review at xhigh effort in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md.
+> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 3, `/evaluate` runs a Claude agent team (4 evaluators) + GPT-5.5 xhigh adversarial review at xhigh effort in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md.
 
 ### Tier
 
 **3** — Architectural refactor introducing a new long-lived process, a new IPC protocol, and a three-way crate split. This is the single most load-bearing change in v0.2; every subsequent phase depends on it holding.
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 xhigh) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 xhigh) | Use When |
 | ---- | ---------------- | --------------------------------- | -------- |
 | 3    | Claude agent team | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | Architectural changes, new pipeline phases |
 

@@ -281,13 +281,13 @@ Layout: Left-to-right progression with three columns, increasing visual weight.
 **Tier 2 — "New Features" (center, medium):**
 - Two parallel evaluator boxes side by side:
   - "Claude Opus" — AI/LLM color (labeled "Contract Grading")
-  - "GPT-5.4" — different shade/secondary AI color (labeled "Adversarial Review")
+  - "GPT-5.5" — different shade/secondary AI color (labeled "Adversarial Review")
 - A "parallel" indicator (arrows from a single source splitting to both)
 - Visual weight: medium, the parallel nature is the key visual
 
 **Tier 3 — "Architectural" (rightmost, largest):**
 - Claude agent team: 4 small boxes in a cluster labeled "Claude Opus x4"
-- Plus GPT-5.4 box labeled "xhigh effort"
+- Plus GPT-5.5 box labeled "xhigh effort"
 - A "team" visual grouping
 - Visual weight: large, impressive, complex
 
@@ -371,7 +371,7 @@ With:
 ```markdown
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/evaluation-tiers-dark.svg">
-  <img alt="Evaluation tiers: Tier 1 uses single Claude Opus evaluator for minor changes; Tier 2 adds parallel GPT-5.4 adversarial review for new features; Tier 3 uses a Claude Opus agent team of 4 plus high-effort GPT-5.4 review for architectural changes" src="docs/images/evaluation-tiers-light.svg" width="800">
+  <img alt="Evaluation tiers: Tier 1 uses single Claude Opus evaluator for minor changes; Tier 2 adds parallel GPT-5.5 xhigh adversarial review for new features; Tier 3 uses a Claude Opus agent team of 4 plus high-effort GPT-5.5 review for architectural changes" src="docs/images/evaluation-tiers-light.svg" width="800">
 </picture>
 ```
 
@@ -453,13 +453,13 @@ pnpm build
 
 ## Contract
 
-> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.4 adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
+> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.5 xhigh adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
 
 ### Tier
 
 **1** — documentation/visual enhancement, no code changes affecting behavior
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 xhigh) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 1    | 1 pass           | —                                | Bug fixes, simple endpoints, UI tweaks |
 
