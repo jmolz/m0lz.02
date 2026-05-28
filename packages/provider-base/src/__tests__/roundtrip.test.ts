@@ -113,8 +113,8 @@ describe('JSON-RPC roundtrip (matches Rust wire format)', () => {
         workflow: true,
         evaluation: true,
         agentTeams: false,
-        models: ['claude-opus-4-6'],
-        defaultEvalModel: 'claude-opus-4-6',
+        models: ['claude-opus-4-8'],
+        defaultEvalModel: 'claude-opus-4-8',
       },
       version: '0.1.0',
     };
@@ -286,14 +286,14 @@ describe('JSON-RPC roundtrip (matches Rust wire format)', () => {
   it('SessionCreateParams with optional fields', () => {
     const params: SessionCreateParams = {
       workingDirectory: '/tmp',
-      model: 'claude-opus-4-6',
+      model: 'claude-opus-4-8',
       systemPrompt: 'You are a planner.',
     };
     const json = JSON.stringify(params);
     expect(json).toContain('"model"');
     expect(json).toContain('"systemPrompt"');
     const parsed: SessionCreateParams = JSON.parse(json);
-    expect(parsed.model).toBe('claude-opus-4-6');
+    expect(parsed.model).toBe('claude-opus-4-8');
     expect(parsed.systemPrompt).toBe('You are a planner.');
   });
 

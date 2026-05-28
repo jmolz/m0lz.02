@@ -134,7 +134,7 @@ model = "stub-echo"
 [evaluation.adversarial]
 provider = "stub"
 model = "stub-echo"
-effort = "high"
+effort = "xhigh"
 enabled = true
 
 [evaluation.tiers]
@@ -403,7 +403,7 @@ model = "stub-echo"
 [evaluation.adversarial]
 provider = "stub"
 model = "stub-echo"
-effort = "high"
+effort = "xhigh"
 enabled = false
 
 [evaluation.tiers]
@@ -620,7 +620,7 @@ model = "stub-echo"
 [evaluation.adversarial]
 provider = "nonexistent-provider"
 model = "fake-model"
-effort = "high"
+effort = "xhigh"
 enabled = true
 
 [evaluation.tiers]
@@ -829,7 +829,7 @@ model = "stub-echo"
 [evaluation.adversarial]
 provider = "stub"
 model = "stub-echo"
-effort = "high"
+effort = "xhigh"
 enabled = false
 [evaluation.tiers]
 tier1_models = ["stub-echo"]

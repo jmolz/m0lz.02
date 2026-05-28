@@ -329,7 +329,7 @@ If PICE verifies 10 layers and crashes on layer 7, it must not re-verify layers 
       "passes": 3,
       "cost_usd": 0.031,
       "contract_hash": "sha256:def456...",
-      "model_versions": { "claude": "sonnet-4-20250514", "gpt": "gpt-4o-2025-03" },
+      "model_versions": { "claude": "sonnet-4-20250514", "gpt": "gpt-5.5-2026-05" },
       "timestamp": "2026-04-05T14:23:01Z"
     },
     "database": { "status": "pass", "..." : "..." },

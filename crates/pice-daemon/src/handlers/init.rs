@@ -551,7 +551,7 @@ model = "claude-sonnet-4-20250514"
 [evaluation.adversarial]
 provider = "codex"
 model = "o3-mini"
-effort = "high"
+effort = "xhigh"
 enabled = false
 [evaluation.tiers]
 tier1_models = ["claude-sonnet-4-20250514"]

@@ -58,7 +58,7 @@ export class CodexProvider extends BaseProvider<CodexConfig> {
       workflow: true,
       evaluation: true,
       agentTeams: false,
-      models: ['gpt-5.5', 'gpt-4.1'],
+      models: ['gpt-5.5'],
       defaultEvalModel: 'gpt-5.5',
     };
   }

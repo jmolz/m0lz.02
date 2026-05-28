@@ -59,7 +59,7 @@ describe('CodexProvider', () => {
 
   it('runAdversarialEvaluation calls OpenAI with correct format', async () => {
     const { runAdversarialEvaluation } = await import('../evaluator.js');
-    const result = await runAdversarialEvaluation('test prompt', 'gpt-5.5', 'high');
+    const result = await runAdversarialEvaluation('test prompt', 'gpt-5.5', 'xhigh');
 
     expect(result.designChallenges).toHaveLength(1);
     expect(result.designChallenges[0].severity).toBe('consider');
@@ -83,7 +83,7 @@ describe('CodexProvider', () => {
 
     const { runAdversarialEvaluation } = await import('../evaluator.js');
     await expect(
-      runAdversarialEvaluation('prompt', 'gpt-5.5', 'high'),
+      runAdversarialEvaluation('prompt', 'gpt-5.5', 'xhigh'),
     ).rejects.toThrow('Failed to parse adversarial evaluation result');
   });
 

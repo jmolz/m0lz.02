@@ -79,10 +79,10 @@ Initialize the provider and declare capabilities. Always the first message sent.
 
 ```json
 // Request
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"config":{"defaultModel":"claude-opus-4-6"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"config":{"defaultModel":"claude-opus-4-8"}}}
 
 // Response
-{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"workflow":true,"evaluation":true,"agentTeams":false,"models":["claude-opus-4-6","claude-sonnet-4-6"],"defaultEvalModel":"claude-opus-4-6"},"version":"0.1.0"}}
+{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"workflow":true,"evaluation":true,"agentTeams":false,"models":["claude-opus-4-8","claude-sonnet-4-6"],"defaultEvalModel":"claude-opus-4-8"},"version":"0.1.0"}}
 ```
 
 ### `shutdown`
@@ -123,7 +123,7 @@ sessions.
 **Result:** `{ sessionId: string }`
 
 ```json
-{"jsonrpc":"2.0","id":2,"method":"session/create","params":{"workingDirectory":"/home/user/project","model":"claude-opus-4-6"}}
+{"jsonrpc":"2.0","id":2,"method":"session/create","params":{"workingDirectory":"/home/user/project","model":"claude-opus-4-8"}}
 {"jsonrpc":"2.0","id":2,"result":{"sessionId":"claude-session-1"}}
 ```
 

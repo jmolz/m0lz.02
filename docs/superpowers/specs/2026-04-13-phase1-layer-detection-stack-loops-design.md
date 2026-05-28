@@ -338,7 +338,7 @@ Per-layer entries written to `~/.pice/state/{feature-id}.manifest.json`:
       "passes": [
         {
           "index": 1,
-          "model": "claude-opus-4-6",
+          "model": "claude-opus-4-8",
           "score": 8.2,
           "cost_usd": null,
           "timestamp": "2026-04-13T10:23:11Z",

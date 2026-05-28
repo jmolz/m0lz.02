@@ -21,9 +21,9 @@ describe('ClaudeCodeProvider', () => {
     expect(caps.workflow).toBe(true);
     expect(caps.evaluation).toBe(true);
     expect(caps.agentTeams).toBe(true);
-    expect(caps.models).toContain('claude-opus-4-6');
+    expect(caps.models).toContain('claude-opus-4-8');
     expect(caps.models).toContain('claude-sonnet-4-6');
-    expect(caps.defaultEvalModel).toBe('claude-opus-4-6');
+    expect(caps.defaultEvalModel).toBe('claude-opus-4-8');
   });
 
   it('session/create returns a unique session ID', async () => {
@@ -78,7 +78,7 @@ describe('ClaudeCodeProvider', () => {
     expect(mockQuery).toHaveBeenCalledWith(
       expect.objectContaining({
         options: expect.objectContaining({
-          model: 'claude-opus-4-6',
+          model: 'claude-opus-4-8',
           allowedTools: ['Read', 'Glob', 'Grep'],
           persistSession: false,
         }),

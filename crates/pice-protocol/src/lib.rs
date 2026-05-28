@@ -573,8 +573,8 @@ mod tests {
                 workflow: true,
                 evaluation: true,
                 agent_teams: false,
-                models: vec!["claude-opus-4-6".to_string()],
-                default_eval_model: Some("claude-opus-4-6".to_string()),
+                models: vec!["claude-opus-4-8".to_string()],
+                default_eval_model: Some("claude-opus-4-8".to_string()),
                 cost_telemetry: true,
             },
             version: "0.1.0".to_string(),
@@ -618,7 +618,7 @@ mod tests {
             "workflow": true,
             "evaluation": true,
             "agentTeams": false,
-            "models": ["claude-opus-4-6"]
+            "models": ["claude-opus-4-8"]
         }"#;
         let parsed: ProviderCapabilities = serde_json::from_str(json).unwrap();
         assert!(!parsed.cost_telemetry, "legacy provider must default false");
@@ -646,7 +646,7 @@ mod tests {
     fn session_create_with_optional_fields() {
         let params = SessionCreateParams {
             working_directory: "/tmp/project".to_string(),
-            model: Some("claude-opus-4-6".to_string()),
+            model: Some("claude-opus-4-8".to_string()),
             system_prompt: Some("You are a planner.".to_string()),
             layer: None,
             layer_paths: None,
@@ -656,7 +656,7 @@ mod tests {
         assert!(json.contains("\"model\""));
         assert!(json.contains("\"systemPrompt\""));
         let parsed: SessionCreateParams = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.model.unwrap(), "claude-opus-4-6");
+        assert_eq!(parsed.model.unwrap(), "claude-opus-4-8");
         assert_eq!(parsed.system_prompt.unwrap(), "You are a planner.");
     }
 

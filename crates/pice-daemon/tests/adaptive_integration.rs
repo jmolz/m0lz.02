@@ -349,7 +349,7 @@ fn stub_pice_config(adversarial_enabled: bool) -> PiceConfig {
             adversarial: AdversarialConfig {
                 provider: "stub".to_string(),
                 model: "stub-model".to_string(),
-                effort: "high".to_string(),
+                effort: "xhigh".to_string(),
                 enabled: adversarial_enabled,
             },
             tiers: TiersConfig {
