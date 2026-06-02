@@ -156,7 +156,7 @@ Execute in order, top to bottom. Each task is atomic.
 
 | Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 xhigh) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
-| 1    | 1 Opus 4.8 pass  | 1 Codex task                     | Bug fixes, simple endpoints, UI tweaks |
+| 1    | 1 Opus 4.8 xhigh pass  | 1 Codex task                     | Bug fixes, simple endpoints, UI tweaks |
 | 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | New features, integrations, schema changes |
 | 3    | Claude agent team | 1 Codex companion `task --model gpt-5.5 --effort xhigh` | Architectural changes, new pipeline phases |
 

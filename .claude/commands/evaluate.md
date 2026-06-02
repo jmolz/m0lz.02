@@ -117,7 +117,7 @@ Once the ChatGPT Team rate limit lifts, no action is required: the primary Codex
 
 ### Step 3b: Run Claude Evaluator Pass(es)
 
-For each Claude evaluation pass (1 for Tier 1, 1 for Tier 2, 3 for Tier 3 agent team), spawn a **fresh Claude opus 4.8 adaptive sub-agent** (`model: "opus"`) with the following prompt.
+For each Claude evaluation pass (1 for Tier 1, 1 for Tier 2, 3 for Tier 3 agent team), spawn a **fresh Claude opus 4.8 xhigh adaptive sub-agent** (`model: "opus"`) with the following prompt.
 
 ### Evaluator Sub-Agent Prompt
 
