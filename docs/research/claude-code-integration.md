@@ -40,7 +40,7 @@ The `Agent` tool's input schema:
 
 ### Agent Teams (experimental, unstable)
 
-A fundamentally different architecture requiring `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and Opus 4.8+. Each "teammate" is a **separate Claude Code instance** with its own full context window. A team lead spawns teammates, assigns tasks via a shared task list stored at `~/.claude/tasks/{team-name}/`, and teammates communicate through a **file-based mailbox system** (`~/.claude/teams/{teamName}/inboxes/{agentName}.json`) using JSON message queues with file-locking for concurrent safety.
+A fundamentally different architecture requiring `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and Fable 5+. Each "teammate" is a **separate Claude Code instance** with its own full context window. A team lead spawns teammates, assigns tasks via a shared task list stored at `~/.claude/tasks/{team-name}/`, and teammates communicate through a **file-based mailbox system** (`~/.claude/teams/{teamName}/inboxes/{agentName}.json`) using JSON message queues with file-locking for concurrent safety.
 
 Internal tools powering teams: `TeamCreateTool`, `TeammateTool`, `SendMessageTool`, `TaskCreateTool`, `TaskUpdateTool`.
 
@@ -99,7 +99,7 @@ You are a security expert. Focus on OWASP top 10...
 
 ### Key fields for PICE
 
-**`model`** — Supports per-agent model assignment, including full model IDs like `claude-opus-4-8`. Critical for cost optimization: Haiku for simple layer checks ($0.001/pass), Sonnet for implementation review ($0.01/pass), Opus for complex coordination ($0.10/pass).
+**`model`** — Supports per-agent model assignment, including full model IDs like `claude-fable-5`. Critical for cost optimization: Haiku for simple layer checks ($0.001/pass), Sonnet for implementation review ($0.01/pass), Fable for complex coordination ($0.20/pass).
 
 **`tools`** — Restricts what each agent can do. Critical for Stack Loop evaluation agents that should be read-only: `tools: [Read, Grep, Glob]` with no `Write`, `Edit`, or `Bash`. Prevents evaluators from modifying the code they're evaluating.
 
@@ -155,7 +155,7 @@ const q = query({
         description: "Architecture pattern specialist",
         prompt: "You are an architecture expert. Evaluate SOLID principles...",
         tools: ["Read", "Grep", "Glob"],
-        model: "opus"
+        model: "claude-fable-5"
       }
     }
   }

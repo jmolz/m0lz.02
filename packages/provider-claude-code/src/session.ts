@@ -40,7 +40,7 @@ export function createEvalQuery(
   return query({
     prompt,
     options: {
-      model: config.model ?? 'claude-opus-4-8',
+      model: config.model ?? 'claude-fable-5',
       cwd: config.cwd,
       allowedTools: ['Read', 'Glob', 'Grep'],
       permissionMode: 'bypassPermissions',

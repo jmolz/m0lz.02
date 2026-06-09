@@ -27,7 +27,7 @@ See [methodology overview](../methodology/overview.md) for a deeper explanation 
 | Tier | Primary Evaluator | Configured Adversarial | Use When |
 |------|-------------------|--------------------------|----------|
 | 1 | 1 pass | -- | Bug fixes, simple endpoints, UI tweaks |
-| 2 | 1 Opus 4.8 xhigh pass | 1 configured design challenge | New features, integrations, schema changes |
+| 2 | 1 Fable 5 xhigh pass | 1 configured design challenge | New features, integrations, schema changes |
 | 3 | primary evaluator team | 1 configured design challenge | Architectural changes, new pipeline phases |
 
 The configured primary evaluator scores contract criteria formally. The configured adversarial provider challenges whether the approach itself is sound. Different model families have different blind spots, so running both in parallel maximizes coverage.

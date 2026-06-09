@@ -366,7 +366,7 @@ fallback_timeout_seconds = 30  # Time before degrading to next tier
 
 **Model version pinning.** AI model updates can silently change evaluation behavior — Apple's MUSCLE research found that model updates cause "negative flips" where previously correct evaluations become incorrect. PICE addresses this with:
 
-- **Pinned model versions** in `.pice/config.toml`: `claude_model = "claude-sonnet-4-20250514"` rather than `"sonnet"`
+- **Pinned model versions** in `.pice/config.toml`: `claude_model = "claude-fable-5"` rather than `"sonnet"`
 - **Evaluation regression tests**: a `.pice/golden-evaluations/` directory containing known inputs and expected outputs. On model version change, PICE runs the golden suite and warns if results diverge beyond a configurable threshold
 - **Consensus voting**: for critical Tier 3 checks, run evaluation against both the old and new model version. If they disagree, flag for human review before accepting the new version
 
@@ -1041,7 +1041,7 @@ PICE spawns `claude --bare -p` as a subprocess from Rust with `--output-format s
 
 ### Cost control
 
-- **Model tiering.** Haiku for simple checks, Sonnet for implementation, Opus for coordination.
+- **Model tiering.** Haiku for simple checks, Sonnet for implementation, Fable for coordination.
 - **`maxTurns` per subagent.** Caps loop iterations.
 - **ADTS-driven pass allocation.** 70% of evaluations stop at 2 passes. Only 5% reach 5+.
 - **Expert team sizing.** 2–3 specialists, not a swarm. Ensemble theory shows diminishing returns past 3.

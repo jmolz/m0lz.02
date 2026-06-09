@@ -206,7 +206,7 @@ impl Default for PiceConfig {
             evaluation: EvaluationConfig {
                 primary: EvalProviderConfig {
                     provider: "claude-code".to_string(),
-                    model: "claude-opus-4-8".to_string(),
+                    model: "claude-fable-5".to_string(),
                 },
                 adversarial: AdversarialConfig {
                     provider: "codex".to_string(),
@@ -215,9 +215,9 @@ impl Default for PiceConfig {
                     enabled: true,
                 },
                 tiers: TiersConfig {
-                    tier1_models: vec!["claude-opus-4-8".to_string()],
-                    tier2_models: vec!["claude-opus-4-8".to_string(), "gpt-5.5".to_string()],
-                    tier3_models: vec!["claude-opus-4-8".to_string(), "gpt-5.5".to_string()],
+                    tier1_models: vec!["claude-fable-5".to_string()],
+                    tier2_models: vec!["claude-fable-5".to_string(), "gpt-5.5".to_string()],
+                    tier3_models: vec!["claude-fable-5".to_string(), "gpt-5.5".to_string()],
                     tier3_agent_team: true,
                 },
             },
@@ -271,7 +271,7 @@ mod tests {
     fn default_config_has_correct_values() {
         let config = PiceConfig::default();
         assert_eq!(config.provider.name, "claude-code");
-        assert_eq!(config.evaluation.primary.model, "claude-opus-4-8");
+        assert_eq!(config.evaluation.primary.model, "claude-fable-5");
         assert_eq!(config.evaluation.adversarial.model, "gpt-5.5");
         assert!(config.evaluation.adversarial.enabled);
         assert!(!config.telemetry.enabled);
@@ -330,16 +330,16 @@ mod tests {
 name = "claude-code"
 [evaluation.primary]
 provider = "claude-code"
-model = "claude-opus-4-8"
+model = "claude-fable-5"
 [evaluation.adversarial]
 provider = "codex"
 model = "gpt-5.5"
 effort = "xhigh"
 enabled = true
 [evaluation.tiers]
-tier1_models = ["claude-opus-4-8"]
-tier2_models = ["claude-opus-4-8", "gpt-5.5"]
-tier3_models = ["claude-opus-4-8", "gpt-5.5"]
+tier1_models = ["claude-fable-5"]
+tier2_models = ["claude-fable-5", "gpt-5.5"]
+tier3_models = ["claude-fable-5", "gpt-5.5"]
 tier3_agent_team = true
 [telemetry]
 enabled = false
@@ -359,16 +359,16 @@ db_path = ".pice/metrics.db"
 name = "claude-code"
 [evaluation.primary]
 provider = "claude-code"
-model = "claude-opus-4-8"
+model = "claude-fable-5"
 [evaluation.adversarial]
 provider = "codex"
 model = "gpt-5.5"
 effort = "xhigh"
 enabled = true
 [evaluation.tiers]
-tier1_models = ["claude-opus-4-8"]
-tier2_models = ["claude-opus-4-8", "gpt-5.5"]
-tier3_models = ["claude-opus-4-8", "gpt-5.5"]
+tier1_models = ["claude-fable-5"]
+tier2_models = ["claude-fable-5", "gpt-5.5"]
+tier3_models = ["claude-fable-5", "gpt-5.5"]
 tier3_agent_team = true
 [telemetry]
 enabled = false

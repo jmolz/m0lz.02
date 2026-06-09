@@ -35,8 +35,8 @@ export class ClaudeCodeProvider extends BaseProvider<ClaudeCodeConfig> {
       workflow: true,
       evaluation: true,
       agentTeams: true,
-      models: ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
-      defaultEvalModel: 'claude-opus-4-8',
+      models: ['claude-fable-5', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+      defaultEvalModel: 'claude-fable-5',
     };
   }
 

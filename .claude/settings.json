@@ -17,5 +17,8 @@
         ]
       }
     ]
-  }
+  },
+  "fallbackModel": [
+    "claude-fable-5"
+  ]
 }

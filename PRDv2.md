@@ -678,7 +678,7 @@ Aggregation: feature is PASS iff ALL layers PASS and ALL seams clean.
       "passes": [
         {
           "index": 1,
-          "model": "claude-opus-4-8",
+          "model": "claude-fable-5",
           "confidence": 0.88,
           "score": 8.2,
           "cost_usd": 0.04,
@@ -1418,8 +1418,8 @@ The v0.1 provider protocol (`pice-protocol` + `@pice/provider-protocol`) is exte
     "agentTeams": true,
     "layerAware": true,           // v0.2: understands layer-scoped sessions
     "seamChecks": ["schema_match", "openapi_compliance"], // v0.2: supported seam check IDs
-    "models": ["claude-opus-4-8", "claude-sonnet-4-6"],
-    "defaultEvalModel": "claude-opus-4-8"
+    "models": ["claude-fable-5", "claude-sonnet-4-6"],
+    "defaultEvalModel": "claude-fable-5"
   }
 }
 ```

@@ -105,7 +105,7 @@ This file provides guidance to Claude Code when working with this repository.
 
 ## Adversarial Evaluation (Codex Plugin)
 
-This project uses **dual-model adversarial evaluation** through PICE evaluation providers. GPT-5.5 with xhigh reasoning acts as a peer-level adversary to Opus 4.8, challenging design decisions and assumptions from a different model family's perspective.
+This project uses **dual-model adversarial evaluation** through PICE evaluation providers. GPT-5.5 with xhigh reasoning acts as a peer-level adversary to Fable 5, challenging design decisions and assumptions from a different model family's perspective.
 
 - **Config**: `.pice/config.toml` — configure `[evaluation.primary]`, `[evaluation.adversarial]`, and `[evaluation.tiers]`
 - **All tiers**: Run `/evaluate <plan>`; it launches formal contract grading plus a GPT-5.5 xhigh design challenge
