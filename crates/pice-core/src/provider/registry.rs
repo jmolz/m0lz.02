@@ -18,8 +18,20 @@ pub struct ResolvedProvider {
 /// Falls back to the current working directory if the binary location
 /// cannot be determined (e.g., running via `cargo run`).
 fn find_provider_base() -> PathBuf {
+    // Allow an explicit override (robust for installed/relocated binaries).
+    if let Ok(base) = std::env::var("PICE_PROVIDER_BASE") {
+        let p = PathBuf::from(base);
+        if p.join("packages").is_dir() {
+            return p;
+        }
+    }
+
     // Try relative to the binary itself (works for installed binaries)
     if let Ok(exe) = std::env::current_exe() {
+        // Resolve symlinks first — e.g. ~/.local/bin/pice-daemon -> target/release/
+        // pice-daemon — otherwise the walk-up starts in ~/.local/bin and never finds
+        // `packages/`, silently falling back to CWD and spawning a non-existent path.
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
         // exe is at target/debug/pice or target/release/pice or /usr/local/bin/pice
         // Walk up looking for packages/ directory
         let mut dir = exe.parent().map(|p| p.to_path_buf());
@@ -65,6 +77,10 @@ pub fn resolve(name: &str, _config: &PiceConfig) -> Option<ResolvedProvider> {
         "codex" => Some(ResolvedProvider {
             command: "node".to_string(),
             args: vec![provider_path("provider-codex")],
+        }),
+        "local" => Some(ResolvedProvider {
+            command: "node".to_string(),
+            args: vec![provider_path("provider-local")],
         }),
         _ => None,
     }
