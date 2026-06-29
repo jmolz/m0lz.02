@@ -182,7 +182,7 @@ Evaluation models are not hardcoded. Users configure them in `.pice/config.toml`
 ```toml
 [evaluation.primary]
 provider = "claude-code"
-model = "claude-opus-4-6"
+model = "claude-fable-5"
 
 [evaluation.adversarial]
 provider = "codex"
@@ -191,9 +191,9 @@ effort = "xhigh"
 enabled = true
 
 [evaluation.tiers]
-tier1_models = ["claude-opus-4-6"]
-tier2_models = ["claude-opus-4-6", "gpt-5.5"]
-tier3_models = ["claude-opus-4-6", "gpt-5.5"]
+tier1_models = ["claude-fable-5"]
+tier2_models = ["claude-fable-5", "gpt-5.5"]
+tier3_models = ["claude-fable-5", "gpt-5.5"]
 tier3_agent_team = true
 ```
 

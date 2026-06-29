@@ -28,8 +28,8 @@ Print this. Pin it. Tape it to your monitor.
 
 | Tier | Primary Evaluator | Configured Adversarial | Use When |
 |------|-------------------|--------------------------|----------|
-| 1 | 1 pass | — | Bug fixes, simple endpoints, UI tweaks |
-| 2 | 1 pass | 1 configured design challenge | New features, integrations, schema changes |
+| 1 | 1 Fable 5 xhigh pass | 1 Codex task | Bug fixes, simple endpoints, UI tweaks |
+| 2 | 1 Fable 5 xhigh pass | 1 configured design challenge | New features, integrations, schema changes |
 | 3 | primary evaluator team | 1 configured design challenge | Architectural changes, new pipeline phases |
 
 **Dual-model rationale:** The configured primary evaluator scores contract criteria formally. The configured adversarial provider challenges whether the *approach itself* is right — questioning design tradeoffs, assumptions, and alternative approaches. Different model families have different blind spots, so running both in parallel maximizes coverage.

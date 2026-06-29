@@ -275,7 +275,7 @@ Best practice from LLM reliability engineering: implement circuit breakers, time
 Apple's MUSCLE research found that when pretrained LLM base models are updated, fine-tuned adapters experience "negative flips" — previously correct instances become incorrect. Verification prompts tuned for Claude Sonnet 4.5 may produce different results on 4.6.
 
 **Resolution:** Three mechanisms:
-1. Pinned model versions in config (e.g., `claude-sonnet-4-20250514`)
+1. Pinned model versions in config (e.g., `claude-fable-5`)
 2. Golden evaluation regression suite (`.pice/golden-evaluations/`)
 3. Consensus voting across old and new model versions for critical checks
 

@@ -131,7 +131,7 @@ CREATE TABLE pass_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     evaluation_id INTEGER NOT NULL REFERENCES evaluations(id) ON DELETE CASCADE,
     pass_index INTEGER NOT NULL,
-    model TEXT NOT NULL,          -- "stub-echo" | "claude-opus-4-6" | ...
+    model TEXT NOT NULL,          -- "stub-echo" | "claude-opus-4-8" | ...
     score REAL,
     cost_usd REAL,
     timestamp TEXT NOT NULL
@@ -205,7 +205,7 @@ CREATE TABLE pass_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     evaluation_id INTEGER NOT NULL,
     pass_index INTEGER NOT NULL,            -- 1-indexed within the layer's loop
-    model TEXT NOT NULL,                    -- "stub-echo" | "claude-opus-4-7" | ...
+    model TEXT NOT NULL,                    -- "stub-echo" | "claude-opus-4-8" | ...
     score REAL,                             -- nullable: provider may not score
     cost_usd REAL,                          -- nullable: provider may omit cost
     timestamp TEXT NOT NULL,                -- ISO 8601

@@ -117,7 +117,7 @@ Plans suffer the same confirmation bias that `/evaluate` was built to break: whe
 
 ### The Critique Prompt
 
-The same prompt is used by all adversaries — every tier (Tier 1, Tier 2, Tier 3) runs both adversaries in parallel: a fresh Claude opus 4.7 adaptive sub-agent AND a Codex GPT-5.5 xhigh task. It must attack six dimensions:
+The same prompt is used by all adversaries — every tier (Tier 1, Tier 2, Tier 3) runs both adversaries in parallel: a fresh Claude Fable 5 xhigh adaptive sub-agent AND a Codex GPT-5.5 xhigh task. It must attack six dimensions:
 
 ```
 You are reviewing an implementation plan BEFORE code is written. You did NOT write this plan and have no stake in its approval. Your job is to find weaknesses along six dimensions. Be specific. Cite plan sections by heading. Reject generic concerns.
@@ -154,13 +154,13 @@ The adversary receives: the plan file, `CLAUDE.md`, and `git log --oneline -15` 
 
 Run two independent adversaries **in parallel** (not sequentially) for every tier — Tier 1, Tier 2, and Tier 3. Self-critique by the planning agent is no longer sufficient at any tier; bias from the planner is too strong. Tier only changes the Claude sub-agent type and the refinement-cycle ceiling — both adversaries always run.
 
-**Stream A — Fresh Claude opus 4.7 adaptive sub-agent.** Spawn via `Task` tool with `model: "opus"` (Claude opus 4.7 adaptive):
+**Stream A — Fresh Claude Fable 5 xhigh adaptive sub-agent.** Spawn via `Task` tool with `model: "claude-fable-5"` (Claude Fable 5 xhigh adaptive):
 - Tier 1 → `subagent_type: "general-purpose"`
 - Tier 2 → `subagent_type: "general-purpose"`
 - Tier 3 → `subagent_type: "architect"`
 - Pass the critique prompt with plan + CLAUDE.md + git log appended.
 
-**Stream B — Codex GPT-5.5 xhigh task** (runs in background via `Bash` with `run_in_background: true`). Always `--effort xhigh` regardless of tier:
+**Stream B — Codex GPT-5.5 xhigh task** (runs in background via `Bash` with `run_in_background: true`). Always `--model gpt-5.5 --effort xhigh` regardless of tier:
 
 ```bash
 node "$HOME/.codex/plugins/cache/openai-codex/codex/1.0.4/scripts/codex-companion.mjs" \
@@ -213,7 +213,7 @@ Append findings to the plan file under a new `## Adversarial Review` section (th
 ## Adversarial Review
 
 **Tier**: {N}
-**Reviewers**: Claude opus 4.7 adaptive sub-agent + Codex GPT-5.5 xhigh
+**Reviewers**: Claude Fable 5 xhigh adaptive sub-agent + Codex GPT-5.5 xhigh
 **Refinement cycles**: {N}
 **Attack framework**: Karpathy four principles + PoetiQ cross-model verification
 
@@ -248,10 +248,10 @@ This keeps the contract honest: it grades against the plan as challenged, not th
 
 Based on the plan's success criteria and implementation tasks, write a JSON contract block in the plan file's `## Contract` section:
 
-1. **Set the tier** based on scope (determines Claude evaluator passes; the dual Claude opus 4.7 adaptive + GPT-5.5 xhigh adversarial review runs at every tier):
-   - **Tier 1** (1 Claude pass + Claude opus 4.7 adaptive sub-agent + GPT-5.5 xhigh adversarial review): Bug fixes, simple endpoints, UI tweaks
-   - **Tier 2** (1 Claude pass + Claude opus 4.7 adaptive sub-agent + GPT-5.5 xhigh adversarial review): New features touching multiple domains, integrations, schema changes
-   - **Tier 3** (Claude agent team + Claude opus 4.7 adaptive architect sub-agent + GPT-5.5 xhigh adversarial review): New pipeline phases, agent types, architectural changes
+1. **Set the tier** based on scope (determines Claude evaluator passes; the dual Claude Fable 5 xhigh adaptive + GPT-5.5 xhigh adversarial review runs at every tier):
+   - **Tier 1** (1 Claude pass + Claude Fable 5 xhigh adaptive sub-agent + GPT-5.5 xhigh adversarial review): Bug fixes, simple endpoints, UI tweaks
+   - **Tier 2** (1 Claude pass + Claude Fable 5 xhigh adaptive sub-agent + GPT-5.5 xhigh adversarial review): New features touching multiple domains, integrations, schema changes
+   - **Tier 3** (Claude agent team + Claude Fable 5 xhigh adaptive architect sub-agent + GPT-5.5 xhigh adversarial review): New pipeline phases, agent types, architectural changes
 
 2. **Write criteria** — each must be:
    - Independently testable (no "works well" or "looks good")

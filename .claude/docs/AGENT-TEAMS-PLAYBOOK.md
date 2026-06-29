@@ -19,7 +19,7 @@ Prompts for orchestrating multi-agent parallel work in Claude Code. Each prompt 
 
 ### Dual-Model Adversarial Review (Tier 2)
 
-Use for Tier 2 contracts — new features, integrations, schema changes. Runs a Claude evaluator and a GPT-5.5 adversarial review in parallel for cross-model coverage.
+Use for Tier 2 contracts — new features, integrations, schema changes. Runs a Claude evaluator and a GPT-5.5 xhigh adversarial review in parallel for cross-model coverage.
 
 ```
 We just finished implementing [FEATURE]. The contract is in [PLAN PATH].
@@ -39,13 +39,13 @@ Step 3: Collect the Codex task result
 
 Step 4: Synthesize both into a single evaluation report:
 - Contract Evaluation (Claude): {N}/{total} criteria passed (list each with score)
-- Design Challenge (GPT-5.5): Critical / Consider / Acknowledged findings
+- Design Challenge (GPT-5.5 xhigh): Critical / Consider / Acknowledged findings
 - Overall: PASS / FAIL
 ```
 
 ### Contract-Based Adversarial Review (Tier 3)
 
-Use this for Tier 3 contracts — architectural changes, new pipeline phases, or complex features where maximum evaluation rigor is needed. Spawns separate Claude evaluators that challenge the implementation from different angles, **plus** a parallel GPT-5.5 adversarial review for cross-model coverage.
+Use this for Tier 3 contracts — architectural changes, new pipeline phases, or complex features where maximum evaluation rigor is needed. Spawns separate Claude evaluators that challenge the implementation from different angles, **plus** a parallel GPT-5.5 xhigh adversarial review for cross-model coverage.
 
 ```
 We just finished implementing [FEATURE]. The contract is in [PLAN PATH].

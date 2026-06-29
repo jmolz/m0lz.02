@@ -553,7 +553,7 @@ See E2E Validation Steps above.
 
 **3** — architectural change across pice-core, pice-daemon, pice-cli, and templates.
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 xhigh) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 1    | 1 pass           | —                                | Bug fixes, simple endpoints, UI tweaks |
 | 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh`    | New features, integrations, schema changes |

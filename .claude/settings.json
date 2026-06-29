@@ -1,4 +1,9 @@
 {
+  "model": "opus",
+  "effortLevel": "xhigh",
+  "env": {
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-8"
+  },
   "hooks": {
     "SessionStart": [
       {
@@ -12,5 +17,8 @@
         ]
       }
     ]
-  }
+  },
+  "fallbackModel": [
+    "claude-fable-5"
+  ]
 }

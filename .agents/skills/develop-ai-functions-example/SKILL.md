@@ -204,7 +204,7 @@ The `tools/` directory contains reusable tool definitions:
 import { weatherTool } from '../tools/weather-tool';
 
 const result = await generateText({
-  model: openai('gpt-4o'),
+  model: openai('gpt-5.5'),
   tools: { weather: weatherTool },
   prompt: 'What is the weather in San Francisco?',
 });

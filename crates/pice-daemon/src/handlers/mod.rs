@@ -139,7 +139,7 @@ model = "fake"
 [evaluation.adversarial]
 provider = "nonexistent-provider"
 model = "fake"
-effort = "high"
+effort = "xhigh"
 enabled = false
 [evaluation.tiers]
 tier1_models = ["fake"]
@@ -295,7 +295,7 @@ model = "fake"
 [evaluation.adversarial]
 provider = "nonexistent-provider"
 model = "fake"
-effort = "high"
+effort = "xhigh"
 enabled = false
 [evaluation.tiers]
 tier1_models = ["fake"]
@@ -458,7 +458,7 @@ model = "fake"
 [evaluation.adversarial]
 provider = "nonexistent-provider"
 model = "fake"
-effort = "high"
+effort = "xhigh"
 enabled = false
 [evaluation.tiers]
 tier1_models = ["fake"]

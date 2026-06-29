@@ -333,7 +333,7 @@ CREATE TABLE evaluations (
     layer       TEXT NOT NULL,       -- 'backend', 'infrastructure', etc.
     check_id    TEXT NOT NULL,       -- Specific check identifier
     check_type  TEXT NOT NULL,       -- 'layer', 'seam', 'expert'
-    model       TEXT NOT NULL,       -- 'haiku', 'sonnet', 'opus', 'gpt-4o'
+    model       TEXT NOT NULL,       -- 'haiku', 'sonnet', 'opus', 'gpt-5.5'
     verdict     TEXT NOT NULL,       -- 'pass', 'fail', 'inconclusive'
     confidence  REAL NOT NULL,       -- 0.0–1.0 posterior probability
     tokens_in   INTEGER NOT NULL,

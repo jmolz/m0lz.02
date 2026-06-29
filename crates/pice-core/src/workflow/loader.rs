@@ -294,7 +294,7 @@ phases:
                 tier: 3,
                 min_confidence: 0.95,
                 max_passes: 7,
-                model: "opus".into(),
+                model: "claude-fable-5".into(),
                 budget_usd: 3.0,
                 cost_cap_behavior: CostCapBehavior::Warn,
                 max_parallelism: Some(4),

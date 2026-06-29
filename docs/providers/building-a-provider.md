@@ -358,7 +358,7 @@ For evaluation providers:
 [evaluation.adversarial]
 provider = "myai"
 model = "myai-large"
-effort = "high"
+effort = "xhigh"
 enabled = true
 ```
 

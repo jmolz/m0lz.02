@@ -547,16 +547,16 @@ name = "claude-code"
 [evaluation]
 [evaluation.primary]
 provider = "claude-code"
-model = "claude-sonnet-4-20250514"
+model = "claude-fable-5"
 [evaluation.adversarial]
 provider = "codex"
 model = "o3-mini"
-effort = "high"
+effort = "xhigh"
 enabled = false
 [evaluation.tiers]
-tier1_models = ["claude-sonnet-4-20250514"]
-tier2_models = ["claude-sonnet-4-20250514"]
-tier3_models = ["claude-sonnet-4-20250514"]
+tier1_models = ["claude-fable-5"]
+tier2_models = ["claude-fable-5"]
+tier3_models = ["claude-fable-5"]
 tier3_agent_team = false
 [telemetry]
 enabled = false

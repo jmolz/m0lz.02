@@ -568,7 +568,7 @@ mod tests {
             status: LayerStatus::Passed,
             passes: vec![PassResult {
                 index: 0,
-                model: "claude-sonnet-4-20250514".to_string(),
+                model: "claude-fable-5".to_string(),
                 score: Some(0.92),
                 cost_usd: Some(0.003),
                 timestamp: "2026-04-13T10:00:00Z".to_string(),

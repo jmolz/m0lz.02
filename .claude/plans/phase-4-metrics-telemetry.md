@@ -689,13 +689,13 @@ cargo fmt --check && cargo clippy -- -D warnings && cargo test && pnpm lint && p
 
 ## Contract
 
-> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.4 adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
+> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.5 xhigh adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
 
 ### Tier
 
 **2** — determines evaluation depth and model coverage:
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 xhigh) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 1    | 1 pass           | —                                | Bug fixes, simple endpoints, UI tweaks |
 | 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh`    | New features, integrations, schema changes |

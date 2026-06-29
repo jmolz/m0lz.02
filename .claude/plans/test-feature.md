@@ -224,7 +224,7 @@ pnpm lint && pnpm typecheck && pnpm test
 
 **1** — determines evaluation depth and model coverage:
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-4.1 high) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 xhigh) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 1    | 1 pass           | —                                | Bug fixes, simple endpoints, UI tweaks, documentation artifacts |
 | 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh`    | New features, integrations, schema changes |

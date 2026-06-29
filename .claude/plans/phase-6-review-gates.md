@@ -796,7 +796,7 @@ cargo build --release && pnpm build
 ## Adversarial Review
 
 **Tier**: 3
-**Reviewers**: Claude sub-agent (architect) + Codex GPT-5.4 xhigh
+**Reviewers**: Claude sub-agent (architect) + Codex GPT-5.5 xhigh
 **Refinement cycles**: 2 (skill limit reached)
 **Attack framework**: Karpathy four principles + PoetiQ cross-model verification
 

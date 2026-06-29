@@ -81,8 +81,8 @@ v0.2 extends the provider protocol without breaking v0.1 providers. All addition
     "evaluation": true,
     "agentTeams": true,
     "costTelemetry": true,
-    "models": ["claude-opus-4-6", "claude-sonnet-4-6"],
-    "defaultEvalModel": "claude-opus-4-6"
+    "models": ["claude-opus-4-8", "claude-sonnet-4-6"],
+    "defaultEvalModel": "claude-opus-4-8"
   }
 }
 ```

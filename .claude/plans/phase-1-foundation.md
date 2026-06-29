@@ -323,7 +323,7 @@ packages:
 
 **Files:** `crates/pice-cli/src/config/mod.rs`
 **Action:** CREATE
-**Description:** Read and write `.pice/config.toml`. Define `PiceConfig` struct matching the PRD's config format (provider section, evaluation section with primary/adversarial/tiers, telemetry section, metrics section). Include `PiceConfig::load(path)`, `PiceConfig::save(path)`, `PiceConfig::default()`. The default config uses `claude-code` provider, evaluation with `claude-opus-4-6` primary and `gpt-5.4` adversarial, telemetry disabled.
+**Description:** Read and write `.pice/config.toml`. Define `PiceConfig` struct matching the PRD's config format (provider section, evaluation section with primary/adversarial/tiers, telemetry section, metrics section). Include `PiceConfig::load(path)`, `PiceConfig::save(path)`, `PiceConfig::default()`. The default config uses `claude-code` provider, evaluation with `claude-opus-4-8` primary and `gpt-5.5` adversarial, telemetry disabled.
 **Depends on:** Task 1
 **Validate:** `cargo test -p pice-cli -- config` — roundtrip test passes
 
@@ -476,13 +476,13 @@ pnpm build
 
 ## Contract
 
-> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.4 adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
+> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.5 xhigh adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
 
 ### Tier
 
 **2** — New feature touching multiple domains (Rust + TypeScript, IPC protocol, template engine, CLI framework). Warrants dual-model evaluation.
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 xhigh) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh`    | New features, integrations, schema changes |
 

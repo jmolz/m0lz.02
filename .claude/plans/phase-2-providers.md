@@ -148,7 +148,7 @@ import { query, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/cla
 const q = query({
   prompt: "Create a detailed implementation plan for: add user authentication",
   options: {
-    model: "claude-opus-4-6",
+    model: "claude-opus-4-8",
     cwd: "/path/to/project",
     allowedTools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash"],
     permissionMode: "bypassPermissions",
@@ -202,7 +202,7 @@ const client = new OpenAI();  // Reads OPENAI_API_KEY from env
 
 // Adversarial evaluation with reasoning effort
 const response = await client.responses.create({
-  model: 'gpt-5.4',
+  model: 'gpt-5.5',
   reasoning: { effort: 'high' },  // or 'xhigh' for Tier 3
   input: [{ role: 'user', content: adversarialPrompt }],
 });
@@ -227,7 +227,7 @@ const EvalSchema = z.object({
 });
 
 const completion = await client.chat.completions.parse({
-  model: 'gpt-5.4',
+  model: 'gpt-5.5',
   messages: [
     { role: 'system', content: 'You are an adversarial code evaluator...' },
     { role: 'user', content: evaluationPrompt },
@@ -751,7 +751,7 @@ export function createEvalQuery(
   return query({
     prompt,
     options: {
-      model: config.model ?? 'claude-opus-4-6',
+      model: config.model ?? 'claude-opus-4-8',
       cwd: config.cwd,
       allowedTools: ['Read', 'Glob', 'Grep'],  // Read-only for evaluation
       permissionMode: 'bypassPermissions',
@@ -804,8 +804,8 @@ export class ClaudeCodeProvider extends BaseProvider<ClaudeCodeConfig> {
       workflow: true,
       evaluation: true,
       agentTeams: true,  // SDK supports native subagents
-      models: ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
-      defaultEvalModel: 'claude-opus-4-6',
+      models: ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+      defaultEvalModel: 'claude-opus-4-8',
     };
   }
 
@@ -1605,13 +1605,13 @@ cargo run -- evaluate .claude/plans/health-check.md  # Should run dual-model
 
 ## Contract
 
-> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.4 adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
+> This contract defines testable success criteria. It is negotiated during `/plan-feature` and graded by `/evaluate` after implementation. For Tier 2+, `/evaluate` runs both a Claude evaluator (formal contract grading) and a GPT-5.5 xhigh adversarial review (design challenge) in parallel. Both evaluators see ONLY this contract, the code diff, and CLAUDE.md — not the planning conversation.
 
 ### Tier
 
 **3** — New pipeline phases (plan/execute/evaluate), parallel provider orchestration, two new provider packages, engine module. This is architectural.
 
-| Tier | Claude Evaluator | Codex Adversarial (GPT-5.4 high) | Use When |
+| Tier | Claude Evaluator | Codex Adversarial (GPT-5.5 xhigh) | Use When |
 | ---- | ---------------- | -------------------------------- | -------- |
 | 1    | 1 pass           | —                                | Bug fixes, simple endpoints, UI tweaks |
 | 2    | 1 pass           | 1 Codex companion `task --model gpt-5.5 --effort xhigh`    | New features, integrations, schema changes |
